@@ -112,7 +112,7 @@ class ResearchRun(IdMixin, UpdatedAtMixin, Base):
             "uq_research_runs_one_global_active",
             text("((1))"),
             unique=True,
-            postgresql_where=text("status IN ('QUEUED', 'RUNNING')"),
+            postgresql_where=text("status = 'RUNNING'"),
         ),
         Index(
             "uq_research_runs_revision_active",

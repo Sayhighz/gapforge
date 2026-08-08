@@ -498,7 +498,7 @@ def upgrade() -> None:
         "research_runs",
         [sa.literal_column("((1))")],
         unique=True,
-        postgresql_where=sa.text("status IN ('QUEUED', 'RUNNING')"),
+        postgresql_where=sa.text("status = 'RUNNING'"),
     )
     op.create_index(
         "uq_research_runs_revision_active",
@@ -1121,7 +1121,7 @@ def downgrade() -> None:
     op.drop_index(
         "uq_research_runs_one_global_active",
         table_name="research_runs",
-        postgresql_where=sa.text("status IN ('QUEUED', 'RUNNING')"),
+        postgresql_where=sa.text("status = 'RUNNING'"),
     )
     op.drop_index("ix_research_runs_status_priority", table_name="research_runs")
     op.drop_table("research_runs")

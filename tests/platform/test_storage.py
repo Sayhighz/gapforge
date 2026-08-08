@@ -48,9 +48,12 @@ async def test_mission_revisions_are_immutable_and_linked(migrated_postgres_url:
 
 
 @pytest.mark.postgres
-async def test_one_global_active_run_is_database_enforced(migrated_postgres_url: str) -> None:
+async def test_multiple_queued_runs_but_only_one_running_are_allowed(
+    migrated_postgres_url: str,
+) -> None:
     database = Database.from_url(migrated_postgres_url)
     first_run_id = None
+    second_run_id = None
     try:
         async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
             _, revision_a = await uow.missions.create_with_revision(
@@ -82,17 +85,23 @@ async def test_one_global_active_run_is_database_enforced(migrated_postgres_url:
             first_run_id = first_run.id
 
         async with database.session() as session:
-            session.add(
-                ResearchRun(
-                    mission_revision_id=revision_b.id,
-                    mode="HUNT",
-                    status="QUEUED",
-                    priority=1,
-                    deadline_at=datetime.now(UTC) + timedelta(minutes=30),
-                    budget_limits={"max_agent_calls_per_run": 6},
-                    budget_used={"agent_calls": 0},
-                )
+            second_run = ResearchRun(
+                mission_revision_id=revision_b.id,
+                mode="HUNT",
+                status="QUEUED",
+                priority=1,
+                deadline_at=datetime.now(UTC) + timedelta(minutes=30),
+                budget_limits={"max_agent_calls_per_run": 6},
+                budget_used={"agent_calls": 0},
             )
+            session.add(second_run)
+            await session.commit()
+            second_run_id = second_run.id
+
+        async with database.session() as session:
+            second_run = await session.get(ResearchRun, second_run_id)
+            assert second_run is not None
+            second_run.status = "RUNNING"
             with pytest.raises(IntegrityError):
                 await session.commit()
     finally:
@@ -101,6 +110,13 @@ async def test_one_global_active_run_is_database_enforced(migrated_postgres_url:
                 run = await session.get(ResearchRun, first_run_id)
                 assert run is not None
                 run.status = "COMPLETED"
+                run.completed_at = datetime.now(UTC)
+                await session.commit()
+        if second_run_id is not None:
+            async with database.session() as session:
+                run = await session.get(ResearchRun, second_run_id)
+                assert run is not None
+                run.status = "CANCELLED"
                 run.completed_at = datetime.now(UTC)
                 await session.commit()
         await database.dispose()
