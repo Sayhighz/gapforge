@@ -30,6 +30,11 @@ This is the first file to read after interruption. It records only reviewed/push
 | Lane A | `agent/platform-foundation` | pending | not started | — |
 | Lane B | `agent/research-engine` | pending | not started | — |
 
+GitHub issues:
+
+- Lane A: #2 — platform, persistence, Codex provider, and operations.
+- Lane B: #3 — collectors, evidence pipeline, scoring, critic, and reports.
+
 ## Current checkpoint
 
 Completed:
@@ -37,17 +42,17 @@ Completed:
 - Empty GitHub repository bootstrapped on `main`.
 - Canonical requirements and separate non-conflicting lane checklists merged through PR #1.
 - Integration branch created from reviewed specification.
+- Lane issues #2 and #3 created.
 
 In progress:
 
-- Create lane issues/worktrees and dispatch both developer agents.
+- Create isolated worktrees and dispatch both developer agents.
 
 Exact next action:
 
-1. Create one GitHub issue per lane.
-2. Create isolated worktrees from `integration/v0.1`.
-3. Dispatch the two developer agents using their lane checklist as complete context.
-4. Record branch, issue, PR, and last pushed commit after each developer checkpoint.
+1. Create isolated worktrees from `integration/v0.1`.
+2. Dispatch the two developer agents using their lane checklist as complete context.
+3. Record branch, issue, PR, and last pushed commit after each developer checkpoint.
 
 ## Recovery rules
 
