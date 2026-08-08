@@ -1,8 +1,11 @@
 # Lane A Checklist — Platform, Persistence, Provider, Operations
 
-Branch: `agent/platform-foundation`  
-PR target: `integration/v0.1`  
-Owner: Platform developer agent  
+Branch: `agent/platform-foundation`
+
+PR target: `integration/v0.1`
+
+Owner: Platform developer agent
+
 Last checkpoint: not started
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
@@ -115,7 +118,8 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: not started.  
-Last pushed commit: none.  
-Next action: A1 project foundation.
+Current state: not started.
 
+Last pushed commit: none.
+
+Next action: A1 project foundation.

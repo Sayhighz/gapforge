@@ -26,4 +26,3 @@ Never commit `.env`, Codex auth data, source credentials, database dumps, genera
 ## Review policy
 
 The integration lead reviews architecture, correctness, tests, migrations, security, and specification compliance. Critical and important findings must be fixed before merge. Developers never approve or merge their own PRs.
-

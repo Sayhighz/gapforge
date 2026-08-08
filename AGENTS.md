@@ -49,4 +49,3 @@ If code, a PR description, or an issue conflicts with the specification, stop an
 - Open a draft PR early and keep its checklist current.
 - Never merge your own PR. The integration lead reviews and merges it.
 - Keep commits scoped and descriptive. Do not force-push after review begins unless requested.
-

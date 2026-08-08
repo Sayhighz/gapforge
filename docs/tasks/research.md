@@ -1,8 +1,11 @@
 # Lane B Checklist — Research Engine, Sources, Analysis, Reports
 
-Branch: `agent/research-engine`  
-PR target: `integration/v0.1`  
-Owner: Research developer agent  
+Branch: `agent/research-engine`
+
+PR target: `integration/v0.1`
+
+Owner: Research developer agent
+
 Last checkpoint: not started
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
@@ -121,7 +124,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: not started.  
-Last pushed commit: none.  
-Next action: B1 domain contracts.
+Current state: not started.
 
+Last pushed commit: none.
+
+Next action: B1 domain contracts.

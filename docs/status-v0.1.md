@@ -1,7 +1,9 @@
 # GapForge v0.1 Delivery Status
 
-Updated: 2026-08-09  
-Owner: integration lead  
+Updated: 2026-08-09
+
+Owner: integration lead
+
 Canonical spec: `docs/spec-v0.1.md`
 
 This is the first file to read after interruption. It records only reviewed/pushed state. Do not claim completion from an uncommitted worktree.

@@ -1,9 +1,13 @@
 # GapForge v0.1 Execution Specification
 
-Status: approved for implementation  
-Target: private, single-user deployment  
-Primary interactive interface: Codex CLI or Claude Code in this repository  
-Primary background reasoner: Codex CLI  
+Status: approved for implementation
+
+Target: private, single-user deployment
+
+Primary interactive interface: Codex CLI or Claude Code in this repository
+
+Primary background reasoner: Codex CLI
+
 Progress owner: integration lead
 
 This is both the canonical product contract and the master acceptance checklist. Developers update only their lane checklist under `docs/tasks/`; the integration lead marks this master list after reviewing commits, tests, and PRs.
@@ -379,4 +383,3 @@ Live smoke commands exist for credential-free HN and credential-gated GitHub, Re
 ## 23. Change control
 
 Material changes require a dedicated spec PR explaining domain, migration, security, compatibility, and release impact. Implementation PRs must not silently alter this contract.
-
