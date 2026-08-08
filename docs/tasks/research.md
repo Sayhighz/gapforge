@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: not started
+Last checkpoint: B1-B2 pushed in `4a9ca79`; B3 collectors next
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -30,20 +30,20 @@ Do not modify `pyproject.toml`. Use dependencies mandated by the spec and list a
 
 ## B1 — Domain contracts
 
-- [ ] Define Pydantic contracts for missions/revisions and queries.
-- [ ] Define raw/pain signals, clusters, claims, Evidence Cards, hypotheses, competitors, gaps, opportunities, scores, critic results, and source/provider results.
-- [ ] Add schema versioning, strict enums, bounded strings/lists, and serialization tests.
-- [ ] Keep contracts storage-neutral.
+- [x] Define Pydantic contracts for missions/revisions and queries.
+- [x] Define raw/pain signals, clusters, claims, Evidence Cards, hypotheses, competitors, gaps, opportunities, scores, critic results, and source/provider results.
+- [x] Add schema versioning, strict enums, bounded strings/lists, and serialization tests.
+- [x] Keep contracts storage-neutral.
 
 Acceptance: contracts reject malformed/unbounded agent and source data predictably.
 
 ## B2 — Query planning
 
-- [ ] Implement semantic `QueryIntent` schemas and deterministic source compilers.
-- [ ] Enforce eight broad, four targeted, and two-round caps.
-- [ ] Add behavior patterns, negative filters, query deduplication, and yield ranking.
-- [ ] Implement 365-day time-stratified sampling and 24-hour monitor overlap.
-- [ ] Test cap bypass attempts and low-yield reprioritization.
+- [x] Implement semantic `QueryIntent` schemas and deterministic source compilers.
+- [x] Enforce eight broad, four targeted, and two-round caps.
+- [x] Add behavior patterns, negative filters, query deduplication, and yield ranking.
+- [x] Implement 365-day time-stratified sampling and 24-hour monitor overlap.
+- [x] Test cap bypass attempts and low-yield reprioritization.
 
 Acceptance: model output cannot directly produce unlimited network calls.
 
@@ -124,8 +124,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: not started.
+Current state: B1 and B2 complete; collector implementation is next.
 
-Last pushed commit: none.
+Last pushed commit: `4a9ca79` (`add research contracts and query planning`).
 
-Next action: B1 domain contracts.
+Next action: implement B3 common collector budgets and HN/GitHub/Reddit clients with fake transports.
