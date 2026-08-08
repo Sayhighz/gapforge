@@ -23,7 +23,7 @@ This is the first file to read after interruption. It records only reviewed/push
 
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
-| Specification | `agent/spec-v0.1` | pending | writing | pending |
+| Specification | `agent/spec-v0.1` | #1 | under review | `7db34d0` |
 | Integration | `integration/v0.1` | — | not created | — |
 | Lane A | `agent/platform-foundation` | pending | not started | — |
 | Lane B | `agent/research-engine` | pending | not started | — |
@@ -37,15 +37,14 @@ Completed:
 
 In progress:
 
-- Validate and publish the specification PR.
+- Review and merge specification PR #1.
 
 Exact next action:
 
-1. Review documentation diff.
-2. Commit and push `agent/spec-v0.1`.
-3. Open draft PR against `main`, review it, then merge.
-4. Create `integration/v0.1` and both worktrees from merged `main`.
-5. Dispatch the two developer agents using their lane checklist as the complete task context.
+1. Review PR #1 against the agreed decisions and ownership boundaries.
+2. Merge PR #1 into `main` if no blocking issue remains.
+3. Create `integration/v0.1` and both worktrees from merged `main`.
+4. Dispatch the two developer agents using their lane checklist as the complete task context.
 
 ## Recovery rules
 
@@ -53,4 +52,3 @@ Exact next action:
 - A checked item in a lane file must name or be contained in a pushed commit.
 - If status and Git disagree, update this file in a dedicated checkpoint commit before continuing.
 - The integration lead alone marks the master checklist after reviewing implementation evidence.
-
