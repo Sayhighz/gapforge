@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A2 persistence pushed in `0f55541`; A3 queue/run control is next.
+Last checkpoint: A3 durable queue/run control pushed in `eac8bfd`; A4 providers are next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -58,11 +58,11 @@ Acceptance: a fresh PostgreSQL database migrates without manual SQL and can pers
 
 ## A3 — Durable queue and run control
 
-- [ ] Implement research task leases using `FOR UPDATE SKIP LOCKED`.
-- [ ] Implement idempotency keys, checkpoints, retry metadata, and lease expiry.
-- [ ] Enforce one global active run and two-call in-run semaphore.
-- [ ] Implement deterministic retry/error classification and run statuses.
-- [ ] Test crash reclaim, duplicate suppression, deadline, and partial completion.
+- [x] Implement research task leases using `FOR UPDATE SKIP LOCKED`.
+- [x] Implement idempotency keys, checkpoints, retry metadata, and lease expiry.
+- [x] Enforce one global active run and two-call in-run semaphore.
+- [x] Implement deterministic retry/error classification and run statuses.
+- [x] Test crash reclaim, duplicate suppression, deadline, and partial completion.
 
 Acceptance: a killed worker resumes from committed state without duplicating effects.
 
@@ -118,8 +118,8 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: A1-A2 complete; A3 in progress.
+Current state: A1-A3 complete; A4 in progress.
 
-Last pushed commit: `0f55541` (`add persistent lineage schema`).
+Last pushed commit: `eac8bfd` (`add durable queue and run control`).
 
-Next action: implement durable task leasing, persisted budgets, and run control for A3.
+Next action: implement provider contracts and the constrained Codex CLI provider for A4.
