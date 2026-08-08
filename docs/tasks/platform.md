@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A3 durable queue/run control pushed in `eac8bfd`; A4 providers are next.
+Last checkpoint: A4 constrained providers pushed in `eaa9e66`; A5 CLI/health is next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -68,13 +68,13 @@ Acceptance: a killed worker resumes from committed state without duplicating eff
 
 ## A4 — Agent providers
 
-- [ ] Define stable `AgentProvider`, request, result, usage, and error contracts.
-- [ ] Implement deterministic `FakeAgentProvider`.
-- [ ] Implement real `CodexCliProvider` using subprocess argument arrays.
-- [ ] Enforce timeout, process-group termination, temporary workspace, environment allowlist, JSONL/output schema, and output bounds.
-- [ ] Disable shell, agents, MCP/plugins, writes, user/project configuration, and rules.
-- [ ] Detect Codex binary/version/auth and return `AUTH_REQUIRED` without retrying.
-- [ ] Test command injection resistance, secret exclusion, parsing, timeout, and one repair attempt.
+- [x] Define stable `AgentProvider`, request, result, usage, and error contracts.
+- [x] Implement deterministic `FakeAgentProvider`.
+- [x] Implement real `CodexCliProvider` using subprocess argument arrays.
+- [x] Enforce timeout, process-group termination, temporary workspace, environment allowlist, JSONL/output schema, and output bounds.
+- [x] Disable shell, agents, MCP/plugins, writes, user/project configuration, and rules.
+- [x] Detect Codex binary/version/auth and return `AUTH_REQUIRED` without retrying.
+- [x] Test command injection resistance, secret exclusion, parsing, timeout, and one repair attempt.
 
 Acceptance: untrusted prompt text cannot alter process arguments or inherit application secrets.
 
@@ -118,8 +118,8 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: A1-A3 complete; A4 in progress.
+Current state: A1-A4 complete; A5 in progress.
 
-Last pushed commit: `eac8bfd` (`add durable queue and run control`).
+Last pushed commit: `eaa9e66` (`add constrained Codex provider`).
 
-Next action: implement provider contracts and the constrained Codex CLI provider for A4.
+Next action: implement the complete Typer CLI, health checks, and read-only SQL safeguards for A5.
