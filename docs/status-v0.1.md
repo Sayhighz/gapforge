@@ -26,7 +26,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `98914f9` |
+| Integration | `integration/v0.1` | #4 | active draft | `d68ce49` |
 | Lane A | `agent/platform-foundation` | pending | implementing | `889ac37` |
 | Lane B | `agent/research-engine` | pending | implementing | `889ac37` |
 
@@ -45,6 +45,7 @@ Completed:
 - Lane issues #2 and #3 created.
 - Two isolated worktrees created and both developer agents dispatched.
 - Draft integration PR #4 opened against `main`.
+- Reference repository architecture/license review recorded in `docs/reference-review-v0.1.md`.
 
 In progress:
 
