@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: B2-B4 pushed through `9021ed2`; B1 audit and B5 next
+Last checkpoint: B1-B5 pushed through `a8a5670`; B6 evidence next
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -30,11 +30,10 @@ Do not modify `pyproject.toml`. Use dependencies mandated by the spec and list a
 
 ## B1 — Domain contracts
 
-- [ ] Define Pydantic contracts for missions/revisions and queries.
-- [ ] Define raw/pain signals, clusters, claims, Evidence Cards, hypotheses, competitors, gaps, opportunities, scores, critic results, and source/provider results.
-- [ ] Add schema versioning, strict enums, bounded strings/lists, and serialization tests.
-- [ ] Keep contracts storage-neutral.
-  Progress: Core contracts and query planning are pushed in `4a9ca79`; the full required-entity/provider audit remains before B1 is complete.
+- [x] Define Pydantic contracts for missions/revisions and queries.
+- [x] Define raw/pain signals, clusters, claims, Evidence Cards, hypotheses, competitors, gaps, opportunities, scores, critic results, and source/provider results.
+- [x] Add schema versioning, strict enums, bounded strings/lists, and serialization tests.
+- [x] Keep contracts storage-neutral.
 
 Acceptance: contracts reject malformed/unbounded agent and source data predictably.
 
@@ -71,12 +70,12 @@ Acceptance: only approved public results can be fetched and analyzed.
 
 ## B5 — Normalization, deduplication, identity, clustering
 
-- [ ] Normalize URLs/text and hash exact content.
-- [ ] Implement MinHash near-duplicate detection and FTS/`pg_trgm` candidate contract.
-- [ ] Implement author HMAC contract and unknown/bot handling.
-- [ ] Implement cluster/opportunity thresholds, dormant state, and reversible merge candidates.
-- [ ] Ensure semantic auto-merge and embeddings are absent.
-- [ ] Test viral-thread, repeat-author, and duplicate-score inflation cases.
+- [x] Normalize URLs/text and hash exact content.
+- [x] Implement MinHash near-duplicate detection and FTS/`pg_trgm` candidate contract.
+- [x] Implement author HMAC contract and unknown/bot handling.
+- [x] Implement cluster/opportunity thresholds, dormant state, and reversible merge candidates.
+- [x] Ensure semantic auto-merge and embeddings are absent.
+- [x] Test viral-thread, repeat-author, and duplicate-score inflation cases.
 
 Acceptance: duplicate or dependent observations cannot fake independent demand.
 
@@ -125,8 +124,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: B2-B4 complete; B1 awaits the full required-entity audit.
+Current state: B1-B5 complete.
 
-Last pushed commit: `9021ed2` (`add secure search and static fetch`).
+Last pushed commit: `a8a5670` (`add evidence normalization and clustering gates`).
 
-Next action: complete the B1 contract audit and implement B5 normalization, identity, deduplication, and clustering gates.
+Next action: implement B6 deterministic Evidence Cards, claim/citation allowlists, contradiction support, and repair requests.
