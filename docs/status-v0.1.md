@@ -11,8 +11,8 @@ This is the first file to read after interruption. It records only reviewed/push
 ## Overall
 
 - [x] Architecture grilling and major decisions complete.
-- [ ] Specification PR reviewed and merged to `main`.
-- [ ] `integration/v0.1` baseline created.
+- [x] Specification PR reviewed and merged to `main`.
+- [x] `integration/v0.1` baseline created.
 - [ ] Lane A developer dispatched.
 - [ ] Lane B developer dispatched.
 - [ ] Lane A PR reviewed and merged to integration.
@@ -25,8 +25,8 @@ This is the first file to read after interruption. It records only reviewed/push
 
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
-| Specification | `agent/spec-v0.1` | #1 | under review | `7db34d0` |
-| Integration | `integration/v0.1` | — | not created | — |
+| Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
+| Integration | `integration/v0.1` | — | active | `8a0a775` |
 | Lane A | `agent/platform-foundation` | pending | not started | — |
 | Lane B | `agent/research-engine` | pending | not started | — |
 
@@ -35,18 +35,19 @@ This is the first file to read after interruption. It records only reviewed/push
 Completed:
 
 - Empty GitHub repository bootstrapped on `main`.
-- Canonical requirements and separate non-conflicting lane checklists drafted.
+- Canonical requirements and separate non-conflicting lane checklists merged through PR #1.
+- Integration branch created from reviewed specification.
 
 In progress:
 
-- Review and merge specification PR #1.
+- Create lane issues/worktrees and dispatch both developer agents.
 
 Exact next action:
 
-1. Review PR #1 against the agreed decisions and ownership boundaries.
-2. Merge PR #1 into `main` if no blocking issue remains.
-3. Create `integration/v0.1` and both worktrees from merged `main`.
-4. Dispatch the two developer agents using their lane checklist as the complete task context.
+1. Create one GitHub issue per lane.
+2. Create isolated worktrees from `integration/v0.1`.
+3. Dispatch the two developer agents using their lane checklist as complete context.
+4. Record branch, issue, PR, and last pushed commit after each developer checkpoint.
 
 ## Recovery rules
 
