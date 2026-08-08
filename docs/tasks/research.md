@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: B1-B7 pushed through `1e56cc6`; B8 reports and skill next
+Last checkpoint: B1-B8 pushed through `93897cc`; B9 audit and handoff next
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -105,12 +105,12 @@ Acceptance: no score, single source, viral thread, or critic prose can bypass ha
 
 ## B8 — Reports and repository skill
 
-- [ ] Implement deterministic run and opportunity Markdown renderers.
-- [ ] Render only validated claims; preserve originals and label translations.
-- [ ] Implement canonical `.agents/skills/business-gap/` instructions and references.
-- [ ] Add compatible Claude discovery without duplicating canonical content where practical.
-- [ ] Ensure skills query stored intelligence first and require explicit MONITOR activation.
-- [ ] Test report determinism and skill command examples.
+- [x] Implement deterministic run and opportunity Markdown renderers.
+- [x] Render only validated claims; preserve originals and label translations.
+- [x] Implement canonical `.agents/skills/business-gap/` instructions and references.
+- [x] Add compatible Claude discovery without duplicating canonical content where practical.
+- [x] Ensure skills query stored intelligence first and require explicit MONITOR activation.
+- [x] Test report determinism and skill command examples.
 
 Acceptance: Codex and Claude can use CLI JSON without knowing database internals.
 
@@ -124,8 +124,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: B1-B7 complete.
+Current state: B1-B8 complete.
 
-Last pushed commit: `1e56cc6` (`add evidence scoring and critic gates`).
+Last pushed commit: `93897cc` (`remove generated report bytecode`) after `c916f01` (`add deterministic reports and repository skill`).
 
-Next action: implement B8 deterministic Markdown reports and canonical repository skill with Claude discovery.
+Next action: re-read the canonical specification, audit every owned deliverable, run all checks, update the draft PR, and complete B9 handoff.
