@@ -60,8 +60,13 @@ def test_secret_values_excludes_missing_credentials() -> None:
         _env_file=None,
         database_url="postgresql+asyncpg://user:db-secret@localhost/gapforge",
         github_token="github-secret",
+        author_hmac_key="hmac-secret",
     )
 
     assert settings.secret_values() == frozenset(
-        {"postgresql+asyncpg://user:db-secret@localhost/gapforge", "github-secret"}
+        {
+            "postgresql+asyncpg://user:db-secret@localhost/gapforge",
+            "github-secret",
+            "hmac-secret",
+        }
     )

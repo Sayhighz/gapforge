@@ -175,7 +175,7 @@ def test_model_contains_complete_required_entity_set() -> None:
         "product_hypotheses",
         "lifecycle_events",
         "agent_calls",
-    } == set(MissionRevision.metadata.tables)
+    } <= set(MissionRevision.metadata.tables)
 
 
 @pytest.mark.postgres

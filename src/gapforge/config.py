@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     reddit_client_id: SecretStr | None = None
     reddit_client_secret: SecretStr | None = None
     brave_api_key: SecretStr | None = None
+    author_hmac_key: SecretStr | None = None
 
     log_level: str = "INFO"
     log_json: bool = True
@@ -94,6 +95,7 @@ class Settings(BaseSettings):
             self.reddit_client_id,
             self.reddit_client_secret,
             self.brave_api_key,
+            self.author_hmac_key,
         ):
             if value is not None and value.get_secret_value():
                 values.add(value.get_secret_value())

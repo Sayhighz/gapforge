@@ -4,6 +4,7 @@ import asyncio
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from gapforge.storage.database import Database
@@ -32,7 +33,7 @@ def test_clean_upgrade_has_every_model_table(postgres_url: str) -> None:
 
     tables, revision = asyncio.run(_inspect_database(postgres_url))
     assert set(Base.metadata.tables) <= tables
-    assert revision == "369e6194e3cb"
+    assert revision == ScriptDirectory.from_config(config).get_current_head()
 
 
 def test_migration_round_trip(postgres_url: str) -> None:

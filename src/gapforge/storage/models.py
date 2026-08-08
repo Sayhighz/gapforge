@@ -179,6 +179,21 @@ class ResearchTask(IdMixin, UpdatedAtMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ProviderCallLease(IdMixin, UpdatedAtMixin, Base):
+    __tablename__ = "provider_call_leases"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_key"),
+        Index("ix_provider_call_leases_run_expiry", "run_id", "lease_expires_at"),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("research_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    call_key: Mapped[str] = mapped_column(String(240), nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String(160), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SourceCheckpoint(IdMixin, UpdatedAtMixin, Base):
     __tablename__ = "source_checkpoints"
     __table_args__ = (
