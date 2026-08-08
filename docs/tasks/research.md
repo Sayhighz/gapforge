@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: B1-B5 pushed through `a8a5670`; B6 evidence next
+Last checkpoint: B1-B7 pushed through `1e56cc6`; B8 reports and skill next
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -81,25 +81,25 @@ Acceptance: duplicate or dependent observations cannot fake independent demand.
 
 ## B6 — Evidence and claims
 
-- [ ] Define pain extraction schemas without fabricated context.
-- [ ] Build deterministic Evidence Cards and independence metrics.
-- [ ] Implement atomic claim/citation validation and contradiction support.
-- [ ] Require captured URL/excerpt/time for price and feature claims.
-- [ ] Implement invalid-output repair request structure with a single-attempt marker.
-- [ ] Test invented evidence IDs, URLs, claims, and missing cards.
+- [x] Define pain extraction schemas without fabricated context.
+- [x] Build deterministic Evidence Cards and independence metrics.
+- [x] Implement atomic claim/citation validation and contradiction support.
+- [x] Require captured URL/excerpt/time for price and feature claims.
+- [x] Implement invalid-output repair request structure with a single-attempt marker.
+- [x] Test invented evidence IDs, URLs, claims, and missing cards.
 
 Acceptance: every `SUPPORTED` claim points to permitted evidence.
 
 ## B7 — Hypotheses, scoring, and critic
 
-- [ ] Implement falsifiable problem hypothesis checks.
-- [ ] Model software and non-software alternatives and gap evidence requirements.
-- [ ] Implement EvidenceStrength and OpportunityFit components.
-- [ ] Implement geometric mean, penalties, algorithm version, and snapshot explanation.
-- [ ] Implement all `VALIDATE` hard gates.
-- [ ] Build blind critic input and exact verdict output schema.
-- [ ] Implement research-more intent derivation, lifecycle transitions, reopen triggers/cooldown, and trend gates.
-- [ ] Test high-score gate failures and critic blindness.
+- [x] Implement falsifiable problem hypothesis checks.
+- [x] Model software and non-software alternatives and gap evidence requirements.
+- [x] Implement EvidenceStrength and OpportunityFit components.
+- [x] Implement geometric mean, penalties, algorithm version, and snapshot explanation.
+- [x] Implement all `VALIDATE` hard gates.
+- [x] Build blind critic input and exact verdict output schema.
+- [x] Implement research-more intent derivation, lifecycle transitions, reopen triggers/cooldown, and trend gates.
+- [x] Test high-score gate failures and critic blindness.
 
 Acceptance: no score, single source, viral thread, or critic prose can bypass hard evidence requirements.
 
@@ -124,8 +124,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: B1-B5 complete.
+Current state: B1-B7 complete.
 
-Last pushed commit: `a8a5670` (`add evidence normalization and clustering gates`).
+Last pushed commit: `1e56cc6` (`add evidence scoring and critic gates`).
 
-Next action: implement B6 deterministic Evidence Cards, claim/citation allowlists, contradiction support, and repair requests.
+Next action: implement B8 deterministic Markdown reports and canonical repository skill with Claude discovery.
