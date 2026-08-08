@@ -44,7 +44,9 @@ async def collect_isolated(
 ) -> tuple[CollectResult, ...]:
     """Run collectors independently so one unexpected failure cannot erase peer results."""
 
-    async def safe_collect(source: Source, collector: Collector, request: CollectRequest) -> CollectResult:
+    async def safe_collect(
+        source: Source, collector: Collector, request: CollectRequest
+    ) -> CollectResult:
         try:
             return await collector.collect(request)
         except Exception as exc:  # boundary isolates third-party client defects
@@ -96,31 +98,51 @@ async def bounded_get_json(
     for attempt in range(attempts):
         budget.consume()
         try:
-            response = await client.get(url, params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
+            response = await client.get(
+                url, params=params, headers=headers, timeout=DEFAULT_TIMEOUT
+            )
             if response.status_code in {429, 500, 502, 503, 504}:
-                raise httpx.HTTPStatusError("transient source response", request=response.request, response=response)
+                raise httpx.HTTPStatusError(
+                    "transient source response",
+                    request=response.request,
+                    response=response,
+                )
             response.raise_for_status()
             if len(response.content) > MAX_RESPONSE_BYTES:
                 raise CollectorResponseError("source response exceeded byte limit")
             return response.json()
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as exc:
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.HTTPStatusError,
+        ) as exc:
             last_error = exc
-            retryable = not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code in {
+            retryable = not isinstance(
+                exc, httpx.HTTPStatusError
+            ) or exc.response.status_code in {
                 429,
                 500,
                 502,
                 503,
                 504,
             }
-            if not retryable or attempt + 1 >= attempts or budget.used >= budget.maximum:
+            if (
+                not retryable
+                or attempt + 1 >= attempts
+                or budget.used >= budget.maximum
+            ):
                 break
             await sleeper(0.05 * (2**attempt))
         except (ValueError, UnicodeDecodeError) as exc:
             raise CollectorResponseError("source returned invalid JSON") from exc
-    raise CollectorResponseError(f"source request failed: {type(last_error).__name__}") from last_error
+    raise CollectorResponseError(
+        f"source request failed: {type(last_error).__name__}"
+    ) from last_error
 
 
-def cap_thread_items(items: Sequence[CollectedItem], maximum: int) -> tuple[CollectedItem, ...]:
+def cap_thread_items(
+    items: Sequence[CollectedItem], maximum: int
+) -> tuple[CollectedItem, ...]:
     """Retain a parent plus at most 20 comments and annotate diminishing comment weight."""
     grouped: dict[str, list[CollectedItem]] = {}
     for item in items:
@@ -142,9 +164,15 @@ def cap_thread_items(items: Sequence[CollectedItem], maximum: int) -> tuple[Coll
         for item in ordered:
             if len(accepted) >= maximum:
                 return tuple(accepted)
-            comment_number = comments.index(item) + 1 if item.parent_thread_id is not None else 0
+            comment_number = (
+                comments.index(item) + 1 if item.parent_thread_id is not None else 0
+            )
             weight = 1.0 if comment_number <= 5 else round(5 / comment_number, 4)
-            accepted.append(item.model_copy(update={"metadata": {**item.metadata, "thread_weight": weight}}))
+            accepted.append(
+                item.model_copy(
+                    update={"metadata": {**item.metadata, "thread_weight": weight}}
+                )
+            )
     return tuple(accepted)
 
 

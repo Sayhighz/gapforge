@@ -44,7 +44,9 @@ def independence_metrics(observations: tuple[Observation, ...]) -> IndependenceM
         unique_known_authors=len({item.author_id for item in values if item.author_id}),
         independent_threads=len({item.thread_id for item in values}),
         independent_signals=len(values),
-        has_specific_behavior_or_spend=any(item.behavioral_specificity >= 0.8 or item.explicit_spend for item in values),
+        has_specific_behavior_or_spend=any(
+            item.behavioral_specificity >= 0.8 or item.explicit_spend for item in values
+        ),
     )
 
 
@@ -70,7 +72,9 @@ def cluster_state(last_growth_at: datetime, now: datetime) -> str:
     return "DORMANT" if now - last_growth_at >= timedelta(days=90) else "ACTIVE"
 
 
-def apply_merge_decision(candidate: MergeCandidate, decision: MergeDecision) -> MergeCandidate:
+def apply_merge_decision(
+    candidate: MergeCandidate, decision: MergeDecision
+) -> MergeCandidate:
     if decision.candidate_id != candidate.id:
         raise ValueError("decision does not match merge candidate")
     transitions = {

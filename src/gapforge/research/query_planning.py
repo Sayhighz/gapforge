@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
 
-from gapforge.domain.contracts import QueryIntent, QueryIntentKind, QueryPlan, RunMode, Source
+from gapforge.domain.contracts import (
+    QueryIntent,
+    QueryIntentKind,
+    QueryPlan,
+    RunMode,
+    Source,
+)
 
 BEHAVIOR_PATTERNS = (
     '"workaround"',
@@ -96,15 +102,25 @@ def compile_plan(plan: QueryPlan) -> tuple[CompiledQuery, ...]:
             ):
                 compiled[key] = candidate
     return tuple(
-        sorted(compiled.values(), key=lambda item: (-item.priority, item.intent_id, item.source.value))
+        sorted(
+            compiled.values(),
+            key=lambda item: (-item.priority, item.intent_id, item.source.value),
+        )
     )
 
 
-def stratified_windows(until: datetime, lookback_days: int = 365) -> tuple[TimeWindow, ...]:
+def stratified_windows(
+    until: datetime, lookback_days: int = 365
+) -> tuple[TimeWindow, ...]:
     """Return the required four initial-HUNT strata, clipped for emerging missions."""
     if not 1 <= lookback_days <= 365:
         raise ValueError("lookback_days must be between 1 and 365")
-    bands = (("0-30", 0, 30, 0.35), ("31-90", 30, 90, 0.25), ("91-180", 90, 180, 0.20), ("181-365", 180, 365, 0.20))
+    bands = (
+        ("0-30", 0, 30, 0.35),
+        ("31-90", 30, 90, 0.25),
+        ("91-180", 90, 180, 0.20),
+        ("181-365", 180, 365, 0.20),
+    )
     windows = []
     for label, recent, old, allocation in bands:
         if recent >= lookback_days:
@@ -119,7 +135,8 @@ def stratified_windows(until: datetime, lookback_days: int = 365) -> tuple[TimeW
         )
     total = sum(item.allocation for item in windows)
     return tuple(
-        TimeWindow(item.label, item.since, item.until, item.allocation / total) for item in windows
+        TimeWindow(item.label, item.since, item.until, item.allocation / total)
+        for item in windows
     )
 
 

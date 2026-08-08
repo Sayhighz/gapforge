@@ -46,7 +46,10 @@ def _shingles(value: str, width: int = 3) -> set[str]:
     words = normalize_text(value).split()
     if len(words) < width:
         return {" ".join(words)} if words else set()
-    return {" ".join(words[index : index + width]) for index in range(len(words) - width + 1)}
+    return {
+        " ".join(words[index : index + width])
+        for index in range(len(words) - width + 1)
+    }
 
 
 def minhash_signature(value: str, permutations: int = 64) -> tuple[int, ...]:
@@ -57,7 +60,12 @@ def minhash_signature(value: str, permutations: int = 64) -> tuple[int, ...]:
         return tuple(0 for _ in range(permutations))
     return tuple(
         min(
-            int.from_bytes(hashlib.blake2b(shingle.encode(), digest_size=8, person=index.to_bytes(8, "big")).digest(), "big")
+            int.from_bytes(
+                hashlib.blake2b(
+                    shingle.encode(), digest_size=8, person=index.to_bytes(8, "big")
+                ).digest(),
+                "big",
+            )
             for shingle in shingles
         )
         for index in range(permutations)
@@ -72,6 +80,7 @@ def minhash_similarity(left: tuple[int, ...], right: tuple[int, ...]) -> float:
 
 def lexical_candidate_query(value: str) -> LexicalCandidateQuery:
     normalized = normalize_text(value)[:2_000]
-    terms = tuple(sorted(set(normalized.split()), key=lambda term: (-len(term), term))[:20])
+    terms = tuple(
+        sorted(set(normalized.split()), key=lambda term: (-len(term), term))[:20]
+    )
     return LexicalCandidateQuery(normalized_text=normalized, terms=terms)
-

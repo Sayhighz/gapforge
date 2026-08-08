@@ -2,7 +2,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from gapforge.domain.contracts import QueryIntent, QueryIntentKind, QueryPlan, RunMode, Source
+from gapforge.domain.contracts import (
+    QueryIntent,
+    QueryIntentKind,
+    QueryPlan,
+    RunMode,
+    Source,
+)
 from gapforge.research.query_planning import (
     allocate_signal_budget,
     collection_windows,
@@ -16,9 +22,13 @@ NOW = datetime(2026, 8, 9, tzinfo=UTC)
 
 def make_intent(identifier: str, *, prior_yield: float | None = None) -> QueryIntent:
     return QueryIntent(
-        id=identifier, kind=QueryIntentKind.BROAD, concept='billing "pain"\n',
-        audience="freelancers", negatives=("job posting",),
-        sources=(Source.GITHUB, Source.HACKER_NEWS), rationale="manual billing",
+        id=identifier,
+        kind=QueryIntentKind.BROAD,
+        concept='billing "pain"\n',
+        audience="freelancers",
+        negatives=("job posting",),
+        sources=(Source.GITHUB, Source.HACKER_NEWS),
+        rationale="manual billing",
         prior_yield=prior_yield,
     )
 
@@ -33,7 +43,10 @@ def test_compiler_adds_behavior_negatives_and_source_syntax() -> None:
 
 
 def test_compilation_deduplicates_and_low_yield_loses_priority() -> None:
-    plan = QueryPlan(round_number=1, intents=(make_intent("high", prior_yield=1), make_intent("low", prior_yield=0)))
+    plan = QueryPlan(
+        round_number=1,
+        intents=(make_intent("high", prior_yield=1), make_intent("low", prior_yield=0)),
+    )
     compiled = compile_plan(plan)
     assert len(compiled) == 2
     assert {item.intent_id for item in compiled} == {"high"}
@@ -44,7 +57,9 @@ def test_time_stratification_and_monitor_overlap() -> None:
     assert [item.allocation for item in windows] == [0.35, 0.25, 0.2, 0.2]
     assert windows[0].since == NOW - timedelta(days=30)
     assert windows[-1].since == NOW - timedelta(days=365)
-    monitor = collection_windows(RunMode.MONITOR, NOW, last_successful_watermark=NOW - timedelta(hours=48))
+    monitor = collection_windows(
+        RunMode.MONITOR, NOW, last_successful_watermark=NOW - timedelta(hours=48)
+    )
     assert monitor[0].since == NOW - timedelta(hours=72)
     assert monitor[0].allocation == 1
 
@@ -62,6 +77,8 @@ def test_source_budget_is_fair_and_capped() -> None:
     assert budget == {Source.GITHUB: 100, Source.HACKER_NEWS: 100, Source.REDDIT: 100}
     two_sources = allocate_signal_budget((Source.HACKER_NEWS, Source.GITHUB))
     assert max(two_sources.values()) <= 150
-    tiny = allocate_signal_budget((Source.HACKER_NEWS, Source.GITHUB, Source.REDDIT), total=2)
+    tiny = allocate_signal_budget(
+        (Source.HACKER_NEWS, Source.GITHUB, Source.REDDIT), total=2
+    )
     assert sum(tiny.values()) == 2
     assert all(value > 0 for value in tiny.values())

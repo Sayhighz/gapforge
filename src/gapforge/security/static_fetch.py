@@ -13,7 +13,12 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 from pydantic import HttpUrl
 
-from gapforge.domain.contracts import Availability, FetchResult, FetchSnapshot, SourceWarning
+from gapforge.domain.contracts import (
+    Availability,
+    FetchResult,
+    FetchSnapshot,
+    SourceWarning,
+)
 from gapforge.search.brave import ApprovedUrlRegistry
 
 Resolver = Callable[[str], Awaitable[tuple[str, ...]]]
@@ -72,7 +77,10 @@ class _VisibleTextParser(HTMLParser):
             self._hidden_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "noscript", "template", "svg"} and self._hidden_depth:
+        if (
+            tag.lower() in {"script", "style", "noscript", "template", "svg"}
+            and self._hidden_depth
+        ):
             self._hidden_depth -= 1
 
     def handle_data(self, data: str) -> None:
@@ -93,13 +101,19 @@ class StaticFetcher:
         max_bytes: int = 1_000_000,
         timeout_seconds: float = 10.0,
     ) -> None:
-        if not 0 <= max_redirects <= 5 or not 1 <= max_bytes <= 2_000_000 or not 0 < timeout_seconds <= 30:
+        if (
+            not 0 <= max_redirects <= 5
+            or not 1 <= max_bytes <= 2_000_000
+            or not 0 < timeout_seconds <= 30
+        ):
             raise ValueError("fetch limits exceed safe bounds")
         self._client = client
         self._resolver = resolver
         self._max_redirects = max_redirects
         self._max_bytes = max_bytes
-        self._timeout = httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds))
+        self._timeout = httpx.Timeout(
+            timeout_seconds, connect=min(5.0, timeout_seconds)
+        )
 
     async def fetch(self, url: str, registry: ApprovedUrlRegistry) -> FetchResult:
         try:
@@ -121,7 +135,9 @@ class StaticFetcher:
             assert response is not None
             try:
                 response.raise_for_status()
-                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                content_type = (
+                    response.headers.get("content-type", "").split(";", 1)[0].lower()
+                )
                 if content_type not in ALLOWED_CONTENT_TYPES:
                     raise ContentUnavailableError("unsupported content type")
                 body = await self._bounded_body(response)
@@ -132,7 +148,9 @@ class StaticFetcher:
                     text = parser.text()
                 text = " ".join(text.split())
                 if not text:
-                    raise ContentUnavailableError("page contains no visible static text")
+                    raise ContentUnavailableError(
+                        "page contains no visible static text"
+                    )
                 return FetchResult(
                     availability=Availability.AVAILABLE,
                     snapshot=FetchSnapshot(
@@ -146,14 +164,21 @@ class StaticFetcher:
                 )
             finally:
                 await response.aclose()
-        except (UnsafeUrlError, ContentUnavailableError, httpx.HTTPError, ValueError) as exc:
+        except (
+            UnsafeUrlError,
+            ContentUnavailableError,
+            httpx.HTTPError,
+            ValueError,
+        ) as exc:
             return FetchResult(
                 availability=Availability.CONTENT_UNAVAILABLE,
                 warnings=(
                     SourceWarning(
                         code="CONTENT_UNAVAILABLE",
                         message=f"static fetch unavailable: {type(exc).__name__}",
-                        retryable=isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)),
+                        retryable=isinstance(
+                            exc, (httpx.TimeoutException, httpx.NetworkError)
+                        ),
                     ),
                 ),
             )
@@ -167,12 +192,18 @@ class StaticFetcher:
         parsed = urlsplit(url)
         display_address = f"[{address}]" if ":" in address else address
         netloc = display_address + (f":{port}" if port else "")
-        pinned_url = urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))
+        pinned_url = urlunsplit(
+            (parsed.scheme, netloc, parsed.path or "/", parsed.query, "")
+        )
         host_header = hostname + (f":{port}" if port else "")
         request = self._client.build_request(
             "GET",
             pinned_url,
-            headers={"Host": host_header, "Accept": "text/html,text/plain", "User-Agent": "GapForge/0.1"},
+            headers={
+                "Host": host_header,
+                "Accept": "text/html,text/plain",
+                "User-Agent": "GapForge/0.1",
+            },
             timeout=self._timeout,
         )
         request.extensions["sni_hostname"] = hostname.encode("idna")

@@ -14,6 +14,7 @@ class TrendObservation:
     author_id: str | None
     thread_id: str
     observed_at: datetime
+    duplicate_group: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,14 +36,51 @@ def classify_trend(
 ) -> TrendResult:
     if current_examined_volume < 0 or previous_examined_volume < 0:
         raise ValueError("examined source volume cannot be negative")
-    current_start, previous_start = as_of - timedelta(days=7), as_of - timedelta(days=35)
-    current = tuple(item for item in observations if current_start <= item.observed_at < as_of)
-    previous = tuple(item for item in observations if previous_start <= item.observed_at < current_start)
+    current_start, previous_start = (
+        as_of - timedelta(days=7),
+        as_of - timedelta(days=35),
+    )
+
+    def independent(
+        values: tuple[TrendObservation, ...],
+    ) -> tuple[TrendObservation, ...]:
+        selected: dict[str, TrendObservation] = {}
+        for item in sorted(
+            values,
+            key=lambda value: (
+                value.duplicate_group or value.signal_id,
+                value.author_id is None,
+                value.author_id or "",
+                value.thread_id,
+                value.signal_id,
+            ),
+        ):
+            selected.setdefault(item.duplicate_group or item.signal_id, item)
+        return tuple(selected.values())
+
+    current = independent(
+        tuple(
+            item for item in observations if current_start <= item.observed_at < as_of
+        )
+    )
+    previous = independent(
+        tuple(
+            item
+            for item in observations
+            if previous_start <= item.observed_at < current_start
+        )
+    )
     authors = len({item.author_id for item in current if item.author_id})
     threads = len({item.thread_id for item in current})
     current_rate = (len(current) + 1) / (current_examined_volume + 2)
     previous_rate = (len(previous) + 1) / (previous_examined_volume + 2)
-    sufficient = len(current) >= 5 and authors >= 3 and threads >= 2 and current_examined_volume > 0 and previous_examined_volume > 0
+    sufficient = (
+        len(current) >= 5
+        and authors >= 3
+        and threads >= 2
+        and current_examined_volume > 0
+        and previous_examined_volume > 0
+    )
     if not sufficient:
         label = TrendLabel.INSUFFICIENT_DATA
     elif current_rate >= previous_rate * 1.5:
@@ -51,7 +89,9 @@ def classify_trend(
         label = TrendLabel.FALLING
     else:
         label = TrendLabel.FLAT
-    return TrendResult(label, len(current), authors, threads, current_rate, previous_rate)
+    return TrendResult(
+        label, len(current), authors, threads, current_rate, previous_rate
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,13 +132,25 @@ def transition_lifecycle(
 ) -> LifecycleState:
     allowed = {
         LifecycleState.DISCOVERED: {LifecycleState.RESEARCHING},
-        LifecycleState.RESEARCHING: {LifecycleState.RESEARCH_MORE, LifecycleState.VALIDATE, LifecycleState.REJECTED},
-        LifecycleState.RESEARCH_MORE: {LifecycleState.RESEARCHING, LifecycleState.VALIDATE, LifecycleState.REJECTED},
-        LifecycleState.REJECTED: {LifecycleState.RESEARCH_MORE} if reopen_allowed else set(),
+        LifecycleState.RESEARCHING: {
+            LifecycleState.RESEARCH_MORE,
+            LifecycleState.VALIDATE,
+            LifecycleState.REJECTED,
+        },
+        LifecycleState.RESEARCH_MORE: {
+            LifecycleState.RESEARCHING,
+            LifecycleState.VALIDATE,
+            LifecycleState.REJECTED,
+        },
+        LifecycleState.REJECTED: {LifecycleState.RESEARCH_MORE}
+        if reopen_allowed
+        else set(),
         LifecycleState.VALIDATE: set(),
     }
     if target is LifecycleState.VALIDATE and not validation_passed:
         raise ValueError("VALIDATE transition requires all validation gates")
     if target not in allowed[current]:
-        raise ValueError(f"invalid lifecycle transition {current.value}->{target.value}")
+        raise ValueError(
+            f"invalid lifecycle transition {current.value}->{target.value}"
+        )
     return target

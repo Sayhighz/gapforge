@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 import httpx
 from pydantic import HttpUrl
 
-from gapforge.collectors.base import CollectorResponseError, RequestBudget, bounded_get_json
+from gapforge.collectors.base import (
+    CollectorResponseError,
+    RequestBudget,
+    bounded_get_json,
+)
 from gapforge.domain.contracts import (
     Availability,
     ClaimKind,
@@ -21,14 +25,20 @@ from gapforge.domain.contracts import (
 class ApprovedUrlRegistry:
     """Exact normalized URL allowlist built only from search or explicit user input."""
 
-    def __init__(self, search_results: tuple[SearchResult, ...], explicit_urls: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        search_results: tuple[SearchResult, ...],
+        explicit_urls: tuple[str, ...] = (),
+    ) -> None:
         self._urls = {str(result.url) for result in search_results}
         self._urls.update(str(HttpUrl(url)) for url in explicit_urls)
 
     def require_approved(self, url: str) -> str:
         normalized = str(HttpUrl(url))
         if normalized not in self._urls:
-            raise ValueError("URL was not supplied by search results or explicit user input")
+            raise ValueError(
+                "URL was not supplied by search results or explicit user input"
+            )
         return normalized
 
 
@@ -44,7 +54,9 @@ class BraveSearchProvider:
         self._client = client
         self._api_key = api_key
 
-    async def search(self, query: str, *, max_results: int = 10, max_requests: int = 1) -> SearchResponse:
+    async def search(
+        self, query: str, *, max_results: int = 10, max_requests: int = 1
+    ) -> SearchResponse:
         clean_query = " ".join(query.split())
         if not clean_query or len(clean_query) > 500:
             raise ValueError("search query must contain 1-500 characters")
@@ -70,7 +82,10 @@ class BraveSearchProvider:
                 self.endpoint,
                 budget=budget,
                 params={"q": clean_query, "count": max_results},
-                headers={"Accept": "application/json", "X-Subscription-Token": self._api_key},
+                headers={
+                    "Accept": "application/json",
+                    "X-Subscription-Token": self._api_key,
+                },
             )
             web = payload.get("web") if isinstance(payload, dict) else None
             raw_results = web.get("results") if isinstance(web, dict) else None
@@ -79,11 +94,17 @@ class BraveSearchProvider:
             observed_at = datetime.now(UTC)
             results: list[SearchResult] = []
             for raw in raw_results[:max_results]:
-                if not isinstance(raw, dict) or not raw.get("url") or not raw.get("title"):
+                if (
+                    not isinstance(raw, dict)
+                    or not raw.get("url")
+                    or not raw.get("title")
+                ):
                     continue
                 try:
                     normalized_url = HttpUrl(str(raw["url"]))
-                    result_id = hashlib.sha256(str(normalized_url).encode()).hexdigest()[:24]
+                    result_id = hashlib.sha256(
+                        str(normalized_url).encode()
+                    ).hexdigest()[:24]
                     results.append(
                         SearchResult(
                             id=f"brave-{result_id}",
@@ -107,5 +128,9 @@ class BraveSearchProvider:
                 availability=Availability.RESEARCH_UNAVAILABLE,
                 query=clean_query,
                 request_count=budget.used,
-                warnings=(SourceWarning(code="BRAVE_UNAVAILABLE", message=str(exc), retryable=True),),
+                warnings=(
+                    SourceWarning(
+                        code="BRAVE_UNAVAILABLE", message=str(exc), retryable=True
+                    ),
+                ),
             )

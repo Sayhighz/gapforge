@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from gapforge.domain.contracts import AlternativeKind, Competitor, GapHypothesis, ProblemHypothesis
+from gapforge.domain.contracts import (
+    AlternativeKind,
+    Competitor,
+    GapHypothesis,
+    ProblemHypothesis,
+)
 
 NON_SOFTWARE = {
     AlternativeKind.SPREADSHEET,
@@ -14,12 +19,26 @@ NON_SOFTWARE = {
 }
 
 
-def validate_problem_hypothesis(hypothesis: ProblemHypothesis, permitted_claim_ids: frozenset[str]) -> None:
-    invented = (set(hypothesis.supporting_claim_ids) | set(hypothesis.contradicting_claim_ids)) - permitted_claim_ids
+def validate_problem_hypothesis(
+    hypothesis: ProblemHypothesis, permitted_claim_ids: frozenset[str]
+) -> None:
+    invented = (
+        set(hypothesis.supporting_claim_ids) | set(hypothesis.contradicting_claim_ids)
+    ) - permitted_claim_ids
     if invented:
         raise ValueError("problem hypothesis references unpermitted claims")
     falsification = hypothesis.falsification_test.casefold()
-    if not any(token in falsification for token in ("if ", "when ", "less than", "fewer than", "no more than", "fails")):
+    if not any(
+        token in falsification
+        for token in (
+            "if ",
+            "when ",
+            "less than",
+            "fewer than",
+            "no more than",
+            "fails",
+        )
+    ):
         raise ValueError("problem hypothesis requires a falsifiable condition")
 
 

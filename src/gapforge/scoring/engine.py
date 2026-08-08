@@ -69,7 +69,9 @@ class ScoringInputs:
 
 
 def weighted_axis(components: ScoreComponents) -> float:
-    return sum(components.values[name] * components.weights[name] for name in components.values)
+    return sum(
+        components.values[name] * components.weights[name] for name in components.values
+    )
 
 
 def score_opportunity(
@@ -81,7 +83,9 @@ def score_opportunity(
     evidence_confidence: float,
     created_at: datetime,
 ) -> OpportunityScoreSnapshot:
-    evidence = ScoreComponents(values=inputs.evidence_values(), weights=EVIDENCE_WEIGHTS)
+    evidence = ScoreComponents(
+        values=inputs.evidence_values(), weights=EVIDENCE_WEIGHTS
+    )
     fit = ScoreComponents(values=inputs.fit_values(), weights=FIT_WEIGHTS)
     evidence_axis, fit_axis = weighted_axis(evidence), weighted_axis(fit)
     pre_penalty = math.sqrt(evidence_axis * fit_axis)
@@ -147,26 +151,68 @@ def validation_decision(
     gap_evidence_present: bool,
     critic: CriticResult,
 ) -> ValidationDecision:
+    artifact_ids = {score.opportunity_id, critic.opportunity_id}
+    if card is not None:
+        artifact_ids.add(card.opportunity_id)
+    if len(artifact_ids) != 1:
+        raise ValueError("validation artifacts belong to different opportunities")
     author_count = len(card.known_author_ids) if card else 0
     thread_count = len(card.thread_ids) if card else 0
     source_count = len(card.user_sources) if card else 0
     workaround_count = card.behavioral_workarounds if card else 0
     paid_count = card.paid_or_wtp_signals if card else 0
-    confidence = card.confidence if card else 0
+    confidence = score.evidence_confidence
+    confidence_consistent = card is not None and math.isclose(
+        card.confidence, confidence, abs_tol=1e-9
+    )
     gates = (
         GateResult("evidence_card", card is not None, str(card is not None), "present"),
         GateResult("known_authors", author_count >= 5, str(author_count), ">=5"),
         GateResult("independent_threads", thread_count >= 3, str(thread_count), ">=3"),
         GateResult("user_sources", source_count >= 2, str(source_count), ">=2"),
-        GateResult("behavioral_workaround", workaround_count >= 1, str(workaround_count), ">=1"),
+        GateResult(
+            "behavioral_workaround", workaround_count >= 1, str(workaround_count), ">=1"
+        ),
         GateResult("wtp_or_spend", paid_count >= 1, str(paid_count), ">=1"),
-        GateResult("competitor_research", competitor_research is CompetitorResearchStatus.COMPLETE, competitor_research.value, "COMPLETE"),
-        GateResult("gap_evidence", gap_evidence_present, str(gap_evidence_present), "present"),
-        GateResult("fatal_flags", len(critic.fatal_flags) == 0, str(len(critic.fatal_flags)), "0"),
-        GateResult("overall_score", score.final_score >= 70, f"{score.final_score:.2f}", ">=70"),
-        GateResult("evidence_confidence", confidence >= 0.65, f"{confidence:.2f}", ">=0.65"),
-        GateResult("critic_verdict", critic.verdict is Verdict.VALIDATE, critic.verdict.value, "VALIDATE"),
-        GateResult("critic_confidence", critic.confidence >= 0.70, f"{critic.confidence:.2f}", ">=0.70"),
+        GateResult(
+            "competitor_research",
+            competitor_research is CompetitorResearchStatus.COMPLETE,
+            competitor_research.value,
+            "COMPLETE",
+        ),
+        GateResult(
+            "gap_evidence", gap_evidence_present, str(gap_evidence_present), "present"
+        ),
+        GateResult(
+            "fatal_flags",
+            len(critic.fatal_flags) == 0,
+            str(len(critic.fatal_flags)),
+            "0",
+        ),
+        GateResult(
+            "overall_score", score.final_score >= 70, f"{score.final_score:.2f}", ">=70"
+        ),
+        GateResult(
+            "evidence_confidence_consistency",
+            confidence_consistent,
+            str(confidence_consistent),
+            "card=snapshot",
+        ),
+        GateResult(
+            "evidence_confidence", confidence >= 0.65, f"{confidence:.2f}", ">=0.65"
+        ),
+        GateResult(
+            "critic_verdict",
+            critic.verdict is Verdict.VALIDATE,
+            critic.verdict.value,
+            "VALIDATE",
+        ),
+        GateResult(
+            "critic_confidence",
+            critic.confidence >= 0.70,
+            f"{critic.confidence:.2f}",
+            ">=0.70",
+        ),
     )
     if all(gate.passed for gate in gates):
         verdict = Verdict.VALIDATE
@@ -175,4 +221,3 @@ def validation_decision(
     else:
         verdict = Verdict.RESEARCH_MORE
     return ValidationDecision(verdict, gates)
-

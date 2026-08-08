@@ -38,16 +38,23 @@ class HackerNewsCollector:
             "tags": "(story,comment)",
             "numericFilters": f"created_at_i>={int(request.since.timestamp())},created_at_i<{int(request.until.timestamp())}",
             "hitsPerPage": min(request.max_signals, 100),
-            "page": int(request.checkpoint.cursor) if request.checkpoint and request.checkpoint.cursor else 0,
+            "page": int(request.checkpoint.cursor)
+            if request.checkpoint and request.checkpoint.cursor
+            else 0,
         }
         try:
-            payload = await bounded_get_json(self._client, self.endpoint, budget=budget, params=params)
-            if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
+            payload = await bounded_get_json(
+                self._client, self.endpoint, budget=budget, params=params
+            )
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("hits"), list
+            ):
                 raise CollectorResponseError("HN response missing hits")
             normalized = [
                 item
                 for hit in payload["hits"]
-                if (item := self._normalize(hit)) is not None and in_window(item, request)
+                if (item := self._normalize(hit)) is not None
+                and in_window(item, request)
             ]
             items = cap_thread_items(normalized, request.max_signals)
             next_page = int(payload.get("page", 0)) + 1
@@ -55,7 +62,9 @@ class HackerNewsCollector:
             checkpoint = SourceCheckpoint(
                 source=Source.HACKER_NEWS,
                 cursor=None if exhausted else str(next_page),
-                watermark=max((item.source_created_at for item in items), default=request.since),
+                watermark=max(
+                    (item.source_created_at for item in items), default=request.since
+                ),
             )
             return CollectResult(
                 source=Source.HACKER_NEWS,
@@ -69,7 +78,11 @@ class HackerNewsCollector:
                 source=Source.HACKER_NEWS,
                 availability=Availability.SOURCE_UNAVAILABLE,
                 request_count=budget.used,
-                warnings=(SourceWarning(code="HN_UNAVAILABLE", message=str(exc), retryable=True),),
+                warnings=(
+                    SourceWarning(
+                        code="HN_UNAVAILABLE", message=str(exc), retryable=True
+                    ),
+                ),
             )
 
     @staticmethod
@@ -88,7 +101,9 @@ class HackerNewsCollector:
         return CollectedItem(
             source=Source.HACKER_NEWS,
             external_id=external_id,
-            canonical_url=HttpUrl(f"https://news.ycombinator.com/item?id={external_id}"),
+            canonical_url=HttpUrl(
+                f"https://news.ycombinator.com/item?id={external_id}"
+            ),
             parent_thread_id=story_id if is_comment else None,
             author_identity=str(hit["author"]) if hit.get("author") else None,
             title=str(title)[:500] if title else None,

@@ -33,15 +33,18 @@ def build_critic_input(
     )
 
 
-def validate_critic_result(result: CriticResult, permitted_claim_ids: frozenset[str]) -> None:
+def validate_critic_result(
+    result: CriticResult, permitted_claim_ids: frozenset[str]
+) -> None:
     if not set(result.contradictions) <= permitted_claim_ids:
         raise ValueError("critic references unpermitted contradiction claims")
 
 
-def research_more_intents(result: CriticResult, *, completed_rounds: int, remaining_agent_calls: int) -> tuple[QueryIntent, ...]:
+def research_more_intents(
+    result: CriticResult, *, completed_rounds: int, remaining_agent_calls: int
+) -> tuple[QueryIntent, ...]:
     if not 0 <= completed_rounds <= 2 or remaining_agent_calls < 0:
         raise ValueError("invalid research budget state")
     if completed_rounds >= 2 or remaining_agent_calls == 0:
         return ()
     return result.recommended_intents[: min(4, remaining_agent_calls)]
-

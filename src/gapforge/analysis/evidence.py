@@ -55,7 +55,9 @@ class EvidenceObservation:
 
 def validate_pain_extraction(signal: PainSignal, evidence: EvidenceRecord) -> None:
     if signal.raw_signal_revision_id != evidence.evidence_id:
-        raise EvidenceValidationError(("pain signal references an unpermitted evidence ID",))
+        raise EvidenceValidationError(
+            ("pain signal references an unpermitted evidence ID",)
+        )
     haystack = normalize_text(evidence.text)
     errors = []
     if normalize_text(signal.excerpt) not in haystack:
@@ -78,12 +80,19 @@ def build_evidence_card(
 ) -> EvidenceCard:
     """Build metrics from one deterministic representative per duplicate group."""
     independent: dict[str, EvidenceObservation] = {}
-    for item in sorted(observations, key=lambda value: (value.duplicate_group, value.evidence_id)):
+    for item in sorted(
+        observations, key=lambda value: (value.duplicate_group, value.evidence_id)
+    ):
         independent.setdefault(item.duplicate_group, item)
     values = tuple(independent.values())
     authors = tuple(sorted({item.author_id for item in values if item.author_id}))
     threads = tuple(sorted({item.thread_id for item in values}))
-    sources = tuple(sorted({item.source for item in values if item.source in USER_SOURCES}, key=lambda value: value.value))
+    sources = tuple(
+        sorted(
+            {item.source for item in values if item.source in USER_SOURCES},
+            key=lambda value: value.value,
+        )
+    )
     days = tuple(
         datetime.combine(day, datetime.min.time(), tzinfo=UTC)
         for day in sorted({item.observed_at.astimezone(UTC).date() for item in values})
@@ -120,8 +129,12 @@ def build_evidence_card(
         severity=severity,
         behavioral_workarounds=workarounds,
         paid_or_wtp_signals=paid,
-        supporting_claim_ids=tuple(sorted({claim for item in values for claim in item.supporting_claim_ids})),
-        contradicting_claim_ids=tuple(sorted({claim for item in values for claim in item.contradicting_claim_ids})),
+        supporting_claim_ids=tuple(
+            sorted({claim for item in values for claim in item.supporting_claim_ids})
+        ),
+        contradicting_claim_ids=tuple(
+            sorted({claim for item in values for claim in item.contradicting_claim_ids})
+        ),
         representative_evidence_ids=tuple(item.evidence_id for item in values[:50]),
         confidence=round(confidence, 6),
         missing_evidence=tuple(missing),
@@ -145,6 +158,8 @@ def validate_atomic_claim(
         if invented:
             errors.append("claim references invented evidence IDs")
     for citation in claim.citations:
+        if citation.evidence_id not in claim.evidence_ids:
+            errors.append("citation evidence ID is not declared by the claim")
         record = evidence.get(citation.evidence_id)
         if record is None:
             errors.append("citation references invented evidence ID")
@@ -155,15 +170,19 @@ def validate_atomic_claim(
             errors.append("citation observation time does not match captured evidence")
         if normalize_text(citation.excerpt) not in normalize_text(record.text):
             errors.append("citation excerpt is not present in captured evidence")
-    if claim.kind in {ClaimKind.PRICE, ClaimKind.FEATURE} and claim.status is EpistemicStatus.SUPPORTED:
+    if (
+        claim.kind in {ClaimKind.PRICE, ClaimKind.FEATURE}
+        and claim.status is EpistemicStatus.SUPPORTED
+    ):
         if not claim.citations:
             errors.append("supported price/feature claim lacks a captured citation")
     if errors:
         raise EvidenceValidationError(tuple(dict.fromkeys(errors)))
 
 
-def repair_request(call_id: str, error: EvidenceValidationError, *, prior_attempts: int) -> RepairRequest:
+def repair_request(
+    call_id: str, error: EvidenceValidationError, *, prior_attempts: int
+) -> RepairRequest:
     if prior_attempts != 0:
         raise ValueError("invalid output receives only one repair attempt")
     return RepairRequest(original_call_id=call_id, validation_errors=error.errors[:20])
-
