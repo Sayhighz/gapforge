@@ -13,8 +13,8 @@ This is the first file to read after interruption. It records only reviewed/push
 - [x] Architecture grilling and major decisions complete.
 - [x] Specification PR reviewed and merged to `main`.
 - [x] `integration/v0.1` baseline created.
-- [ ] Lane A developer dispatched.
-- [ ] Lane B developer dispatched.
+- [x] Lane A developer dispatched.
+- [x] Lane B developer dispatched.
 - [ ] Lane A PR reviewed and merged to integration.
 - [ ] Lane B PR reviewed and merged to integration.
 - [ ] Cross-lane integration complete.
@@ -27,8 +27,8 @@ This is the first file to read after interruption. It records only reviewed/push
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
 | Integration | `integration/v0.1` | — | active | `8a0a775` |
-| Lane A | `agent/platform-foundation` | pending | not started | — |
-| Lane B | `agent/research-engine` | pending | not started | — |
+| Lane A | `agent/platform-foundation` | pending | implementing | `889ac37` |
+| Lane B | `agent/research-engine` | pending | implementing | `889ac37` |
 
 GitHub issues:
 
@@ -43,16 +43,17 @@ Completed:
 - Canonical requirements and separate non-conflicting lane checklists merged through PR #1.
 - Integration branch created from reviewed specification.
 - Lane issues #2 and #3 created.
+- Two isolated worktrees created and both developer agents dispatched.
 
 In progress:
 
-- Create isolated worktrees and dispatch both developer agents.
+- Monitor lane checkpoints and prepare independent reviews when draft PRs open.
 
 Exact next action:
 
-1. Create isolated worktrees from `integration/v0.1`.
-2. Dispatch the two developer agents using their lane checklist as complete context.
-3. Record branch, issue, PR, and last pushed commit after each developer checkpoint.
+1. Monitor both agents without editing their owned paths.
+2. Record branch, PR, tests, and last pushed commit after each checkpoint.
+3. Review each draft PR against its lane checklist and canonical spec.
 
 ## Recovery rules
 
