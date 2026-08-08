@@ -72,6 +72,21 @@ def test_agent_request_bounds_evidence_before_provider_call() -> None:
         _request(evidence={"body": "x" * 1_048_577})
 
 
+def test_contract_version_and_output_schema_are_validated_before_provider_call() -> None:
+    with pytest.raises(ValidationError, match=r"Input should be '1\.0'"):
+        _request(schema_version="9.9")
+    with pytest.raises(ValidationError, match="invalid Draft 2020-12"):
+        _request(output_schema={"type": "not-a-json-schema-type"})
+    with pytest.raises(ValidationError, match="256 KiB"):
+        _request(output_schema={"description": "x" * 262_145})
+
+    nested: dict[str, object] = {"type": "object"}
+    for _ in range(33):
+        nested = {"properties": {"child": nested}}
+    with pytest.raises(ValidationError, match="nesting depth"):
+        _request(output_schema=nested)
+
+
 @dataclass
 class StubInvocation:
     output: str = '{"answer":"ok"}'

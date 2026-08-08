@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -35,7 +38,7 @@ class AgentRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = "1.0"
+    schema_version: Literal["1.0"] = "1.0"
     operation: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
     instructions: str = Field(min_length=1, max_length=20_000)
     evidence: dict[str, Any] = Field(default_factory=dict)
@@ -51,10 +54,32 @@ class AgentRequest(BaseModel):
     @field_validator("evidence")
     @classmethod
     def bound_evidence(cls, value: dict[str, Any]) -> dict[str, Any]:
-        import json
-
         if len(json.dumps(value, ensure_ascii=False, default=str).encode()) > 1_048_576:
             raise ValueError("evidence payload exceeds 1 MiB")
+        return value
+
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(json.dumps(value, ensure_ascii=False, default=str).encode()) > 262_144:
+            raise ValueError("output schema exceeds 256 KiB")
+        stack: list[tuple[Any, int]] = [(value, 1)]
+        key_count = 0
+        while stack:
+            item, depth = stack.pop()
+            if depth > 32:
+                raise ValueError("output schema exceeds maximum nesting depth")
+            if isinstance(item, dict):
+                key_count += len(item)
+                if key_count > 5000:
+                    raise ValueError("output schema exceeds maximum key count")
+                stack.extend((child, depth + 1) for child in item.values())
+            elif isinstance(item, list):
+                stack.extend((child, depth + 1) for child in item)
+        try:
+            Draft202012Validator.check_schema(value)
+        except SchemaError as error:
+            raise ValueError(f"invalid Draft 2020-12 output schema: {error.message}") from error
         return value
 
     @model_validator(mode="after")
@@ -69,7 +94,7 @@ class AgentRequest(BaseModel):
 class AgentResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = "1.0"
+    schema_version: Literal["1.0"] = "1.0"
     status: AgentStatus
     data: dict[str, Any] | None = None
     usage: AgentUsage = Field(default_factory=AgentUsage)
