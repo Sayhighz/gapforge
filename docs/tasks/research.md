@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: B1-B2 pushed in `4a9ca79`; B3 collectors next
+Last checkpoint: B2-B3 pushed through `6320e8a`; B1 audit and B4 next
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -50,12 +50,12 @@ Acceptance: model output cannot directly produce unlimited network calls.
 
 ## B3 — Collectors
 
-- [ ] Implement common collector request/result/error contract.
-- [ ] Implement HN collector with public API and comments/thread metadata.
-- [ ] Implement GitHub issue/comment collector with optional token and bot/PR/template filtering.
-- [ ] Implement official OAuth Reddit collector with structured missing-credential status.
-- [ ] Enforce pagination/request/signal/source/thread/time budgets.
-- [ ] Test with fixtures/fake transports only.
+- [x] Implement common collector request/result/error contract.
+- [x] Implement HN collector with public API and comments/thread metadata.
+- [x] Implement GitHub issue/comment collector with optional token and bot/PR/template filtering.
+- [x] Implement official OAuth Reddit collector with structured missing-credential status.
+- [x] Enforce pagination/request/signal/source/thread/time budgets.
+- [x] Test with fixtures/fake transports only.
 
 Acceptance: one collector failure does not invalidate normalized results from another.
 
@@ -125,8 +125,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: B1 and B2 complete; collector implementation is next.
+Current state: B2 and B3 complete; B1 awaits the full required-entity audit.
 
-Last pushed commit: `4a9ca79` (`add research contracts and query planning`).
+Last pushed commit: `6320e8a` (`add bounded source collectors`).
 
-Next action: implement B3 common collector budgets and HN/GitHub/Reddit clients with fake transports.
+Next action: implement B4 Brave search and SSRF-safe static fetch, then complete the B1 contract audit.
