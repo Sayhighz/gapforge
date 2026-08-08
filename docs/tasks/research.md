@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: B2-B3 pushed through `6320e8a`; B1 audit and B4 next
+Last checkpoint: B2-B4 pushed through `9021ed2`; B1 audit and B5 next
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -61,11 +61,11 @@ Acceptance: one collector failure does not invalidate normalized results from an
 
 ## B4 — Search and secure fetch
 
-- [ ] Implement Brave Search provider and normalized results.
-- [ ] Implement static HTTP fetcher with protocol, DNS/IP, redirect, size, type, and timeout controls.
-- [ ] Extract visible text and preserve snapshot hash/time/source URL.
-- [ ] Reject agent-created URLs and unsupported search-snippet facts.
-- [ ] Test SSRF, redirect-to-private, rebinding defense seam, oversized body, and unavailable content.
+- [x] Implement Brave Search provider and normalized results.
+- [x] Implement static HTTP fetcher with protocol, DNS/IP, redirect, size, type, and timeout controls.
+- [x] Extract visible text and preserve snapshot hash/time/source URL.
+- [x] Reject agent-created URLs and unsupported search-snippet facts.
+- [x] Test SSRF, redirect-to-private, rebinding defense seam, oversized body, and unavailable content.
 
 Acceptance: only approved public results can be fetched and analyzed.
 
@@ -125,8 +125,8 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## Resume note
 
-Current state: B2 and B3 complete; B1 awaits the full required-entity audit.
+Current state: B2-B4 complete; B1 awaits the full required-entity audit.
 
-Last pushed commit: `6320e8a` (`add bounded source collectors`).
+Last pushed commit: `9021ed2` (`add secure search and static fetch`).
 
-Next action: implement B4 Brave search and SSRF-safe static fetch, then complete the B1 contract audit.
+Next action: complete the B1 contract audit and implement B5 normalization, identity, deduplication, and clustering gates.
