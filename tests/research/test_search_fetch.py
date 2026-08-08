@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import httpx
@@ -34,6 +35,30 @@ async def test_brave_missing_key_degrades_and_result_normalization() -> None:
     assert calls == 1
     assert not snippet_supports_claim(ClaimKind.PRICE)
     assert not snippet_supports_claim(ClaimKind.FEATURE)
+
+
+@pytest.mark.asyncio
+async def test_brave_result_ids_are_stable_by_url_and_do_not_collide_by_rank() -> None:
+    responses = [
+        {"title": "First", "url": "https://first.example/page", "description": "one"},
+        {"title": "Second", "url": "https://second.example/page", "description": "two"},
+        {"title": "First renamed", "url": "https://first.example/page", "description": "updated"},
+    ]
+    call = 0
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal call
+        payload = responses[call]
+        call += 1
+        return httpx.Response(200, json={"web": {"results": [payload]}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = BraveSearchProvider(client, "key")
+        first = await provider.search("one")
+        second = await provider.search("two")
+        repeated = await provider.search("one again")
+    assert first.results[0].id != second.results[0].id
+    assert first.results[0].id == repeated.results[0].id
 
 
 def approved_registry(url: str = "https://example.com/page") -> ApprovedUrlRegistry:
@@ -110,3 +135,26 @@ async def test_oversized_unsupported_and_agent_created_urls_fail_closed() -> Non
     assert oversized.availability is Availability.CONTENT_UNAVAILABLE
     assert unsupported.availability is Availability.CONTENT_UNAVAILABLE
     assert invented.availability is Availability.CONTENT_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_unsupported_response_stream_is_always_closed() -> None:
+    class TrackingStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"binary"
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = TrackingStream()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "application/octet-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await StaticFetcher(client, resolver=public_resolver).fetch("https://example.com/page", approved_registry())
+    assert result.availability is Availability.CONTENT_UNAVAILABLE
+    assert stream.closed

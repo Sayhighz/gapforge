@@ -35,6 +35,24 @@ class RunMode(StrEnum):
     MONITOR = "MONITOR"
 
 
+class RunStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    COMPLETED_WITH_WARNINGS = "COMPLETED_WITH_WARNINGS"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class TaskStatus(StrEnum):
+    QUEUED = "QUEUED"
+    LEASED = "LEASED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
 class EpistemicStatus(StrEnum):
     SUPPORTED = "SUPPORTED"
     HYPOTHESIS = "HYPOTHESIS"
@@ -131,6 +149,44 @@ class ResearchMission(Contract):
     created_at: datetime
 
 
+class ResearchRun(Contract):
+    id: UUID
+    mission_revision_id: UUID
+    mode: RunMode
+    status: RunStatus
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    warning_codes: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
+
+    @model_validator(mode="after")
+    def timestamps_match_status(self) -> ResearchRun:
+        terminal = self.status not in {RunStatus.QUEUED, RunStatus.RUNNING}
+        if terminal != (self.finished_at is not None):
+            raise ValueError("terminal run statuses require finished_at")
+        if self.started_at and self.finished_at and self.started_at > self.finished_at:
+            raise ValueError("run timestamps are not chronological")
+        return self
+
+
+class ResearchTask(Contract):
+    id: UUID
+    run_id: UUID
+    task_type: Identifier
+    status: TaskStatus
+    attempt: int = Field(default=0, ge=0, le=10)
+    lease_owner: Identifier | None = None
+    lease_expires_at: datetime | None = None
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def lease_fields_match_status(self) -> ResearchTask:
+        leased = self.status is TaskStatus.LEASED
+        if leased != bool(self.lease_owner and self.lease_expires_at):
+            raise ValueError("LEASED tasks require owner and expiry; other tasks cannot retain a lease")
+        return self
+
+
 class MissionRevision(Contract):
     id: UUID
     mission_id: UUID
@@ -206,6 +262,11 @@ class RawSignal(Contract):
             raise ValueError("non-deleted raw signal requires title or body")
         return self
 
+    @field_validator("metadata")
+    @classmethod
+    def bound_raw_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
+
 
 class RawSignalRevision(Contract):
     id: Identifier
@@ -267,6 +328,14 @@ class MergeCandidate(Contract):
         if self.left_problem_id == self.right_problem_id:
             raise ValueError("a problem cannot be merged with itself")
         return self
+
+
+class MergeDecision(Contract):
+    candidate_id: Identifier
+    action: Literal["ACCEPT", "REJECT", "REVERSE"]
+    actor: Identifier
+    reason: ShortText
+    decided_at: datetime
 
 
 class Citation(Contract):
@@ -360,6 +429,41 @@ class Opportunity(Contract):
     title: ShortText
 
 
+class MissionOpportunityAssessment(Contract):
+    id: Identifier
+    mission_revision_id: UUID
+    opportunity_id: Identifier
+    lifecycle_state: LifecycleState
+    verdict: Verdict
+    score_snapshot_id: Identifier | None = None
+    evidence_card_id: Identifier | None = None
+    assessed_at: datetime
+
+    @model_validator(mode="after")
+    def validate_requires_evidence_artifacts(self) -> MissionOpportunityAssessment:
+        if self.verdict is Verdict.VALIDATE and not (self.score_snapshot_id and self.evidence_card_id):
+            raise ValueError("VALIDATE assessment requires score snapshot and Evidence Card")
+        return self
+
+
+class ProductHypothesis(Contract):
+    id: Identifier
+    assessment_id: Identifier
+    explicit_request_id: Identifier
+    proposition: LongText
+    created_at: datetime
+
+
+class LifecycleEvent(Contract):
+    id: Identifier
+    assessment_id: Identifier
+    from_state: LifecycleState | None
+    to_state: LifecycleState
+    reason: ShortText
+    evidence_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=100)
+    created_at: datetime
+
+
 class ScoreComponents(Contract):
     values: dict[ShortText, float] = Field(max_length=20)
     weights: dict[ShortText, float] = Field(max_length=20)
@@ -451,6 +555,11 @@ class CollectedItem(Contract):
     engagement: Engagement = Field(default_factory=Engagement)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("metadata")
+    @classmethod
+    def bound_collected_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
+
 
 class CollectResult(Contract):
     source: Source
@@ -503,3 +612,78 @@ class RepairRequest(Contract):
     original_call_id: Identifier
     validation_errors: tuple[ShortText, ...] = Field(min_length=1, max_length=20)
     repair_attempt: Literal[1] = 1
+
+
+class AgentEffort(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class AgentStatus(StrEnum):
+    COMPLETED = "COMPLETED"
+    INVALID_OUTPUT = "INVALID_OUTPUT"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    TIMEOUT = "TIMEOUT"
+    FAILED = "FAILED"
+
+
+class AgentRequest(Contract):
+    call_id: Identifier
+    task: Literal["EXTRACT", "RELEVANCE", "CLUSTER", "HYPOTHESIS", "GAP", "CRITIC", "DEEP_RESEARCH"]
+    effort: AgentEffort
+    input_json: dict[str, Any] = Field(max_length=100)
+    permitted_evidence_ids: tuple[Identifier, ...] = Field(max_length=500)
+    permitted_urls: tuple[HttpUrl, ...] = Field(default_factory=tuple, max_length=100)
+    output_schema_name: Identifier
+    timeout_seconds: int = Field(ge=1, le=1_800)
+
+    @field_validator("input_json")
+    @classmethod
+    def bound_agent_input(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
+
+
+class AgentResult(Contract):
+    call_id: Identifier
+    status: AgentStatus
+    output_json: dict[str, Any] | None = Field(default=None, max_length=100)
+    provider: Literal["codex_cli", "fake"]
+    model_requested: ShortText | None = None
+    effort: AgentEffort
+    cli_version: ShortText | None = None
+    duration_ms: int = Field(ge=0)
+    repair_attempted: bool = False
+    error_class: Identifier | None = None
+
+    @model_validator(mode="after")
+    def output_matches_status(self) -> AgentResult:
+        if (self.status is AgentStatus.COMPLETED) != (self.output_json is not None):
+            raise ValueError("only completed agent results contain output")
+        if self.output_json is not None:
+            _bounded_metadata(self.output_json)
+        return self
+
+
+class AgentCall(Contract):
+    id: Identifier
+    run_id: UUID
+    task_id: UUID
+    request: AgentRequest
+    result: AgentResult
+    created_at: datetime
+
+
+def _bounded_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject oversized source-controlled metadata before storage or agent use."""
+    import json
+
+    if len(value) > 50:
+        raise ValueError("metadata may contain at most 50 keys")
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("metadata must be JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > 20_000:
+        raise ValueError("metadata exceeds 20,000 bytes")
+    return value

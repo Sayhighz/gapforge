@@ -29,6 +29,7 @@ async def test_hn_normalizes_and_limits_each_thread_to_parent_plus_twenty() -> N
         {"objectID": f"c{i}", "story_id": "p", "comment_text": f"same pain {i}", "author": f"u{i}", "created_at_i": timestamp + i + 1}
         for i in range(25)
     )
+    hits.append({"objectID": "outside", "title": "Old pain", "author": "old", "created_at_i": int((NOW - timedelta(days=40)).timestamp())})
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"hits": hits, "page": 0, "nbPages": 1}))
     async with httpx.AsyncClient(transport=transport) as client:
         result = await HackerNewsCollector(client).collect(request(Source.HACKER_NEWS))
@@ -65,6 +66,7 @@ async def test_github_filters_pr_bot_template_and_generic_bug() -> None:
         {**valid, "id": 9, "user": {"login": "dependabot[bot]", "type": "Bot"}},
         {**valid, "id": 10, "title": "Bug: broken"},
         {**valid, "id": 11, "body": "### Description\n<!-- fill -->\nsteps to reproduce"},
+        {**valid, "id": 12, "created_at": "2026-06-01T00:00:00Z"},
     ]
 
     def handler(req: httpx.Request) -> httpx.Response:

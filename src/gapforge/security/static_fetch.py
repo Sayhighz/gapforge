@@ -109,40 +109,43 @@ class StaticFetcher:
             for redirect_count in range(self._max_redirects + 1):
                 response = await self._request_pinned(current)
                 if response.is_redirect:
+                    location = response.headers.get("location")
+                    await response.aclose()
                     if redirect_count >= self._max_redirects:
                         raise ContentUnavailableError("redirect limit exceeded")
-                    location = response.headers.get("location")
                     if not location:
                         raise ContentUnavailableError("redirect missing location")
-                    await response.aclose()
                     current = urljoin(current, location)
                     continue
                 break
             assert response is not None
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-            if content_type not in ALLOWED_CONTENT_TYPES:
-                raise ContentUnavailableError("unsupported content type")
-            body = await self._bounded_body(response)
-            text = body.decode(response.encoding or "utf-8", errors="replace")
-            if content_type == "text/html":
-                parser = _VisibleTextParser()
-                parser.feed(text)
-                text = parser.text()
-            text = " ".join(text.split())
-            if not text:
-                raise ContentUnavailableError("page contains no visible static text")
-            return FetchResult(
-                availability=Availability.AVAILABLE,
-                snapshot=FetchSnapshot(
-                    url=HttpUrl(original),
-                    final_url=HttpUrl(current),
-                    text=text[:20_000],
-                    content_type=content_type,
-                    sha256=hashlib.sha256(body).hexdigest(),
-                    observed_at=datetime.now(UTC),
-                ),
-            )
+            try:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if content_type not in ALLOWED_CONTENT_TYPES:
+                    raise ContentUnavailableError("unsupported content type")
+                body = await self._bounded_body(response)
+                text = body.decode(response.encoding or "utf-8", errors="replace")
+                if content_type == "text/html":
+                    parser = _VisibleTextParser()
+                    parser.feed(text)
+                    text = parser.text()
+                text = " ".join(text.split())
+                if not text:
+                    raise ContentUnavailableError("page contains no visible static text")
+                return FetchResult(
+                    availability=Availability.AVAILABLE,
+                    snapshot=FetchSnapshot(
+                        url=HttpUrl(original),
+                        final_url=HttpUrl(current),
+                        text=text[:20_000],
+                        content_type=content_type,
+                        sha256=hashlib.sha256(body).hexdigest(),
+                        observed_at=datetime.now(UTC),
+                    ),
+                )
+            finally:
+                await response.aclose()
         except (UnsafeUrlError, ContentUnavailableError, httpx.HTTPError, ValueError) as exc:
             return FetchResult(
                 availability=Availability.CONTENT_UNAVAILABLE,

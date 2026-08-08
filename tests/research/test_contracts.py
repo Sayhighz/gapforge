@@ -5,15 +5,21 @@ import pytest
 from pydantic import ValidationError
 
 from gapforge.domain.contracts import (
+    AgentEffort,
+    AgentRequest,
+    AgentResult,
+    AgentStatus,
     AtomicClaim,
     ClaimKind,
     EpistemicStatus,
     MissionRevision,
+    MissionOpportunityAssessment,
     QueryIntent,
     QueryIntentKind,
     QueryPlan,
     RawSignal,
     Source,
+    Verdict,
 )
 
 NOW = datetime(2026, 8, 9, tzinfo=UTC)
@@ -74,3 +80,27 @@ def test_raw_signal_rejects_unbounded_or_contentless_input() -> None:
         RawSignal(**base)
     with pytest.raises(ValidationError):
         RawSignal(**base, body="x" * 20_001)
+
+
+def test_provider_contract_round_trip_and_bounded_payload() -> None:
+    request = AgentRequest(
+        call_id="call-1", task="EXTRACT", effort=AgentEffort.LOW,
+        input_json={"evidence": [{"id": "e-1", "text": "manual work"}]},
+        permitted_evidence_ids=("e-1",), output_schema_name="pain-signals-v1", timeout_seconds=30,
+    )
+    result = AgentResult(
+        call_id="call-1", status=AgentStatus.COMPLETED, output_json={"pain": "manual work"},
+        provider="fake", effort=AgentEffort.LOW, duration_ms=10,
+    )
+    assert AgentRequest.model_validate_json(request.model_dump_json()) == request
+    assert AgentResult.model_validate_json(result.model_dump_json()) == result
+    with pytest.raises(ValidationError, match="20,000 bytes"):
+        AgentRequest.model_validate({**request.model_dump(), "input_json": {"payload": "x" * 20_001}})
+
+
+def test_validate_assessment_requires_evidence_card_and_score() -> None:
+    with pytest.raises(ValidationError, match="Evidence Card"):
+        MissionOpportunityAssessment(
+            id="a-1", mission_revision_id=uuid4(), opportunity_id="o-1",
+            lifecycle_state="VALIDATE", verdict=Verdict.VALIDATE, assessed_at=NOW,
+        )

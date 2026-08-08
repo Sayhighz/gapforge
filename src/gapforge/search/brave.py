@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 
 import httpx
@@ -81,11 +82,13 @@ class BraveSearchProvider:
                 if not isinstance(raw, dict) or not raw.get("url") or not raw.get("title"):
                     continue
                 try:
+                    normalized_url = HttpUrl(str(raw["url"]))
+                    result_id = hashlib.sha256(str(normalized_url).encode()).hexdigest()[:24]
                     results.append(
                         SearchResult(
-                            id=f"brave-{len(results) + 1}",
+                            id=f"brave-{result_id}",
                             title=str(raw["title"])[:500],
-                            url=HttpUrl(str(raw["url"])),
+                            url=normalized_url,
                             snippet=str(raw.get("description") or "No snippet")[:500],
                             observed_at=observed_at,
                             rank=len(results) + 1,
@@ -106,4 +109,3 @@ class BraveSearchProvider:
                 request_count=budget.used,
                 warnings=(SourceWarning(code="BRAVE_UNAVAILABLE", message=str(exc), retryable=True),),
             )
-
