@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: not started
+Last checkpoint: A1 foundation pushed in `c7f136f`; A2 persistence is next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -38,11 +38,11 @@ scripts/**
 
 ## A1 — Project foundation
 
-- [ ] Create Python 3.12 `src/` package and project metadata.
-- [ ] Configure Ruff, mypy, pytest, coverage, and console entrypoint `gap`.
-- [ ] Add typed settings with every budget/default from spec section 5.
-- [ ] Add structured logging and secret redaction.
-- [ ] Add focused tests for settings and logging.
+- [x] Create Python 3.12 `src/` package and project metadata.
+- [x] Configure Ruff, mypy, pytest, coverage, and console entrypoint `gap`.
+- [x] Add typed settings with every budget/default from spec section 5.
+- [x] Add structured logging and secret redaction.
+- [x] Add focused tests for settings and logging.
 
 Acceptance: clean install works; invalid settings fail early; logs never include configured secrets.
 
@@ -118,8 +118,8 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: not started.
+Current state: A1 complete; A2 in progress.
 
-Last pushed commit: none.
+Last pushed commit: `c7f136f` (`build platform foundation`).
 
-Next action: A1 project foundation.
+Next action: implement the complete persistence model and initial migration for A2.
