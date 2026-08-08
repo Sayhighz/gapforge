@@ -5,7 +5,14 @@ from __future__ import annotations
 import httpx
 from pydantic import HttpUrl
 
-from gapforge.collectors.base import CollectorResponseError, RequestBudget, bounded_get_json, cap_thread_items, utc_from_timestamp
+from gapforge.collectors.base import (
+    CollectorResponseError,
+    RequestBudget,
+    bounded_get_json,
+    cap_thread_items,
+    in_window,
+    utc_from_timestamp,
+)
 from gapforge.domain.contracts import (
     Availability,
     CollectRequest,
@@ -37,7 +44,11 @@ class HackerNewsCollector:
             payload = await bounded_get_json(self._client, self.endpoint, budget=budget, params=params)
             if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
                 raise CollectorResponseError("HN response missing hits")
-            normalized = [item for hit in payload["hits"] if (item := self._normalize(hit)) is not None]
+            normalized = [
+                item
+                for hit in payload["hits"]
+                if (item := self._normalize(hit)) is not None and in_window(item, request)
+            ]
             items = cap_thread_items(normalized, request.max_signals)
             next_page = int(payload.get("page", 0)) + 1
             exhausted = next_page >= int(payload.get("nbPages", 1))

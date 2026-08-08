@@ -7,7 +7,14 @@ import re
 import httpx
 from pydantic import HttpUrl
 
-from gapforge.collectors.base import CollectorResponseError, RequestBudget, bounded_get_json, cap_thread_items, utc_from_timestamp
+from gapforge.collectors.base import (
+    CollectorResponseError,
+    RequestBudget,
+    bounded_get_json,
+    cap_thread_items,
+    in_window,
+    utc_from_timestamp,
+)
 from gapforge.domain.contracts import (
     Availability,
     CollectRequest,
@@ -54,7 +61,7 @@ class GitHubCollector:
             items: list[CollectedItem] = []
             for raw in payload["items"]:
                 normalized = self._normalize_issue(raw)
-                if normalized is None:
+                if normalized is None or not in_window(normalized, request):
                     continue
                 items.append(normalized)
                 if len(items) >= request.max_signals:
@@ -73,6 +80,7 @@ class GitHubCollector:
                             item
                             for comment in comments[:20]
                             if (item := self._normalize_comment(comment, normalized)) is not None
+                            and in_window(item, request)
                         )
             capped = cap_thread_items(items, request.max_signals)
             return CollectResult(

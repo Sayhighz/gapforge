@@ -7,7 +7,14 @@ import base64
 import httpx
 from pydantic import HttpUrl
 
-from gapforge.collectors.base import CollectorResponseError, RequestBudget, bounded_get_json, cap_thread_items, utc_from_timestamp
+from gapforge.collectors.base import (
+    CollectorResponseError,
+    RequestBudget,
+    bounded_get_json,
+    cap_thread_items,
+    in_window,
+    utc_from_timestamp,
+)
 from gapforge.domain.contracts import (
     Availability,
     CollectRequest,
@@ -68,7 +75,11 @@ class RedditCollector:
             children = data.get("children")
             if not isinstance(children, list):
                 raise CollectorResponseError("Reddit response missing children")
-            items = [item for child in children if (item := self._normalize(child)) is not None]
+            items = [
+                item
+                for child in children
+                if (item := self._normalize(child)) is not None and in_window(item, request)
+            ]
             capped = cap_thread_items(items, request.max_signals)
             return CollectResult(
                 source=Source.REDDIT,

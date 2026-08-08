@@ -4,7 +4,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from gapforge.collectors.base import RequestBudget, bounded_get_json, collect_isolated
+from gapforge.collectors.base import RequestBudget, bounded_get_json, cap_thread_items, collect_isolated
 from gapforge.collectors.github import GitHubCollector
 from gapforge.collectors.hacker_news import HackerNewsCollector
 from gapforge.collectors.reddit import RedditCollector
@@ -23,9 +23,10 @@ def request(source: Source, max_requests: int = 10, max_signals: int = 30) -> Co
 
 @pytest.mark.asyncio
 async def test_hn_normalizes_and_limits_each_thread_to_parent_plus_twenty() -> None:
-    hits = [{"objectID": "p", "title": "Invoices consume Fridays", "author": "alice", "created_at_i": 1}]
+    timestamp = int((NOW - timedelta(days=1)).timestamp())
+    hits = [{"objectID": "p", "title": "Invoices consume Fridays", "author": "alice", "created_at_i": timestamp}]
     hits.extend(
-        {"objectID": f"c{i}", "story_id": "p", "comment_text": f"same pain {i}", "author": f"u{i}", "created_at_i": i + 2}
+        {"objectID": f"c{i}", "story_id": "p", "comment_text": f"same pain {i}", "author": f"u{i}", "created_at_i": timestamp + i + 1}
         for i in range(25)
     )
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"hits": hits, "page": 0, "nbPages": 1}))
@@ -35,6 +36,20 @@ async def test_hn_normalizes_and_limits_each_thread_to_parent_plus_twenty() -> N
     assert len(result.items) == 21
     assert result.items[6].metadata["thread_weight"] < 1
     assert result.request_count == 1
+
+
+def test_comment_only_thread_caps_at_twenty_and_weights_after_five() -> None:
+    items = tuple(
+        HackerNewsCollector._normalize({
+            "objectID": f"c{i}", "story_id": "missing", "comment_text": f"pain {i}",
+            "author": f"u{i}", "created_at_i": int((NOW - timedelta(days=1)).timestamp()) + i,
+        })
+        for i in range(25)
+    )
+    capped = cap_thread_items(tuple(item for item in items if item is not None), 30)
+    assert len(capped) == 20
+    assert [item.metadata["thread_weight"] for item in capped[:5]] == [1.0] * 5
+    assert capped[5].metadata["thread_weight"] < 1
 
 
 @pytest.mark.asyncio
@@ -81,6 +96,25 @@ async def test_reddit_missing_credentials_is_structured_and_makes_no_request() -
     assert result.availability is Availability.SOURCE_UNAVAILABLE
     assert result.warnings[0].code == "REDDIT_CREDENTIALS_MISSING"
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reddit_filters_results_to_exact_requested_window() -> None:
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/access_token":
+            return httpx.Response(200, json={"access_token": "access"})
+        inside = int((NOW - timedelta(days=1)).timestamp())
+        outside = int((NOW - timedelta(days=40)).timestamp())
+        def child(identifier: str, created: int) -> dict[str, object]:
+            return {"data": {
+                "name": identifier, "title": f"Pain {identifier}", "selftext": "manual work", "permalink": f"/r/work/{identifier}",
+                "author": "human", "created_utc": created, "score": 100, "num_comments": 5,
+            }}
+        return httpx.Response(200, json={"data": {"children": [child("inside", inside), child("outside", outside)], "after": None}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await RedditCollector(client, client_id="id", client_secret="secret").collect(request(Source.REDDIT))
+    assert [item.external_id for item in result.items] == ["inside"]
 
 
 @pytest.mark.asyncio

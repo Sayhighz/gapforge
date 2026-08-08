@@ -487,6 +487,18 @@ class FetchSnapshot(Contract):
     observed_at: datetime
 
 
+class FetchResult(Contract):
+    availability: Availability
+    snapshot: FetchSnapshot | None = None
+    warnings: tuple[SourceWarning, ...] = Field(default_factory=tuple, max_length=20)
+
+    @model_validator(mode="after")
+    def snapshot_matches_availability(self) -> FetchResult:
+        if (self.availability is Availability.AVAILABLE) != (self.snapshot is not None):
+            raise ValueError("only AVAILABLE fetch results contain a snapshot")
+        return self
+
+
 class RepairRequest(Contract):
     original_call_id: Identifier
     validation_errors: tuple[ShortText, ...] = Field(min_length=1, max_length=20)

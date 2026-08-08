@@ -129,16 +129,27 @@ def cap_thread_items(items: Sequence[CollectedItem], maximum: int) -> tuple[Coll
 
     accepted: list[CollectedItem] = []
     for thread in sorted(grouped):
-        group = sorted(
-            grouped[thread],
-            key=lambda item: (item.parent_thread_id is not None, item.source_created_at, item.external_id),
-        )
-        for index, item in enumerate(group[:21]):
+        group = grouped[thread]
+        parents = sorted(
+            (item for item in group if item.parent_thread_id is None),
+            key=lambda item: (item.source_created_at, item.external_id),
+        )[:1]
+        comments = sorted(
+            (item for item in group if item.parent_thread_id is not None),
+            key=lambda item: (item.source_created_at, item.external_id),
+        )[:20]
+        ordered = [*parents, *comments]
+        for item in ordered:
             if len(accepted) >= maximum:
                 return tuple(accepted)
-            weight = 1.0 if index <= 5 else round(5 / index, 4)
+            comment_number = comments.index(item) + 1 if item.parent_thread_id is not None else 0
+            weight = 1.0 if comment_number <= 5 else round(5 / comment_number, 4)
             accepted.append(item.model_copy(update={"metadata": {**item.metadata, "thread_weight": weight}}))
     return tuple(accepted)
+
+
+def in_window(item: CollectedItem, request: CollectRequest) -> bool:
+    return request.since <= item.source_created_at < request.until
 
 
 def utc_from_timestamp(value: int | float | str | None) -> datetime:
