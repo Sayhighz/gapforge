@@ -30,6 +30,16 @@ def test_repeat_author_duplicate_and_viral_thread_cannot_fake_independence() -> 
     assert not can_form_provisional_cluster(duplicates)
 
 
+def test_duplicate_representative_is_permutation_invariant() -> None:
+    values = (
+        observation(2, author=None, thread="z-thread", duplicate="same"),
+        observation(1, author="known", thread="a-thread", duplicate="same"),
+        observation(3, author="other", thread="other", duplicate="different"),
+    )
+    assert independence_metrics(values) == independence_metrics(tuple(reversed(values)))
+    assert independence_metrics(values).unique_known_authors == 2
+
+
 def test_cluster_and_opportunity_thresholds() -> None:
     two = (observation(1, author="a", thread="t1", duplicate="d1"), observation(2, author="b", thread="t1", duplicate="d2"))
     assert can_form_provisional_cluster(two)

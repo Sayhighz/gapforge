@@ -24,6 +24,9 @@ def test_url_text_and_exact_duplicate_order_are_deterministic() -> None:
     assert exact_duplicate_reason(left, dedup_key(item("1", "https://other.example/post", "different"))) == "SOURCE_EXTERNAL_ID"
     assert exact_duplicate_reason(left, dedup_key(item("2", "https://example.com/post", "different"))) == "NORMALIZED_URL"
     assert exact_duplicate_reason(left, dedup_key(item("3", "https://third.example/post", "manual  work"))) == "CONTENT_HASH"
+    assert normalize_url("https://[2001:db8::1]:443/a") == "https://[2001:db8::1]/a"
+    with pytest.raises(ValueError, match="credentials"):
+        normalize_url("https://user:secret@example.com/path")
 
 
 def test_minhash_near_duplicate_is_stable_and_bounded() -> None:
@@ -56,4 +59,3 @@ def test_edits_and_tombstones_append_history_without_duplicate_revisions() -> No
     assert len(history) == len(unchanged) == 1
     assert [revision.revision for revision in deleted] == [1, 2, 3]
     assert deleted[-1].tombstone
-

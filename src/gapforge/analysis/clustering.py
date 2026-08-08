@@ -28,7 +28,16 @@ class IndependenceMetrics:
 
 def independence_metrics(observations: tuple[Observation, ...]) -> IndependenceMetrics:
     independent: dict[str, Observation] = {}
-    for observation in observations:
+    for observation in sorted(
+        observations,
+        key=lambda item: (
+            item.duplicate_group,
+            item.author_id is None,
+            item.author_id or "",
+            item.thread_id,
+            item.signal_id,
+        ),
+    ):
         independent.setdefault(observation.duplicate_group, observation)
     values = tuple(independent.values())
     return IndependenceMetrics(
@@ -73,4 +82,3 @@ def apply_merge_decision(candidate: MergeCandidate, decision: MergeDecision) -> 
     if next_status is None:
         raise ValueError("invalid merge decision transition")
     return candidate.model_copy(update={"status": next_status})
-

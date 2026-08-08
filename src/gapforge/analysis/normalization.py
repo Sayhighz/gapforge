@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 import unicodedata
 from datetime import datetime
@@ -27,8 +28,18 @@ def normalize_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise ValueError("URL must be absolute HTTP(S)")
-    host = parsed.hostname.encode("idna").decode("ascii").lower()
-    port = parsed.port
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL credentials are not allowed")
+    raw_host = parsed.hostname
+    try:
+        address = ipaddress.ip_address(raw_host)
+        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    except ValueError:
+        host = raw_host.encode("idna").decode("ascii").lower()
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("URL port is invalid") from exc
     if (parsed.scheme.lower(), port) in {("http", 80), ("https", 443)}:
         port = None
     netloc = host + (f":{port}" if port else "")
@@ -68,4 +79,3 @@ def append_revision(
         tombstone=deleted,
     )
     return (*history, revision)
-

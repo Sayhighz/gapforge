@@ -103,6 +103,12 @@ class TrendLabel(StrEnum):
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 
 
+class CompetitorResearchStatus(StrEnum):
+    COMPLETE = "COMPLETE"
+    INCOMPLETE = "INCOMPLETE"
+    RESEARCH_UNAVAILABLE = "RESEARCH_UNAVAILABLE"
+
+
 class ClaimKind(StrEnum):
     USER_PAIN = "USER_PAIN"
     PRICE = "PRICE"
@@ -361,6 +367,8 @@ class AtomicClaim(Contract):
         if self.kind in {ClaimKind.PRICE, ClaimKind.FEATURE} and self.status is EpistemicStatus.SUPPORTED:
             if not self.citations:
                 raise ValueError("supported price/feature claims require captured citations")
+        if any(citation.evidence_id not in self.evidence_ids for citation in self.citations):
+            raise ValueError("citation evidence IDs must be declared by the claim")
         return self
 
 
@@ -492,6 +500,7 @@ class OpportunityScoreSnapshot(Contract):
     mission_revision_id: UUID
     evidence_strength: ScoreComponents
     opportunity_fit: ScoreComponents
+    raw_metrics: dict[ShortText, float] = Field(default_factory=dict, max_length=50)
     penalties: dict[ShortText, float] = Field(default_factory=dict, max_length=20)
     pre_penalty_score: float = Field(ge=0, le=100)
     final_score: float = Field(ge=0, le=100)
@@ -499,6 +508,22 @@ class OpportunityScoreSnapshot(Contract):
     algorithm_version: Literal["gapforge-score-v1"] = "gapforge-score-v1"
     explanation: tuple[ShortText, ...] = Field(default_factory=tuple, max_length=50)
     created_at: datetime
+
+    @field_validator("raw_metrics")
+    @classmethod
+    def finite_metrics(cls, value: dict[str, float]) -> dict[str, float]:
+        import math
+
+        if any(not math.isfinite(metric) for metric in value.values()):
+            raise ValueError("raw metrics must be finite")
+        return value
+
+    @field_validator("penalties")
+    @classmethod
+    def bounded_penalties(cls, value: dict[str, float]) -> dict[str, float]:
+        if any(not 0 <= penalty <= 100 for penalty in value.values()):
+            raise ValueError("penalties must be between 0 and 100")
+        return value
 
 
 class CriticResult(Contract):
@@ -511,6 +536,15 @@ class CriticResult(Contract):
     missing_evidence: tuple[ShortText, ...] = Field(default_factory=tuple, max_length=30)
     recommended_intents: tuple[QueryIntent, ...] = Field(default_factory=tuple, max_length=4)
     summary: ShortText
+
+
+class CriticInput(Contract):
+    opportunity_id: Identifier
+    problem_hypothesis: ProblemHypothesis
+    evidence_card: EvidenceCard
+    gap_hypothesis: GapHypothesis
+    competitor_claims: tuple[AtomicClaim, ...] = Field(default_factory=tuple, max_length=100)
+    permitted_claim_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=500)
 
 
 class SourceCheckpoint(Contract):
