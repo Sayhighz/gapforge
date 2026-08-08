@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A1 foundation pushed in `c7f136f`; A2 persistence is next.
+Last checkpoint: A2 persistence pushed in `0f55541`; A3 queue/run control is next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -48,11 +48,11 @@ Acceptance: clean install works; invalid settings fail early; logs never include
 
 ## A2 — Persistence and migrations
 
-- [ ] Implement all persistent entities from spec section 6.
-- [ ] Add constraints, indexes, opaque ID strategy, and append-only timestamps.
-- [ ] Add async engine/session and unit-of-work/repository seams.
-- [ ] Create the initial Alembic migration.
-- [ ] Test clean upgrade and important uniqueness/lineage constraints.
+- [x] Implement all persistent entities from spec section 6.
+- [x] Add constraints, indexes, opaque ID strategy, and append-only timestamps.
+- [x] Add async engine/session and unit-of-work/repository seams.
+- [x] Create the initial Alembic migration.
+- [x] Test clean upgrade and important uniqueness/lineage constraints.
 
 Acceptance: a fresh PostgreSQL database migrates without manual SQL and can persist the complete lineage skeleton.
 
@@ -118,8 +118,8 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: A1 complete; A2 in progress.
+Current state: A1-A2 complete; A3 in progress.
 
-Last pushed commit: `c7f136f` (`build platform foundation`).
+Last pushed commit: `0f55541` (`add persistent lineage schema`).
 
-Next action: implement the complete persistence model and initial migration for A2.
+Next action: implement durable task leasing, persisted budgets, and run control for A3.
