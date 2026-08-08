@@ -30,10 +30,11 @@ Do not modify `pyproject.toml`. Use dependencies mandated by the spec and list a
 
 ## B1 — Domain contracts
 
-- [x] Define Pydantic contracts for missions/revisions and queries.
-- [x] Define raw/pain signals, clusters, claims, Evidence Cards, hypotheses, competitors, gaps, opportunities, scores, critic results, and source/provider results.
-- [x] Add schema versioning, strict enums, bounded strings/lists, and serialization tests.
-- [x] Keep contracts storage-neutral.
+- [ ] Define Pydantic contracts for missions/revisions and queries.
+- [ ] Define raw/pain signals, clusters, claims, Evidence Cards, hypotheses, competitors, gaps, opportunities, scores, critic results, and source/provider results.
+- [ ] Add schema versioning, strict enums, bounded strings/lists, and serialization tests.
+- [ ] Keep contracts storage-neutral.
+  Progress: Core contracts and query planning are pushed in `4a9ca79`; the full required-entity/provider audit remains before B1 is complete.
 
 Acceptance: contracts reject malformed/unbounded agent and source data predictably.
 

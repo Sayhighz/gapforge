@@ -150,6 +150,10 @@ def allocate_signal_budget(
         return {}
     if not 1 <= total <= 300:
         raise ValueError("signal budget must be between 1 and 300")
-    fair = total // len(unique)
+    selected = unique[:total]
+    fair, remainder = divmod(total, len(selected))
     cap = max(1, total // 2)
-    return {source: min(fair, 100, cap) for source in unique}
+    return {
+        source: min(fair + (1 if index < remainder else 0), 100, cap)
+        for index, source in enumerate(selected)
+    }

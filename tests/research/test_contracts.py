@@ -74,4 +74,3 @@ def test_raw_signal_rejects_unbounded_or_contentless_input() -> None:
         RawSignal(**base)
     with pytest.raises(ValidationError):
         RawSignal(**base, body="x" * 20_001)
-
