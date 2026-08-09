@@ -8,9 +8,9 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, I2 runtime admission, and
-I4 provider admission/audit are reviewed and merged. I3 evidence orchestration is implemented
-and awaiting integration-lead review in draft PR #11.
+Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, I2 runtime admission,
+I3 evidence orchestration, and I4 provider admission/audit are reviewed and merged. I5 is
+refreshing its persistence/query work onto the reviewed I3 seam.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -47,9 +47,8 @@ research module depends on a database session.
 
 Progress: PR #9 was squash-merged as `f30fc7b` after independent reproduction of 208 passed,
 1 environment-gated skip, whole-repository Ruff/format, strict mypy, diff-check, and green
-GitHub Python/container-backup jobs. I3 draft PR #11 registers the production `research.run`
-handler with one shared database/settings/worker identity; commit `1281ab2` passed the complete
-credential-free GitHub Python and container-backup jobs.
+GitHub Python/container-backup jobs. I3 PR #11 registered the production `research.run`
+handler with one shared database/settings/worker identity and was squash-merged as `a491d40`.
 
 Acceptance: a queued HUNT is structurally reachable by a worker and resumes safely after process
 or host restart without duplicating committed effects.
@@ -63,10 +62,11 @@ or host restart without duplicating committed effects.
 - [x] Persist a deterministic checkpoint and idempotency key at every stage boundary.
 - [x] Isolate source failures as warnings and keep valid partial evidence.
 
-Progress: draft PR #11 head `1281ab2` implements the canonical R1 and coherent R2 pipeline,
+Progress: PR #11 code checkpoint `1281ab2` implements the canonical R1 and coherent R2 pipeline,
 production handler/collector/search/fetch wiring, deterministic target lineage, conservative
 pre-call external reservations, per-source contract isolation, immutable source timestamps,
-and Python-owned competitor capture IDs. GitHub Quality run `31299658851` passed with 342 tests,
+and Python-owned competitor capture IDs. It was independently reviewed and squash-merged as
+`a491d40`. GitHub Quality run `31299658851` passed with 342 tests,
 1 environment-gated skip, whole-repository Ruff/111-file format, strict mypy over 61 source
 files, whitespace checks, and the 53-second container migration/health/backup/restore job.
 
@@ -136,9 +136,9 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1, I2 admission/finalization, and I4 are reviewed and merged. I3 and the I2
-real-handler item are implemented and green in draft PR #11 at `1281ab2`; I5-I8 remain pending.
+Current state: I1-I4 are reviewed and merged. I3 closed the I2 real-handler item. I5 is active;
+I6-I8 remain pending.
 
-Exact next action: integration lead reviews PR #11 against I3 acceptance and I5's coordinated
-atomic writer seam. Do not merge until that review is clean; after I3 lands, refresh I5 onto the
-new integration head and run the combined persistence/query-surface suite.
+Exact next action: merge integration checkpoint `a491d40` into the I5 branch, wire the artifact
+writer into the reviewed atomic stage seam, and verify immutable per-run final snapshots,
+query/report lineage, merge history, migrations, and the full PostgreSQL/container suite.
