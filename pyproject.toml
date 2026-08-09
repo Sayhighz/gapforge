@@ -34,6 +34,7 @@ dev = [
 
 [project.scripts]
 gap = "gapforge.cli:app"
+gap-smoke = "gapforge.smoke:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gapforge"]
