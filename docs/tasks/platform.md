@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A1-A8 complete; Node 24 CI action refresh pushed in `a7d6791`.
+Last checkpoint: A1-A8 complete; final review fixes pushed in `2880fe3`.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -120,7 +120,7 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 Current state: A1-A8 complete; draft PR #5 is ready for integration-lead review.
 
-Last pushed follow-up commit: `a7d6791` (`refresh CI actions for Node 24`).
+Last pushed follow-up commit: `2880fe3` (`fix queued deadlines and disaster restore`).
 
-Next action: confirm the refreshed GitHub Actions run has no Node 20 deprecation annotations;
-then integration lead reviews PR #5. No Lane A checklist work remains.
+Next action: confirm final GitHub Actions results, then integration lead reviews PR #5. Worker
+finalization/auth semantics remain tracked in integration I2; no Lane A checklist work remains.
