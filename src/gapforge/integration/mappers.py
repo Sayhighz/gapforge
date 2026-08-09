@@ -502,11 +502,14 @@ def atomic_claim_from_storage(
     row: storage.AtomicClaim,
     *,
     revision_identifiers: dict[UUID, str],
+    captured_evidence_identifiers: dict[UUID, str] | None = None,
 ) -> domain.AtomicClaim:
     """Restore a claim only when citations resolve to its persisted evidence lineage."""
 
+    captured = captured_evidence_identifiers or {}
     evidence_ids = tuple(
-        _revision_identifier(identifier, revision_identifiers) for identifier in row.evidence_ids
+        _evidence_identifier(identifier, revision_identifiers, captured)
+        for identifier in row.evidence_ids
     )
     citations: list[domain.Citation] = []
     for raw in row.citations:
@@ -736,6 +739,22 @@ def _revision_identifier(identifier: UUID, revision_identifiers: dict[UUID, str]
     except KeyError as exc:
         raise MappingError(f"unknown persisted raw revision ID: {identifier}") from exc
     return domain_identifier_from_storage("raw-signal-revision", identifier, domain_id)
+
+
+def _evidence_identifier(
+    identifier: UUID,
+    revision_identifiers: dict[UUID, str],
+    captured_evidence_identifiers: dict[UUID, str],
+) -> str:
+    if identifier in revision_identifiers:
+        return _revision_identifier(identifier, revision_identifiers)
+    try:
+        domain_id = captured_evidence_identifiers[identifier]
+    except KeyError as exc:
+        raise MappingError(f"unknown persisted evidence ID: {identifier}") from exc
+    if _uuid_text(domain_id, "captured evidence ID") != identifier:
+        raise MappingError("captured evidence ID does not match its domain identifier")
+    return domain_id
 
 
 def _claim_identifier(identifier: UUID, claim_identifiers: dict[UUID, str]) -> str:
@@ -1073,7 +1092,11 @@ PERSISTED_ENTITY_MAPPINGS = {
             routes={},
             storage_only={
                 "decided_at": "merge decision workflow supplies decision time",
+                "decided_by": "merge decision workflow supplies the bounded local actor",
                 "decision_reason": "merge decision workflow supplies rationale",
+                "decision_event_id": (
+                    "latest append-only merge decision supplies projection lineage"
+                ),
                 "lifecycle_event_id": "merge decision workflow supplies audit event lineage",
                 "created_at": "database-managed creation timestamp",
                 "updated_at": "database-managed mutable-row audit timestamp",
@@ -1215,7 +1238,11 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "to_state": "to_status",
                 "evidence_ids": "details.evidence_ids",
             },
-            storage_only={"run_id": "lifecycle transition context supplies optional run lineage"},
+            storage_only={
+                "run_id": "lifecycle transition context supplies optional run lineage",
+                "gap_hypothesis_id": "lifecycle context freezes the exact gap snapshot",
+                "event_number": "assessment lock supplies monotonic lifecycle ordering",
+            },
         ),
         _entity_mapping(
             domain.AgentCall,

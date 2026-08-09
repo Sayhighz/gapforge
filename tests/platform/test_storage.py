@@ -170,6 +170,7 @@ def test_model_contains_complete_required_entity_set() -> None:
         "gap_hypotheses",
         "opportunities",
         "mission_opportunity_assessments",
+        "final_assessment_snapshots",
         "opportunity_score_snapshots",
         "critic_results",
         "product_hypotheses",

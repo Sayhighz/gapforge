@@ -8,9 +8,8 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, I2 runtime admission,
-I3 evidence orchestration, and I4 provider admission/audit are reviewed and merged. I5 is
-refreshing its persistence/query work onto the reviewed I3 seam.
+Last checkpoint: Lane A, Lane B, and I1-I5 integration are reviewed and merged. I6 reports and
+repository skill are active in draft PR #13.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -95,11 +94,20 @@ or provider audit history.
 
 ## I5 — Persistence and query surfaces
 
-- [ ] Persist raw evidence, revisions, pain signals, clusters, merge decisions, claims, cards, hypotheses, competitors, opportunities, assessments, snapshots, critic results, and lifecycle events.
-- [ ] Keep global evidence identity separate from mission-revision relevance, score, and verdict.
-- [ ] Complete opportunity, evidence, changes, rejections, merge, and report CLI commands over persisted data.
-- [ ] Record reversible manual merge decisions with actor, reason, and lifecycle/event history.
-- [ ] Make report identity, claims, scores, verdicts, citations, and locale derive from the same persisted snapshot.
+- [x] Persist raw evidence, revisions, pain signals, clusters, merge decisions, claims, cards, hypotheses, competitors, opportunities, assessments, snapshots, critic results, and lifecycle events.
+- [x] Keep global evidence identity separate from mission-revision relevance, score, and verdict.
+- [x] Complete opportunity, evidence, changes, rejections, merge, and report CLI commands over persisted data.
+- [x] Record reversible manual merge decisions with actor, reason, and lifecycle/event history.
+- [x] Make report identity, claims, scores, verdicts, citations, and locale derive from the same persisted snapshot.
+
+Progress: PR #12 implementation checkpoint `ed7a008` completes typed R1/R2 artifact persistence
+through the I3 same-transaction writer seam, append-only merge/lifecycle/final-snapshot journals,
+global evidence and observed-at-bound competitor capture identity, bounded lineage validation,
+and persisted opportunity/evidence/change/rejection/merge/report query surfaces. GitHub Actions run
+`31300043062` passed 358 tests with 1 environment-gated skip, Ruff, formatting across 118 files,
+strict mypy across 63 source files, whitespace checks, and the 58-second container migration,
+health, backup, and restore job. The local Docker daemon remains unavailable because of the shared
+host overlay2 I/O failure; GitHub PostgreSQL/Compose CI provides the completed database gate.
 
 Acceptance: evidence, scores, verdicts, rejections, changes, merges, and reopen events are queryable
 without direct SQL, and every supported claim resolves to stored evidence.
@@ -145,9 +153,9 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1-I4 are reviewed and merged. I3 closed the I2 real-handler item. I5 is active;
-I6-I8 remain pending.
+Current state: I1-I5 are reviewed and merged. I3 closed the I2 real-handler item. I6 is active;
+I7-I8 remain pending.
 
-Exact next action: merge integration checkpoint `a491d40` into the I5 branch, wire the artifact
-writer into the reviewed atomic stage seam, and verify immutable per-run final snapshots,
-query/report lineage, merge history, migrations, and the full PostgreSQL/container suite.
+Exact next action: refresh I6 draft PR #13 onto integration checkpoint `02f7d10`, wire the
+reviewed query snapshots into atomic report persistence and CLI commands, then verify the
+canonical repository skill and Product Hypothesis gate without inventing unsupported surfaces.

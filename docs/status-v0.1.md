@@ -26,14 +26,15 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `a491d40` |
+| Integration | `integration/v0.1` | #4 | active draft | `02f7d10` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
 | I2 runtime | `agent/integration-runtime` | #9 | reviewed and squash-merged | `4f4fcaf` |
 | I3 evidence pipeline | `agent/integration-evidence-pipeline` | #11 | reviewed and squash-merged | `b026074` |
 | I4 provider audit | `agent/integration-provider-audit` | #10 | reviewed and squash-merged | `5df58b4` |
-| I5 persistence surfaces | `agent/integration-persistence-surfaces` | #12 | active draft | `c0d4ea7` |
+| I5 persistence surfaces | `agent/integration-persistence-surfaces` | #12 | reviewed and squash-merged | `6e9f56e` |
+| I6 reports and skill | `agent/integration-reports-skill` | #13 | active draft | `6d26afd` |
 
 GitHub issues:
 
@@ -69,17 +70,21 @@ Completed:
   exact target lineage, conservative external-call admission, per-source isolation, immutable
   timestamps, and Python-owned capture identity were independently reproduced with 342 passed,
   1 environment-gated skip and green container backup; PR #11 was squash-merged as `a491d40`.
+- I5 atomic artifact persistence, append-only merge/lifecycle/final-snapshot journals, exact
+  query/report lineage, competitor evidence reads, and production writer wiring were independently
+  reproduced with 358 passed, 1 environment-gated skip and green container backup; PR #12 was
+  squash-merged as `02f7d10`.
 
 In progress:
 
-- I5 persistence/query surfaces are active in draft PR #12 and are refreshing onto merged I3.
-- Immutable per-run final snapshot/query semantics and the production artifact-writer seam are
-  under final review before I5 can merge.
+- I6 deterministic report artifacts and the canonical repository skill are active in draft PR #13.
+- The first I6 checkpoint is isolated from I5-owned seams; CLI/query wiring follows its refresh
+  onto merged I5.
 
 Exact next action:
 
-1. Complete and review I5 persistence/query surfaces on the merged I3 seam.
-2. Implement/review I6 reports and repository skill.
+1. Complete and review I6 reports and repository skill on the merged I5 seam.
+2. Add the final end-to-end fake-provider/report and credential-free smoke coverage.
 3. Run I7 integrated verification and I8 release handoff.
 
 ## Recovery rules
