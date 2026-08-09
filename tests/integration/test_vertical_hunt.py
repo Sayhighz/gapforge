@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from gapforge.analysis.normalization import normalize_text
 from gapforge.config import AgentProviderName, Settings
@@ -36,6 +37,7 @@ from gapforge.runtime.evidence_pipeline import (
     _stable_id,
 )
 from gapforge.runtime.research_handler import ResearchRunHandler
+from gapforge.storage import models
 from gapforge.storage.database import Database
 from gapforge.storage.models import (
     AgentCall,
@@ -59,6 +61,33 @@ from gapforge.storage.uow import SqlAlchemyUnitOfWork
 from gapforge.worker import ResearchTaskHandler, TaskHandlerRegistry, TaskHandlerResult, Worker
 
 OBSERVED_AT = datetime(2026, 1, 15, 12, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vertical_application_rows(migrated_postgres_url: str) -> Iterator[None]:
+    async def cleanup() -> None:
+        database = Database.from_url(migrated_postgres_url)
+        try:
+            async with database.session() as session:
+                existing = set(
+                    await session.scalars(
+                        text(
+                            "SELECT tablename FROM pg_tables "
+                            "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                        )
+                    )
+                )
+                tables = sorted(existing & set(models.Base.metadata.tables))
+                if tables:
+                    quoted = ", ".join(f'"{table}"' for table in tables)
+                    await session.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+                    await session.commit()
+        finally:
+            await database.dispose()
+
+    asyncio.run(cleanup())
+    yield
+    asyncio.run(cleanup())
 
 
 def _record_handler_errors(
