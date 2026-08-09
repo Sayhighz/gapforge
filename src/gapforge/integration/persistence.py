@@ -28,6 +28,20 @@ from gapforge.storage import models
 
 MergeAction = Literal["ACCEPT", "REJECT", "REVERSE"]
 _ARTIFACT_NAMESPACE = uuid5(NAMESPACE_URL, "https://gapforge.dev/v0.1/artifacts")
+_SEMANTIC_BATCH_STAGES = frozenset(
+    {
+        "EXTRACT",
+        "EXTRACT_R2",
+        "CLUSTER",
+        "CLUSTER_R2",
+        "GAP",
+        "GAP_R2",
+        "HYPOTHESIS",
+        "HYPOTHESIS_R2",
+        "CRITIC",
+        "CRITIC_R2",
+    }
+)
 
 
 class MergeDecisionConflictError(RuntimeError):
@@ -159,13 +173,11 @@ class ResearchArtifactWriter:
             "FINAL": self._persist_final,
         }
         if commit.stage == "CRITIC_R2":
-            payload = dict(commit.payload)
-            payload.pop("_input_bounds", None)
+            payload = _artifact_payload(commit.stage, commit.payload)
             await self._persist_critic(session, context, payload, round_number=2)
             return
         if commit.stage == "CARD_SCORE_R2":
-            payload = dict(commit.payload)
-            payload.pop("_input_bounds", None)
+            payload = _artifact_payload(commit.stage, commit.payload)
             await self._persist_card_score(session, context, payload, round_number=2)
             return
         handler = handlers.get(commit.stage)
@@ -181,8 +193,7 @@ class ResearchArtifactWriter:
             }:
                 return
             raise ValueError(f"unsupported artifact stage: {commit.stage}")
-        payload = dict(commit.payload)
-        payload.pop("_input_bounds", None)
+        payload = _artifact_payload(commit.stage, commit.payload)
         await handler(session, context, payload)
 
     async def _persist_extract(
@@ -999,6 +1010,16 @@ def _require_keys(stage: str, payload: Mapping[str, Any], expected: set[str]) ->
         raise ValueError(f"unknown {stage} payload keys: {sorted(unknown)}")
     if missing:
         raise ValueError(f"missing {stage} payload keys: {sorted(missing)}")
+
+
+def _artifact_payload(stage: str, source: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(source)
+    payload.pop("_input_bounds", None)
+    if stage in _SEMANTIC_BATCH_STAGES:
+        schema_version = payload.pop("schema_version", None)
+        if schema_version != domain.SCHEMA_VERSION:
+            raise ValueError(f"{stage} payload schema_version must be {domain.SCHEMA_VERSION!r}")
+    return payload
 
 
 def _require_unique_ids(label: str, artifacts: tuple[Any, ...]) -> None:

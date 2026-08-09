@@ -81,7 +81,7 @@ class HuntFixture:
     run_id: UUID
     query_sources: tuple[Source, ...] = (Source.HACKER_NEWS,)
     empty_collection: bool = False
-    critic_verdict: str = "RESEARCH_MORE"
+    critic_verdict: str = "REJECT"
 
     @property
     def external_id(self) -> str:
@@ -549,7 +549,7 @@ async def _run_cli(
 @pytest.mark.parametrize(
     ("slug", "empty", "partial", "critic_verdict", "expected_status", "expected_calls"),
     (
-        ("baseline", False, False, "RESEARCH_MORE", "COMPLETED", 6),
+        ("baseline", False, False, "REJECT", "COMPLETED", 6),
         ("hard-gate", False, False, "VALIDATE", "COMPLETED", 6),
         ("zero", True, False, "RESEARCH_MORE", "COMPLETED", 1),
         ("partial", False, True, "RESEARCH_MORE", "COMPLETED_WITH_WARNINGS", 6),
