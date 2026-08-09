@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A6 containers/auth pushed in `e0982d7`; A7 backups/CI is next.
+Last checkpoint: A7 backups/CI pushed in `4291f29`; A8 audit and PR handoff is next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -100,11 +100,11 @@ Acceptance: Compose can bootstrap after one device login and restart without los
 
 ## A7 — Backups and CI
 
-- [ ] Implement backup create/list/verify/restore and retention.
-- [ ] Add optional Compose backup profile and exclude Codex auth.
-- [ ] Test valid restore and corrupt archive detection using a temporary database.
-- [ ] Add GitHub Actions for Ruff, formatting, mypy, and pytest.
-- [ ] Add credential-gated platform smoke commands without running them in public CI.
+- [x] Implement backup create/list/verify/restore and retention.
+- [x] Add optional Compose backup profile and exclude Codex auth.
+- [x] Test valid restore and corrupt archive detection using a temporary database.
+- [x] Add GitHub Actions for Ruff, formatting, mypy, and pytest.
+- [x] Add credential-gated platform smoke commands without running them in public CI.
 
 Acceptance: CI is credential-free and a verified backup can restore the tested database state.
 
@@ -118,9 +118,9 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: A1-A6 complete; A7 in progress.
+Current state: A1-A7 complete; A8 audit and handoff in progress.
 
-Last pushed commit: `e0982d7` (`add reproducible container platform`).
+Last pushed commit: `4291f29` (`add verified backup and CI operations`).
 
-Next action: implement verified PostgreSQL backups, retention, optional Compose backup profile,
-and credential-free CI for A7.
+Next action: re-read the canonical spec, audit all owned deliverables, run final checks, and update
+the draft PR with exact evidence and cross-lane integration needs.
