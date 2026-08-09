@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A5 CLI/health pushed in `921ff43`; A6 containers/auth is next.
+Last checkpoint: A6 containers/auth pushed in `e0982d7`; A7 backups/CI is next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -90,11 +90,11 @@ Acceptance: an agent can create/list/revise/activate/pause missions and inspect 
 
 ## A6 — Containers and authentication
 
-- [ ] Build non-root worker image with pinned Codex CLI.
-- [ ] Add PostgreSQL, worker, persistent DB volume, and dedicated `CODEX_HOME` volume to Compose.
-- [ ] Add migration/startup and healthcheck behavior.
-- [ ] Add documented device-auth helper and auth status checks.
-- [ ] Confirm no auth/source secret enters an image layer or Git.
+- [x] Build non-root worker image with pinned Codex CLI.
+- [x] Add PostgreSQL, worker, persistent DB volume, and dedicated `CODEX_HOME` volume to Compose.
+- [x] Add migration/startup and healthcheck behavior.
+- [x] Add documented device-auth helper and auth status checks.
+- [x] Confirm no auth/source secret enters an image layer or Git.
 
 Acceptance: Compose can bootstrap after one device login and restart without losing data or auth state.
 
@@ -118,8 +118,9 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: A1-A5 complete; A6 in progress.
+Current state: A1-A6 complete; A7 in progress.
 
-Last pushed commit: `921ff43` (`add platform CLI and health checks`).
+Last pushed commit: `e0982d7` (`add reproducible container platform`).
 
-Next action: implement the non-root pinned-Codex image, Compose topology, and auth helpers for A6.
+Next action: implement verified PostgreSQL backups, retention, optional Compose backup profile,
+and credential-free CI for A7.
