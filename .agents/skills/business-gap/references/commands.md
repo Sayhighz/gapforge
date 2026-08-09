@@ -22,7 +22,7 @@ gap run show <run-id> --json
 gap mission list --json
 gap mission show <mission-id> --json
 gap mission create "<natural-language mission>" --json
-gap mission revise <mission-id> "<revised mission>" --json
+gap mission revise <mission-id> "<revised mission>" --reason "<change reason>" --json
 gap hunt --mission <mission-id> --json
 ```
 

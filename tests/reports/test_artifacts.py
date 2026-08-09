@@ -10,6 +10,7 @@ from gapforge.domain.contracts import RunStatus
 from gapforge.reports.artifacts import (
     ReportArtifactConflictError,
     ReportArtifactPathError,
+    ReportArtifactStateError,
     ReportArtifactStore,
 )
 from gapforge.reports.renderers import RunReportData, render_run_report
@@ -17,13 +18,20 @@ from gapforge.reports.renderers import RunReportData, render_run_report
 STARTED_AT = datetime(2026, 8, 9, 12, 30, tzinfo=UTC)
 
 
-def _run_report(*, run_id: str = "run-123", locale: str = "en") -> RunReportData:
+def _run_report(
+    *,
+    run_id: str = "run-123",
+    locale: str = "en",
+    started_at: datetime = STARTED_AT,
+    status: RunStatus = RunStatus.COMPLETED,
+    finished_at: datetime | None = STARTED_AT,
+) -> RunReportData:
     return RunReportData(
         run_id=run_id,
         mission_revision_id="revision-123",
-        status=RunStatus.COMPLETED,
-        started_at=STARTED_AT,
-        finished_at=STARTED_AT,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
         output_locale=locale,
         warnings=(),
         opportunities=(),
@@ -72,11 +80,28 @@ def test_same_run_with_changed_content_is_an_explicit_conflict(tmp_path: Path) -
     assert (reports_dir / "latest.md").read_bytes() == original_latest
 
 
+@pytest.mark.parametrize("status", [RunStatus.QUEUED, RunStatus.RUNNING])
+def test_nonterminal_run_is_never_persisted_as_immutable_summary(
+    tmp_path: Path, status: RunStatus
+) -> None:
+    reports_dir = tmp_path / "reports"
+
+    with pytest.raises(ReportArtifactStateError, match="terminal"):
+        ReportArtifactStore(reports_dir).persist_run(_run_report(status=status, finished_at=None))
+
+    assert not reports_dir.exists()
+
+
+def test_terminal_run_requires_finished_timestamp(tmp_path: Path) -> None:
+    with pytest.raises(ReportArtifactStateError, match="finished_at"):
+        ReportArtifactStore(tmp_path / "reports").persist_run(_run_report(finished_at=None))
+
+
 def test_interrupted_latest_replace_never_exposes_partial_content_and_restart_repairs(
     tmp_path: Path,
 ) -> None:
     reports_dir = tmp_path / "reports"
-    previous = _run_report(run_id="previous")
+    previous = _run_report(run_id="previous", started_at=datetime(2026, 8, 9, 11, 30, tzinfo=UTC))
     ReportArtifactStore(reports_dir).persist_run(previous)
     previous_latest = (reports_dir / "latest.md").read_bytes()
     current = _run_report(run_id="current", locale="th")
@@ -94,8 +119,22 @@ def test_interrupted_latest_replace_never_exposes_partial_content_and_restart_re
     assert (reports_dir / "latest.md").read_bytes() == previous_latest
     assert not tuple(reports_dir.rglob("*.tmp"))
 
-    repaired = ReportArtifactStore(reports_dir).persist_run(current)
+    repaired = ReportArtifactStore(reports_dir).persist_run(previous)
     assert repaired.latest_path.read_bytes() == current_path.read_bytes()
+
+
+def test_persisting_an_older_run_never_regresses_latest(tmp_path: Path) -> None:
+    reports_dir = tmp_path / "reports"
+    older = _run_report(run_id="older", started_at=datetime(2026, 8, 8, 23, 59, tzinfo=UTC))
+    newer = _run_report(run_id="newer", started_at=datetime(2026, 8, 9, 0, 1, tzinfo=UTC))
+    store = ReportArtifactStore(reports_dir)
+
+    newer_artifact = store.persist_run(newer)
+    older_artifact = store.persist_run(older)
+
+    assert newer_artifact.is_latest is True
+    assert older_artifact.is_latest is False
+    assert (reports_dir / "latest.md").read_bytes() == newer_artifact.run_path.read_bytes()
 
 
 def test_report_store_refuses_traversal_symlinks_and_unsafe_run_ids(tmp_path: Path) -> None:

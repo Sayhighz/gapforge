@@ -1,6 +1,6 @@
 ---
 name: business-gap
-description: Use GapForge for evidence-backed business-gap research, stored evidence inspection, HUNT/MONITOR workflows, score and rejection explanations, reports, and explicit post-VALIDATE Product Hypotheses.
+description: Use GapForge for evidence-backed business-gap research, stored evidence inspection, HUNT/MONITOR workflows, score and rejection explanations, and reports.
 ---
 
 # Business Gap Research

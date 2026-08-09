@@ -12,11 +12,11 @@ ROOT = Path(__file__).parents[2]
 COMMANDS = ROOT / ".agents/skills/business-gap/references/commands.md"
 
 
-def _leaf_commands(command: Any, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+def _leaf_commands(command: Any, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
     children = getattr(command, "commands", None)
     if not isinstance(children, dict):
-        return {prefix}
-    paths: set[tuple[str, ...]] = set()
+        return {prefix: command}
+    paths: dict[tuple[str, ...], Any] = {}
     for name, child in children.items():
         paths.update(_leaf_commands(child, (*prefix, name)))
     return paths
@@ -32,5 +32,14 @@ def test_repository_skill_examples_name_only_exposed_cli_commands() -> None:
 
     assert documented
     for arguments in documented:
-        assert any(arguments[: len(path)] == list(path) for path in implemented), arguments
+        matches = [path for path in implemented if arguments[: len(path)] == list(path)]
+        assert matches, arguments
+        path = max(matches, key=len)
+        with implemented[path].make_context(path[-1], arguments[len(path) :]):
+            pass
     assert not any(arguments[:2] == ["product-hypothesis", "create"] for arguments in documented)
+
+
+def test_product_hypothesis_is_explicitly_unavailable_without_a_real_cli_surface() -> None:
+    skill = (ROOT / ".agents/skills/business-gap/SKILL.md").read_text(encoding="utf-8")
+    assert "Product Hypothesis creation is not implemented" in skill
