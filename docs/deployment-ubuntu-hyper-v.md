@@ -24,12 +24,18 @@ reports that `main` is **not protected**. Do not dispatch the credentialed platf
 enables branch protection with all of the following:
 
 - changes enter through pull requests;
-- the Quality checks (`python`, `container-backup`, and `arm64-build`) are required;
+- branches must be up to date before merge and the Quality checks (`python`, `container-backup`,
+  and `arm64-build`) are required;
+- review conversations must be resolved;
+- linear history is required;
 - force pushes are disabled; and
 - branch deletion is disabled.
 
 This repository does not mutate GitHub settings. Branch protection is an operator/repository-owner
-gate outside the deployment itself.
+gate outside the deployment itself. Because the current repository has one owner and GitHub does
+not permit self-approval, required approving reviews may remain at zero for v0.1; that is an explicit
+single-owner limitation, not evidence that PR #4 received an independent GitHub approval. The
+integration lead must still record the final full-diff review before merge.
 
 Prepare these external dependencies:
 
@@ -129,7 +135,7 @@ Clone the repository inside the Ubuntu VM and pin the reviewed release commit ra
 an arbitrary workflow-dispatch branch:
 
 ```sh
-git clone <private-gapforge-repository-url> gapforge
+git clone <reviewed-gapforge-repository-url> gapforge
 cd gapforge
 git fetch --tags origin
 git switch main
