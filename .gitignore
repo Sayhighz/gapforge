@@ -11,8 +11,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-reports/
+/reports/
 backups/
 secrets/
 .worktrees/
-

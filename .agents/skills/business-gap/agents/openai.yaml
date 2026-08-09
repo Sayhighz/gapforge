@@ -1,0 +1,4 @@
+interface:
+  display_name: "Business Gap Research"
+  short_description: "Evidence-backed gap research workflows"
+  default_prompt: "Use $business-gap to inspect existing evidence before running bounded research."
