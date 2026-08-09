@@ -271,6 +271,68 @@ async def test_merge_decision_database_constraints_reject_invalid_audit_rows_and
                     )
                     await session.commit()
 
+        async with database.session() as session:
+            with pytest.raises(DBAPIError, match="from_status does not match candidate"):
+                await session.execute(
+                    text(
+                        "INSERT INTO merge_decision_events "
+                        "(id, candidate_id, decision_number, action, from_status, "
+                        "to_status, actor, reason) VALUES "
+                        "(:id, :candidate_id, 1, 'REVERSE', 'ACCEPTED', "
+                        "'REVERSED', 'actor', 'orphan reverse')"
+                    ),
+                    {"id": uuid4(), "candidate_id": candidate.id},
+                )
+                await session.commit()
+        async with database.session() as session:
+            with pytest.raises(DBAPIError, match="next candidate version"):
+                await session.execute(
+                    text(
+                        "INSERT INTO merge_decision_events "
+                        "(id, candidate_id, decision_number, action, from_status, "
+                        "to_status, actor, reason) VALUES "
+                        "(:id, :candidate_id, 2, 'ACCEPT', 'PENDING', "
+                        "'ACCEPTED', 'actor', 'skipped version')"
+                    ),
+                    {"id": uuid4(), "candidate_id": candidate.id},
+                )
+                await session.commit()
+
+        direct_left, direct_right, direct_candidate = _candidate_rows()
+        direct_event_id = uuid4()
+        async with database.session() as session:
+            session.add_all((direct_left, direct_right, direct_candidate))
+            await session.commit()
+        async with database.session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO merge_decision_events "
+                    "(id, candidate_id, decision_number, action, from_status, "
+                    "to_status, actor, reason) VALUES "
+                    "(:id, :candidate_id, 1, 'ACCEPT', 'PENDING', "
+                    "'ACCEPTED', 'direct-owner', 'direct review')"
+                ),
+                {"id": direct_event_id, "candidate_id": direct_candidate.id},
+            )
+            await session.commit()
+        async with database.session() as session:
+            projected = await session.get(MergeCandidate, direct_candidate.id)
+            assert projected is not None
+            assert projected.status == "ACCEPTED"
+            assert projected.decision_event_id == direct_event_id
+            with pytest.raises(DBAPIError, match="from_status does not match candidate"):
+                await session.execute(
+                    text(
+                        "INSERT INTO merge_decision_events "
+                        "(id, candidate_id, decision_number, action, from_status, "
+                        "to_status, actor, reason) VALUES "
+                        "(:id, :candidate_id, 2, 'ACCEPT', 'PENDING', "
+                        "'ACCEPTED', 'direct-owner', 'duplicate accept')"
+                    ),
+                    {"id": uuid4(), "candidate_id": direct_candidate.id},
+                )
+                await session.commit()
+
         service = MergeDecisionService(database.session_factory, clock=lambda: NOW)
         event = await service.decide(
             candidate.id,
@@ -453,7 +515,7 @@ async def _seed_legacy_link(database_url: str) -> tuple[UUID, UUID]:
         id=uuid4(),
         mission_revision_id=revision.id,
         opportunity_id=opportunity.id,
-        lifecycle_status="RESEARCHING",
+        lifecycle_status="DISCOVERED",
         relevance=0.8,
         verdict=None,
         competitor_research_status="INCOMPLETE",
@@ -461,9 +523,11 @@ async def _seed_legacy_link(database_url: str) -> tuple[UUID, UUID]:
     lifecycle = LifecycleEvent(
         id=uuid4(),
         assessment_id=assessment.id,
+        event_number=1,
         run_id=run.id,
-        from_status="DISCOVERED",
-        to_status="RESEARCHING",
+        gap_hypothesis_id=gap.id,
+        from_status=None,
+        to_status="DISCOVERED",
         reason="legacy merge review",
         details={},
     )

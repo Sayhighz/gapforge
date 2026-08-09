@@ -21,6 +21,11 @@ from sqlalchemy.exc import IntegrityError
 from gapforge.backup import BackupError, BackupService
 from gapforge.config import AgentProviderName, Settings
 from gapforge.health import HealthService
+from gapforge.integration.persistence import (
+    MergeAction,
+    MergeDecisionConflictError,
+    MergeDecisionService,
+)
 from gapforge.providers.codex_cli import CodexCliProvider
 from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.storage.admin import execute_read_only_sql
@@ -801,26 +806,38 @@ def merge_list(json_output: JsonOption = False) -> None:
 def _merge_decision(
     command: str,
     candidate_id: str,
-    status: str,
+    action: MergeAction,
+    actor: str,
     reason: str,
     json_output: bool,
 ) -> None:
     async def operation() -> dict[str, Any]:
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                candidate = await session.get(
-                    MergeCandidate, _parse_uuid(candidate_id, "merge candidate")
+            try:
+                event = await MergeDecisionService(
+                    database.session_factory,
+                    clock=lambda: datetime.now(UTC),
+                ).decide(
+                    _parse_uuid(candidate_id, "merge candidate"),
+                    action=action,
+                    actor=actor,
+                    reason=reason,
                 )
-                if candidate is None:
-                    raise CliError("NOT_FOUND", "merge candidate not found", exit_code=3)
-                if candidate.status != "PENDING":
-                    raise CliError("INVALID_STATE", "merge candidate already decided", exit_code=4)
-                candidate.status = status
-                candidate.decision_reason = reason
-                candidate.decided_at = datetime.now(UTC)
-                await session.commit()
-                return {"id": candidate.id, "status": candidate.status, "reason": reason}
+            except LookupError as error:
+                raise CliError("NOT_FOUND", "merge candidate not found", exit_code=3) from error
+            except MergeDecisionConflictError as error:
+                raise CliError("INVALID_STATE", str(error), exit_code=4) from error
+            return {
+                "id": event.candidate_id,
+                "action": event.action,
+                "from_status": event.from_status,
+                "status": event.to_status,
+                "actor": event.actor,
+                "reason": event.reason,
+                "decision_number": event.decision_number,
+                "decided_at": event.created_at,
+            }
         finally:
             await database.dispose()
 
@@ -830,19 +847,36 @@ def _merge_decision(
 @merge_app.command("accept")
 def merge_accept(
     candidate_id: str,
+    actor: Annotated[str, typer.Option("--actor", help="Bounded local audit identity.")],
     reason: Annotated[str, typer.Option("--reason")],
     json_output: JsonOption = False,
 ) -> None:
-    _merge_decision("merge-candidate.accept", candidate_id, "ACCEPTED", reason, json_output)
+    _merge_decision("merge-candidate.accept", candidate_id, "ACCEPT", actor, reason, json_output)
 
 
 @merge_app.command("reject")
 def merge_reject(
     candidate_id: str,
+    actor: Annotated[
+        str,
+        typer.Option("--actor", help="Bounded local audit identity; rejection is final."),
+    ],
     reason: Annotated[str, typer.Option("--reason")],
     json_output: JsonOption = False,
 ) -> None:
-    _merge_decision("merge-candidate.reject", candidate_id, "REJECTED", reason, json_output)
+    _merge_decision("merge-candidate.reject", candidate_id, "REJECT", actor, reason, json_output)
+
+
+@merge_app.command("reverse")
+def merge_reverse(
+    candidate_id: str,
+    actor: Annotated[str, typer.Option("--actor", help="Bounded local audit identity.")],
+    reason: Annotated[str, typer.Option("--reason")],
+    json_output: JsonOption = False,
+) -> None:
+    """Reverse an accepted equivalence; rejected candidates remain final."""
+
+    _merge_decision("merge-candidate.reverse", candidate_id, "REVERSE", actor, reason, json_output)
 
 
 def _integration_placeholder(command: str, json_output: bool) -> None:

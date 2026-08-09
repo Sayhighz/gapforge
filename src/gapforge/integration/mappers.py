@@ -1073,7 +1073,11 @@ PERSISTED_ENTITY_MAPPINGS = {
             routes={},
             storage_only={
                 "decided_at": "merge decision workflow supplies decision time",
+                "decided_by": "merge decision workflow supplies the bounded local actor",
                 "decision_reason": "merge decision workflow supplies rationale",
+                "decision_event_id": (
+                    "latest append-only merge decision supplies projection lineage"
+                ),
                 "lifecycle_event_id": "merge decision workflow supplies audit event lineage",
                 "created_at": "database-managed creation timestamp",
                 "updated_at": "database-managed mutable-row audit timestamp",
@@ -1215,7 +1219,11 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "to_state": "to_status",
                 "evidence_ids": "details.evidence_ids",
             },
-            storage_only={"run_id": "lifecycle transition context supplies optional run lineage"},
+            storage_only={
+                "run_id": "lifecycle transition context supplies optional run lineage",
+                "gap_hypothesis_id": "lifecycle context freezes the exact gap snapshot",
+                "event_number": "assessment lock supplies monotonic lifecycle ordering",
+            },
         ),
         _entity_mapping(
             domain.AgentCall,

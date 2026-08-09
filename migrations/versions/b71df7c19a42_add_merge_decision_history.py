@@ -103,6 +103,77 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        CREATE FUNCTION gapforge_validate_merge_decision_insert()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+            candidate_row merge_candidates%ROWTYPE;
+            projected_event merge_decision_events%ROWTYPE;
+            latest_version integer;
+        BEGIN
+            SELECT * INTO candidate_row FROM merge_candidates
+            WHERE id = NEW.candidate_id FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'merge decision references unknown candidate';
+            END IF;
+            SELECT max(decision_number) INTO latest_version FROM merge_decision_events
+            WHERE candidate_id = NEW.candidate_id;
+            IF NEW.decision_number <> coalesce(latest_version, 0) + 1 THEN
+                RAISE EXCEPTION 'merge decision version is not the next candidate version';
+            END IF;
+            IF NEW.from_status <> candidate_row.status THEN
+                RAISE EXCEPTION 'merge decision from_status does not match candidate';
+            END IF;
+            IF candidate_row.decision_event_id IS NULL THEN
+                IF candidate_row.status <> 'PENDING' THEN
+                    RAISE EXCEPTION 'decided candidate lacks a current decision projection';
+                END IF;
+            ELSE
+                SELECT * INTO projected_event FROM merge_decision_events
+                WHERE id = candidate_row.decision_event_id
+                  AND candidate_id = candidate_row.id;
+                IF NOT FOUND
+                   OR projected_event.decision_number <> latest_version
+                   OR projected_event.to_status <> candidate_row.status
+                   OR projected_event.actor IS DISTINCT FROM candidate_row.decided_by
+                   OR projected_event.reason IS DISTINCT FROM candidate_row.decision_reason
+                   OR projected_event.created_at IS DISTINCT FROM candidate_row.decided_at THEN
+                    RAISE EXCEPTION 'candidate does not project its latest merge decision';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER trg_merge_decision_events_validate_insert "
+        "BEFORE INSERT ON merge_decision_events "
+        "FOR EACH ROW EXECUTE FUNCTION gapforge_validate_merge_decision_insert()"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION gapforge_project_merge_decision_insert()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            UPDATE merge_candidates
+            SET status = NEW.to_status,
+                decided_at = NEW.created_at,
+                decided_by = NEW.actor,
+                decision_reason = NEW.reason,
+                decision_event_id = NEW.id
+            WHERE id = NEW.candidate_id;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER trg_merge_decision_events_project_insert "
+        "AFTER INSERT ON merge_decision_events "
+        "FOR EACH ROW EXECUTE FUNCTION gapforge_project_merge_decision_insert()"
+    )
+    op.execute(
+        """
         CREATE FUNCTION gapforge_validate_merge_candidate_projection()
         RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE
@@ -166,6 +237,15 @@ def downgrade() -> None:
     op.execute(
         "DROP TRIGGER IF EXISTS trg_merge_decision_events_append_only ON merge_decision_events"
     )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_merge_decision_events_project_insert "
+        "ON merge_decision_events"
+    )
+    op.execute("DROP FUNCTION IF EXISTS gapforge_project_merge_decision_insert()")
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_merge_decision_events_validate_insert ON merge_decision_events"
+    )
+    op.execute("DROP FUNCTION IF EXISTS gapforge_validate_merge_decision_insert()")
     op.execute(
         "DROP TRIGGER IF EXISTS trg_merge_candidates_validate_projection ON merge_candidates"
     )

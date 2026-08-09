@@ -753,13 +753,29 @@ class ProductHypothesis(IdMixin, CreatedAtMixin, Base):
 class LifecycleEvent(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "lifecycle_events"
     __table_args__ = (
-        Index("ix_lifecycle_events_assessment_created", "assessment_id", "created_at"),
+        UniqueConstraint("assessment_id", "event_number"),
+        CheckConstraint("event_number >= 1", name="positive_event_number"),
+        CheckConstraint(
+            "COALESCE((from_status IS NULL AND to_status = 'DISCOVERED') OR "
+            "(from_status = 'DISCOVERED' AND to_status = 'RESEARCHING') OR "
+            "(from_status = 'RESEARCHING' AND "
+            "to_status IN ('RESEARCH_MORE', 'VALIDATE', 'REJECTED')) OR "
+            "(from_status = 'RESEARCH_MORE' AND "
+            "to_status IN ('RESEARCHING', 'VALIDATE', 'REJECTED')) OR "
+            "(from_status = 'REJECTED' AND to_status = 'RESEARCH_MORE'), false)",
+            name="valid_transition",
+        ),
+        Index("ix_lifecycle_events_assessment_version", "assessment_id", "event_number"),
     )
 
     assessment_id: Mapped[UUID] = mapped_column(
         ForeignKey("mission_opportunity_assessments.id", ondelete="RESTRICT"), nullable=False
     )
+    event_number: Mapped[int] = mapped_column(Integer, nullable=False)
     run_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_runs.id", ondelete="RESTRICT"))
+    gap_hypothesis_id: Mapped[UUID] = mapped_column(
+        ForeignKey("gap_hypotheses.id", ondelete="RESTRICT"), nullable=False
+    )
     from_status: Mapped[str | None] = mapped_column(String(24))
     to_status: Mapped[str] = mapped_column(String(24), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
