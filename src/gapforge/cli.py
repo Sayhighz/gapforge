@@ -26,9 +26,21 @@ from gapforge.integration.persistence import (
     MergeDecisionConflictError,
     MergeDecisionService,
 )
+from gapforge.integration.product_hypotheses import (
+    ProductHypothesisConflictError,
+    ProductHypothesisService,
+    ProductHypothesisStateError,
+)
 from gapforge.integration.queries import ResearchQueryService
 from gapforge.integration.semantic import build_semantic_reasoner
 from gapforge.providers.codex_cli import CodexCliProvider
+from gapforge.reports.artifacts import (
+    ReportArtifactConflictError,
+    ReportArtifactPathError,
+    ReportArtifactStateError,
+    ReportArtifactStore,
+)
+from gapforge.reports.renderers import render_opportunity_report
 from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.runtime.research_handler import ResearchRunHandler
 from gapforge.storage.admin import execute_read_only_sql
@@ -49,6 +61,7 @@ opportunity_app = typer.Typer(no_args_is_help=True)
 evidence_app = typer.Typer(no_args_is_help=True)
 merge_app = typer.Typer(no_args_is_help=True)
 report_app = typer.Typer(no_args_is_help=True)
+product_hypothesis_app = typer.Typer(no_args_is_help=True)
 backup_app = typer.Typer(no_args_is_help=True)
 admin_app = typer.Typer(no_args_is_help=True)
 
@@ -58,6 +71,7 @@ app.add_typer(opportunity_app, name="opportunity")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(merge_app, name="merge-candidate")
 app.add_typer(report_app, name="report")
+app.add_typer(product_hypothesis_app, name="product-hypothesis")
 app.add_typer(backup_app, name="backup")
 app.add_typer(admin_app, name="admin")
 
@@ -778,15 +792,28 @@ def merge_reverse(
 
 @report_app.command("run")
 def report_run(run_id: str, json_output: JsonOption = False) -> None:
-    async def operation() -> Any:
-        database = _database(_settings())
+    async def operation() -> dict[str, Any]:
+        settings = _settings()
+        database = _database(settings)
         try:
             try:
-                return await ResearchQueryService(database.session_factory).run_report(
+                report = await ResearchQueryService(database.session_factory).run_report(
                     _parse_uuid(run_id, "run")
                 )
             except LookupError as error:
                 raise CliError("NOT_FOUND", str(error), exit_code=3) from error
+            try:
+                artifact = await asyncio.to_thread(
+                    ReportArtifactStore(settings.reports_dir).persist_run,
+                    report,
+                )
+            except ReportArtifactStateError as error:
+                raise CliError("INVALID_STATE", str(error), exit_code=4) from error
+            except ReportArtifactConflictError as error:
+                raise CliError("CONFLICT", str(error), exit_code=4) from error
+            except ReportArtifactPathError as error:
+                raise CliError("REPORT_ERROR", str(error), exit_code=5) from error
+            return {"report": report, "artifact": artifact}
         finally:
             await database.dispose()
 
@@ -795,19 +822,75 @@ def report_run(run_id: str, json_output: JsonOption = False) -> None:
 
 @report_app.command("opportunity")
 def report_opportunity(opportunity_id: str, json_output: JsonOption = False) -> None:
+    async def operation() -> dict[str, Any]:
+        database = _database(_settings())
+        try:
+            try:
+                report = await ResearchQueryService(database.session_factory).opportunity_report(
+                    _parse_uuid(opportunity_id, "opportunity")
+                )
+            except LookupError as error:
+                raise CliError("NOT_FOUND", str(error), exit_code=3) from error
+            return {"report": report, "markdown": render_opportunity_report(report)}
+        finally:
+            await database.dispose()
+
+    _execute("report.opportunity", operation, json_output=json_output)
+
+
+@product_hypothesis_app.command("create")
+def product_hypothesis_create(
+    assessment_id: str,
+    request_id: Annotated[
+        str,
+        typer.Option("--request-id", help="Explicit immutable user request identity."),
+    ],
+    proposition: Annotated[
+        str,
+        typer.Option("--proposition", help="User-supplied Product Hypothesis proposition."),
+    ],
+    json_output: JsonOption = False,
+) -> None:
+    """Persist explicit user-supplied content; this command never calls an agent."""
+
     async def operation() -> Any:
         database = _database(_settings())
         try:
             try:
-                return await ResearchQueryService(database.session_factory).opportunity_report(
-                    _parse_uuid(opportunity_id, "opportunity")
+                return await ProductHypothesisService(database.session_factory).create(
+                    _parse_uuid(assessment_id, "assessment"),
+                    request_id=request_id,
+                    proposition=proposition,
+                )
+            except LookupError as error:
+                raise CliError("NOT_FOUND", str(error), exit_code=3) from error
+            except ProductHypothesisStateError as error:
+                raise CliError("INVALID_STATE", str(error), exit_code=4) from error
+            except ProductHypothesisConflictError as error:
+                raise CliError("CONFLICT", str(error), exit_code=4) from error
+            except ValueError as error:
+                raise CliError("INVALID_ARGUMENT", str(error), exit_code=2) from error
+        finally:
+            await database.dispose()
+
+    _execute("product-hypothesis.create", operation, json_output=json_output)
+
+
+@product_hypothesis_app.command("show")
+def product_hypothesis_show(hypothesis_id: str, json_output: JsonOption = False) -> None:
+    async def operation() -> Any:
+        database = _database(_settings())
+        try:
+            try:
+                return await ProductHypothesisService(database.session_factory).get(
+                    _parse_uuid(hypothesis_id, "Product Hypothesis")
                 )
             except LookupError as error:
                 raise CliError("NOT_FOUND", str(error), exit_code=3) from error
         finally:
             await database.dispose()
 
-    _execute("report.opportunity", operation, json_output=json_output)
+    _execute("product-hypothesis.show", operation, json_output=json_output)
 
 
 @app.command("health")

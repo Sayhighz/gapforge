@@ -37,3 +37,17 @@ gap merge-candidate list --json
 ```
 
 Accept or reject a merge candidate only when the user explicitly chooses the candidate. Reports are derived artifacts; persisted records remain authoritative.
+
+## Explicit post-VALIDATE Product Hypothesis
+
+First inspect `gap opportunity show <opportunity-id> --json` and select its current persisted
+`VALIDATE` assessment ID. Only when the user explicitly supplies both a stable request ID and the
+proposition, persist and then follow up by ID:
+
+```bash
+gap product-hypothesis create <assessment-id> --request-id "<request-id>" --proposition "<user-supplied proposition>" --json
+gap product-hypothesis show <product-hypothesis-id> --json
+```
+
+The command is append-only and makes no Codex or AI API call. Never infer the proposition, reuse a
+request ID for changed content, or treat an older `VALIDATE` snapshot as current eligibility.

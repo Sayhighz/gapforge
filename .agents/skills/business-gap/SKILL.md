@@ -1,6 +1,6 @@
 ---
 name: business-gap
-description: Inspect, run, and explain GapForge evidence-backed business-gap research through the `gap` CLI. Use when a user asks to research recurring business pain, hunt or monitor a mission, inspect evidence or opportunities, compare findings, explain scores/rejections/changes, review merge candidates, or render reports.
+description: Inspect, run, and explain GapForge evidence-backed business-gap research through the `gap` CLI. Use when a user asks to research recurring business pain, hunt or monitor a mission, inspect evidence or opportunities, compare findings, explain scores/rejections/changes, review merge candidates, render reports, or explicitly persist a post-VALIDATE Product Hypothesis.
 ---
 
 # Business Gap Research
@@ -15,7 +15,7 @@ Use GapForge as a research harness, not an idea generator. A sound run may retur
 4. Create or revise a mission from the user's Thai or English request only when existing research does not cover it. Preserve the requested `output_locale`; keep schema keys and enums in English.
 5. Run a one-shot HUNT only when the user asks for new research. Never activate MONITOR implicitly. Explain that monitoring is persistent and require an explicit activation request.
 6. Explain output from Evidence Cards, claims, hard gates, score components, critic findings, contradictions, and missing evidence. Never present a score alone as validation.
-7. Product Hypothesis creation is not implemented in the current CLI. Even when the user explicitly requests one after `VALIDATE`, state that the operation is unavailable; never invent or emulate a missing command.
+7. Persist a Product Hypothesis only when the user explicitly requests it, supplies the proposition and request ID, and the referenced assessment is currently `VALIDATE`. Use `gap product-hypothesis create`; never invent content or bypass its persisted final-snapshot gate.
 
 ## Safety and evidence rules
 

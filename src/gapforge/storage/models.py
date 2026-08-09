@@ -788,7 +788,32 @@ class CriticResult(IdMixin, CreatedAtMixin, Base):
 
 class ProductHypothesis(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "product_hypotheses"
-    __table_args__ = (Index("ix_product_hypotheses_assessment", "assessment_id", "created_at"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id",
+            "requested_by",
+            name="uq_product_hypotheses_assessment_request",
+        ),
+        CheckConstraint(
+            "length(btrim(requested_by)) BETWEEN 1 AND 160 "
+            "AND requested_by = btrim(requested_by) "
+            "AND requested_by !~ '[[:cntrl:]]'",
+            name="bounded_requested_by",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(content) = 'object' "
+            "AND content ? 'schema_version' "
+            "AND content ->> 'schema_version' = '0.1' "
+            "AND content ? 'proposition' "
+            "AND jsonb_typeof(content -> 'proposition') = 'string' "
+            "AND content - 'schema_version' - 'proposition' = '{}'::jsonb "
+            "AND length(btrim(content ->> 'proposition')) BETWEEN 1 AND 20000 "
+            "AND content ->> 'proposition' = btrim(content ->> 'proposition') "
+            "AND octet_length(content::text) <= 80000",
+            name="bounded_content",
+        ),
+        Index("ix_product_hypotheses_assessment", "assessment_id", "created_at"),
+    )
 
     assessment_id: Mapped[UUID] = mapped_column(
         ForeignKey("mission_opportunity_assessments.id", ondelete="RESTRICT"), nullable=False

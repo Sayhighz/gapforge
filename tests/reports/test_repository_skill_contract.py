@@ -37,9 +37,12 @@ def test_repository_skill_examples_name_only_exposed_cli_commands() -> None:
         path = max(matches, key=len)
         with implemented[path].make_context(path[-1], arguments[len(path) :]):
             pass
-    assert not any(arguments[:2] == ["product-hypothesis", "create"] for arguments in documented)
 
 
-def test_product_hypothesis_is_explicitly_unavailable_without_a_real_cli_surface() -> None:
+def test_product_hypothesis_requires_explicit_user_content_and_real_cli_surface() -> None:
     skill = (ROOT / ".agents/skills/business-gap/SKILL.md").read_text(encoding="utf-8")
-    assert "Product Hypothesis creation is not implemented" in skill
+    commands = COMMANDS.read_text(encoding="utf-8")
+    assert "only when the user explicitly requests it" in skill
+    assert "supplies the proposition and request ID" in skill
+    assert "gap product-hypothesis create <assessment-id>" in commands
+    assert "makes no Codex or AI API call" in commands

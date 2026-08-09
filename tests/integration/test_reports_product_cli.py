@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from collections.abc import Iterator
+from pathlib import Path
+from uuid import UUID, uuid4, uuid5
+
+import pytest
+from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.sql import Executable
+from typer.testing import CliRunner
+
+from gapforge.cli import app
+from gapforge.integration.persistence import ResearchArtifactWriter
+from gapforge.integration.product_hypotheses import ProductHypothesisService
+from gapforge.storage import models
+from gapforge.storage.database import Database
+from tests.integration.test_artifact_persistence import (
+    FakeContext,
+    _commit_stage,
+    _seed_pipeline_context,
+    _stage_payloads,
+)
+
+runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _remove_product_hypotheses(migrated_postgres_url: str) -> Iterator[None]:
+    async def cleanup() -> None:
+        database = Database.from_url(migrated_postgres_url)
+        try:
+            async with database.session() as session:
+                await session.execute(text("ALTER TABLE product_hypotheses DISABLE TRIGGER USER"))
+                await session.execute(text("DELETE FROM product_hypotheses"))
+                await session.execute(text("ALTER TABLE product_hypotheses ENABLE TRIGGER USER"))
+                await session.commit()
+        finally:
+            await database.dispose()
+
+    asyncio.run(cleanup())
+    yield
+    asyncio.run(cleanup())
+
+
+async def _seed_validated_run(
+    database_url: str, *, output_locale: str = "en"
+) -> tuple[FakeContext, dict[str, UUID | str], UUID, UUID]:
+    database = Database.from_url(database_url)
+    try:
+        context, identifiers = await _seed_pipeline_context(database)
+        async with database.session() as session:
+            revision = await session.get(models.MissionRevision, context.mission_revision.id)
+            assert revision is not None
+            revision.output_locale = output_locale
+            await session.commit()
+        writer = ResearchArtifactWriter()
+        for stage, payload in _stage_payloads(context, identifiers):
+            await _commit_stage(database, writer, context, stage, payload)
+        async with database.session() as session:
+            assessment = await session.scalar(
+                select(models.MissionOpportunityAssessment).where(
+                    models.MissionOpportunityAssessment.opportunity_id == identifiers["opportunity"]
+                )
+            )
+            assert assessment is not None
+            snapshot = await session.scalar(
+                select(models.FinalAssessmentSnapshot).where(
+                    models.FinalAssessmentSnapshot.assessment_id == assessment.id
+                )
+            )
+            assert snapshot is not None
+            return context, identifiers, assessment.id, snapshot.evidence_card_id
+    finally:
+        await database.dispose()
+
+
+def _invoke_json(arguments: list[str]) -> tuple[dict[str, object], int, str]:
+    result = runner.invoke(app, [*arguments, "--json"])
+    assert result.stdout.count("\n") == 1
+    return json.loads(result.stdout), result.exit_code, result.stderr
+
+
+@pytest.mark.postgres
+def test_report_cli_persists_terminal_run_and_renders_opportunity_on_demand(
+    migrated_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context, identifiers, _, _ = asyncio.run(
+        _seed_validated_run(migrated_postgres_url, output_locale="th")
+    )
+    reports_dir = tmp_path / "reports"
+    monkeypatch.setenv("DATABASE_URL", migrated_postgres_url)
+    monkeypatch.setenv("AGENT_PROVIDER", "fake")
+    monkeypatch.setenv("REPORTS_DIR", str(reports_dir))
+
+    envelope, exit_code, stderr = _invoke_json(["report", "run", str(context.run_id)])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = envelope["data"]
+    assert isinstance(data, dict)
+    report = data["report"]
+    artifact = data["artifact"]
+    assert report["run_id"] == str(context.run_id)
+    assert report["output_locale"] == "th"
+    expected_path = reports_dir / "2026-08-09" / f"run-{context.run_id}.md"
+    assert artifact["run_path"] == str(expected_path)
+    assert artifact["latest_path"] == str(reports_dir / "latest.md")
+    assert artifact["is_latest"] is True
+    content = expected_path.read_text(encoding="utf-8")
+    assert content.startswith("# รายงานการวิจัย GapForge\n")
+    assert hashlib.sha256(content.encode()).hexdigest() == artifact["content_sha256"]
+    latest_before = (reports_dir / "latest.md").read_bytes()
+    latest_mtime = (reports_dir / "latest.md").stat().st_mtime_ns
+
+    detail, exit_code, stderr = _invoke_json(
+        ["report", "opportunity", str(identifiers["opportunity"])]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    detail_data = detail["data"]
+    assert isinstance(detail_data, dict)
+    assert detail_data["report"]["opportunity"]["opportunity_id"] == str(identifiers["opportunity"])
+    assert "## เกณฑ์การตรวจสอบ" in detail_data["markdown"]
+    assert (reports_dir / "latest.md").read_bytes() == latest_before
+    assert (reports_dir / "latest.md").stat().st_mtime_ns == latest_mtime
+
+
+@pytest.mark.postgres
+def test_product_hypothesis_cli_is_explicit_idempotent_and_queryable(
+    migrated_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, assessment_id, evidence_card_id = asyncio.run(_seed_validated_run(migrated_postgres_url))
+    monkeypatch.setenv("DATABASE_URL", migrated_postgres_url)
+    monkeypatch.setenv("AGENT_PROVIDER", "fake")
+    arguments = [
+        "product-hypothesis",
+        "create",
+        str(assessment_id),
+        "--request-id",
+        "request-001",
+        "--proposition",
+        "Automate month-end reconciliation with reviewed exception queues",
+    ]
+
+    created, exit_code, stderr = _invoke_json(arguments)
+    repeated, repeated_exit, _ = _invoke_json(arguments)
+
+    assert exit_code == repeated_exit == 0
+    assert stderr == ""
+    assert created["data"] == repeated["data"]
+    expected_id = uuid5(assessment_id, "product-hypothesis:request-001")
+    assert created["data"]["id"] == str(expected_id)
+    assert created["data"]["assessment_id"] == str(assessment_id)
+    assert created["data"]["explicit_request_id"] == "request-001"
+    assert created["data"]["proposition"].startswith("Automate month-end")
+
+    shown, show_exit, _ = _invoke_json(["product-hypothesis", "show", str(expected_id)])
+    assert show_exit == 0
+    assert shown["data"] == created["data"]
+
+    conflict, conflict_exit, conflict_stderr = _invoke_json(
+        [*arguments[:-1], "A changed proposition reusing the request identity"]
+    )
+    assert conflict_exit == 4
+    assert conflict_stderr == ""
+    assert conflict["error"]["code"] == "CONFLICT"
+
+    async def assert_storage() -> None:
+        database = Database.from_url(migrated_postgres_url)
+        try:
+            async with database.session() as session:
+                row = await session.get(models.ProductHypothesis, expected_id)
+                assert row is not None
+                assert row.evidence_card_id == evidence_card_id
+                assert row.requested_by == "request-001"
+                assert row.content == {
+                    "schema_version": "0.1",
+                    "proposition": created["data"]["proposition"],
+                }
+        finally:
+            await database.dispose()
+
+    asyncio.run(assert_storage())
+
+
+@pytest.mark.postgres
+def test_product_hypothesis_cli_rejects_non_validate_assessment(
+    migrated_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, assessment_id, _ = asyncio.run(_seed_validated_run(migrated_postgres_url))
+
+    async def move_back_to_research() -> None:
+        database = Database.from_url(migrated_postgres_url)
+        try:
+            async with database.session() as session:
+                assessment = await session.get(models.MissionOpportunityAssessment, assessment_id)
+                assert assessment is not None
+                assessment.lifecycle_status = "RESEARCH_MORE"
+                assessment.verdict = "RESEARCH_MORE"
+                await session.commit()
+        finally:
+            await database.dispose()
+
+    asyncio.run(move_back_to_research())
+    monkeypatch.setenv("DATABASE_URL", migrated_postgres_url)
+    result, exit_code, stderr = _invoke_json(
+        [
+            "product-hypothesis",
+            "create",
+            str(assessment_id),
+            "--request-id",
+            "request-blocked",
+            "--proposition",
+            "This must not persist",
+        ]
+    )
+
+    assert exit_code == 4
+    assert stderr == ""
+    assert result["error"]["code"] == "INVALID_STATE"
+
+
+@pytest.mark.postgres
+async def test_product_hypothesis_database_enforces_lineage_bounds_and_append_only(
+    migrated_postgres_url: str,
+) -> None:
+    first = await _seed_validated_run(migrated_postgres_url)
+    second = await _seed_validated_run(migrated_postgres_url)
+    _, _, assessment_id, evidence_card_id = first
+    _, _, _, other_card_id = second
+    database = Database.from_url(migrated_postgres_url)
+    try:
+        service = ProductHypothesisService(database.session_factory)
+        product = await service.create(
+            assessment_id,
+            request_id="database-guard",
+            proposition="Persist only against the exact VALIDATE snapshot",
+        )
+        product_id = UUID(product.id)
+        async with database.session() as session:
+            constraints = set(
+                await session.scalars(
+                    text(
+                        "SELECT conname FROM pg_constraint "
+                        "WHERE conrelid = 'product_hypotheses'::regclass"
+                    )
+                )
+            )
+            triggers = set(
+                await session.scalars(
+                    text(
+                        "SELECT tgname FROM pg_trigger "
+                        "WHERE tgrelid = 'product_hypotheses'::regclass "
+                        "AND NOT tgisinternal"
+                    )
+                )
+            )
+            assert {
+                "ck_product_hypotheses_bounded_requested_by",
+                "ck_product_hypotheses_bounded_content",
+                "uq_product_hypotheses_assessment_request",
+            } <= constraints
+            assert {
+                "trg_product_hypotheses_validate_insert",
+                "trg_product_hypotheses_append_only",
+            } <= triggers
+
+        async def rejected(statement: Executable) -> None:
+            async with database.session() as session:
+                with pytest.raises(DBAPIError):
+                    async with session.begin_nested():
+                        await session.execute(statement)
+
+        await rejected(
+            insert(models.ProductHypothesis).values(
+                id=uuid4(),
+                assessment_id=assessment_id,
+                requested_by="mismatched-card",
+                content={"schema_version": "0.1", "proposition": "Wrong card"},
+                evidence_card_id=other_card_id,
+            )
+        )
+        await rejected(
+            insert(models.ProductHypothesis).values(
+                id=uuid4(),
+                assessment_id=assessment_id,
+                requested_by="",
+                content={"schema_version": "0.1", "proposition": "Empty request"},
+                evidence_card_id=evidence_card_id,
+            )
+        )
+        await rejected(
+            insert(models.ProductHypothesis).values(
+                id=uuid4(),
+                assessment_id=assessment_id,
+                requested_by="database-guard",
+                content={
+                    "schema_version": "0.1",
+                    "proposition": "A conflicting duplicate request identity",
+                },
+                evidence_card_id=evidence_card_id,
+            )
+        )
+        await rejected(
+            insert(models.ProductHypothesis).values(
+                id=uuid4(),
+                assessment_id=assessment_id,
+                requested_by="extra-content-key",
+                content={
+                    "schema_version": "0.1",
+                    "proposition": "Bounded content",
+                    "invented": True,
+                },
+                evidence_card_id=evidence_card_id,
+            )
+        )
+        await rejected(
+            update(models.ProductHypothesis)
+            .where(models.ProductHypothesis.id == product_id)
+            .values(content={"schema_version": "0.1", "proposition": "Mutated"})
+        )
+        await rejected(
+            delete(models.ProductHypothesis).where(models.ProductHypothesis.id == product_id)
+        )
+
+        async with database.session() as session:
+            stored = await session.get(models.ProductHypothesis, product_id)
+            assert stored is not None
+            assert stored.content["proposition"] == product.proposition
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_product_hypothesis_insert_serializes_against_assessment_transition(
+    migrated_postgres_url: str,
+) -> None:
+    _, _, assessment_id, evidence_card_id = await _seed_validated_run(migrated_postgres_url)
+    database = Database.from_url(migrated_postgres_url)
+    first = database.session_factory()
+    second = database.session_factory()
+    try:
+        assessment = await first.scalar(
+            select(models.MissionOpportunityAssessment)
+            .where(models.MissionOpportunityAssessment.id == assessment_id)
+            .with_for_update()
+        )
+        assert assessment is not None
+        assessment.lifecycle_status = "RESEARCH_MORE"
+        assessment.verdict = "RESEARCH_MORE"
+        await first.flush()
+
+        async def direct_insert() -> None:
+            await second.execute(
+                insert(models.ProductHypothesis).values(
+                    id=uuid4(),
+                    assessment_id=assessment_id,
+                    requested_by="racing-request",
+                    content={
+                        "schema_version": "0.1",
+                        "proposition": "Must recheck after the assessment lock releases",
+                    },
+                    evidence_card_id=evidence_card_id,
+                )
+            )
+            await second.commit()
+
+        insertion = asyncio.create_task(direct_insert())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(insertion), timeout=0.1)
+        await first.commit()
+        with pytest.raises(DBAPIError, match="current VALIDATE"):
+            await insertion
+        await second.rollback()
+    finally:
+        await first.close()
+        await second.close()
+        await database.dispose()
