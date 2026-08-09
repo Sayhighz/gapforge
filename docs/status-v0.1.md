@@ -27,7 +27,7 @@ This is the first file to read after interruption. It records only reviewed/push
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
 | Integration | `integration/v0.1` | #4 | active draft | `0a21190` |
-| Lane A | `agent/platform-foundation` | #5 | implementing/reviewed through A5 | `cfc7533` |
+| Lane A | `agent/platform-foundation` | #5 | implementing/reviewed through A6 | `ee72e72` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 
 GitHub issues:
@@ -51,7 +51,8 @@ Completed:
 
 In progress:
 
-- Lane A is implementing A6-A8 after reviewed A1-A5 checkpoints and requested fixes.
+- Lane A is implementing A7-A8 after reviewed A1-A6 checkpoints and requested fixes.
+- Cross-lane recovery work is now decomposed in `docs/tasks/integration.md`.
 
 Exact next action:
 
