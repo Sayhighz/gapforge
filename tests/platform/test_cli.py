@@ -191,6 +191,17 @@ def test_invalid_identifier_uses_json_error_envelope(cli_database_url: str) -> N
     }
 
 
+def test_worker_refuses_to_claim_without_production_handlers() -> None:
+    envelope, exit_code, stderr = _invoke_json(["worker", "--once"])
+
+    assert exit_code == 4
+    assert stderr == ""
+    assert envelope["error"] == {
+        "code": "WORKER_NOT_CONFIGURED",
+        "message": "no research task handlers are registered",
+    }
+
+
 def test_admin_sql_cli_requires_guard_and_keeps_stdout_clean(cli_database_url: str) -> None:
     missing_guard, exit_code, stderr = _invoke_json(["admin", "sql", "SELECT 1 AS n"])
     assert exit_code == 2

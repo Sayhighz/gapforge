@@ -70,11 +70,13 @@ class RunController:
         )
         if not lock_acquired:
             return None
-        active_run_id = await self.session.scalar(
-            select(ResearchRun.id).where(ResearchRun.status == "RUNNING").limit(1)
+        active_run = await self.session.scalar(
+            select(ResearchRun).where(ResearchRun.status == "RUNNING").with_for_update().limit(1)
         )
-        if active_run_id is not None:
-            return None
+        if active_run is not None:
+            active_run = await self.finalize_if_idle(active_run.id, now=admission_time)
+            if active_run.status == "RUNNING":
+                return None
         supported_work_exists = exists(
             select(ResearchTask.id).where(
                 ResearchTask.run_id == ResearchRun.id,
@@ -128,23 +130,78 @@ class RunController:
 
     async def finalize_if_idle(self, run_id: UUID, *, now: datetime | None = None) -> ResearchRun:
         run = await self._locked_run(run_id)
-        if run.status not in {"RUNNING", "QUEUED"}:
+        if run.status != "RUNNING":
             return run
         rows = (
             await self.session.execute(
-                select(ResearchTask.status, func.count())
-                .where(ResearchTask.run_id == run_id)
-                .group_by(ResearchTask.status)
+                select(
+                    ResearchTask.status,
+                    ResearchTask.retry_class,
+                    ResearchTask.checkpoint,
+                ).where(ResearchTask.run_id == run_id)
             )
         ).tuples()
-        task_counts = {status: int(count) for status, count in rows.all()}
+        tasks = rows.all()
+        completion_time = now or datetime.now(UTC)
+        if not tasks:
+            run.status = "FAILED"
+            run.completed_at = completion_time
+            run.last_checkpoint = {**run.last_checkpoint, "reason": "missing_task_graph"}
+            await self.session.flush()
+            return run
+        task_counts: dict[str, int] = {}
+        for status, _, _ in tasks:
+            task_counts[status] = task_counts.get(status, 0) + 1
         if task_counts.get("PENDING", 0) or task_counts.get("LEASED", 0):
             return run
         failed = task_counts.get("FAILED", 0)
-        run.status = "COMPLETED_WITH_WARNINGS" if failed else "COMPLETED"
-        if failed:
-            run.warnings = [*run.warnings, {"failed_tasks": failed}]
-        run.completed_at = now or datetime.now(UTC)
+        succeeded = task_counts.get("SUCCEEDED", 0)
+        useful_successes = sum(
+            1
+            for status, _, checkpoint in tasks
+            if status == "SUCCEEDED"
+            and isinstance(checkpoint.get("runtime"), dict)
+            and checkpoint["runtime"].get("useful_artifact") is True
+        )
+        failure_classes = sorted(
+            {retry_class for status, retry_class, _ in tasks if status == "FAILED" and retry_class}
+        )
+        if "AUTH_REQUIRED" in failure_classes:
+            run.status = "AUTH_REQUIRED"
+            run.last_checkpoint = {
+                **run.last_checkpoint,
+                "reason": "auth_required",
+                "failed_tasks": failed,
+            }
+        elif {"BUDGET_EXHAUSTED", "DEADLINE_EXCEEDED"}.intersection(failure_classes):
+            run.status = "BUDGET_EXHAUSTED"
+            run.last_checkpoint = {
+                **run.last_checkpoint,
+                "reason": "budget_exhausted",
+                "failed_tasks": failed,
+                "failure_classes": failure_classes,
+            }
+        elif failed and useful_successes:
+            run.status = "COMPLETED_WITH_WARNINGS"
+            run.warnings = [
+                *run.warnings,
+                {
+                    "failed_tasks": failed,
+                    "failure_classes": failure_classes,
+                    "useful_successes": useful_successes,
+                },
+            ]
+        elif failed or not succeeded:
+            run.status = "FAILED"
+            run.last_checkpoint = {
+                **run.last_checkpoint,
+                "reason": "all_tasks_failed",
+                "failed_tasks": failed,
+                "failure_classes": failure_classes,
+            }
+        else:
+            run.status = "COMPLETED"
+        run.completed_at = completion_time
         await self.session.flush()
         return run
 

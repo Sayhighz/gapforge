@@ -680,7 +680,7 @@ async def test_provider_call_lease_never_extends_past_run_deadline(
 
 
 @pytest.mark.postgres
-async def test_failed_task_finishes_run_with_warnings(migrated_postgres_url: str) -> None:
+async def test_only_failed_task_finishes_run_as_failed(migrated_postgres_url: str) -> None:
     database = Database.from_url(migrated_postgres_url)
     run = await _create_running_run(database)
     try:
@@ -707,8 +707,13 @@ async def test_failed_task_finishes_run_with_warnings(migrated_postgres_url: str
             )
             completed = await RunController(session).finalize_if_idle(run.id)
             await session.commit()
-        assert completed.status == "COMPLETED_WITH_WARNINGS"
-        assert completed.warnings == [{"failed_tasks": 1}]
+        assert completed.status == "FAILED"
+        assert completed.warnings == []
+        assert completed.last_checkpoint == {
+            "reason": "all_tasks_failed",
+            "failed_tasks": 1,
+            "failure_classes": ["SOURCE_UNAVAILABLE"],
+        }
     finally:
         await database.dispose()
 

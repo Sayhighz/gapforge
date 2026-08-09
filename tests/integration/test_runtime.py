@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -9,6 +9,8 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from gapforge.queue.control import RunController
+from gapforge.queue.repository import DurableQueue
+from gapforge.queue.retry import ErrorKind
 from gapforge.runtime import (
     ROOT_TASK_TYPE,
     RunBudgetLimits,
@@ -17,8 +19,9 @@ from gapforge.runtime import (
     ScheduledRun,
 )
 from gapforge.storage.database import Database
-from gapforge.storage.models import ResearchRun
+from gapforge.storage.models import ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
+from gapforge.worker import TaskHandlerError, TaskHandlerRegistry, TaskHandlerResult, Worker
 
 
 async def _cancel_run(database: Database, run_id: UUID | None) -> None:
@@ -30,6 +33,33 @@ async def _cancel_run(database: Database, run_id: UUID | None) -> None:
             run.status = "CANCELLED"
             run.completed_at = datetime.now(UTC)
             await session.commit()
+
+
+async def _schedule_run(
+    database: Database,
+    *,
+    title: str,
+    now: datetime | None = None,
+) -> ScheduledRun:
+    async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+        _, revision = await uow.missions.create_with_revision(
+            title=title,
+            mission_text="exercise the integrated durable runtime",
+            original_language="en",
+            output_locale="en",
+        )
+        assert uow.session is not None
+        scheduled = await RunScheduler(uow.session).schedule(
+            request=RunScheduleRequest(
+                mission_revision_id=revision.id,
+                mode="HUNT",
+                priority=0,
+                budget_limits={"max_run_duration_minutes": 30},
+            ),
+            now=now,
+        )
+        await uow.commit()
+        return scheduled
 
 
 @pytest.mark.parametrize(
@@ -44,6 +74,20 @@ async def _cancel_run(database: Database, run_id: UUID | None) -> None:
 def test_run_budget_boundary_matches_settings_invariants(overrides: dict[str, int]) -> None:
     with pytest.raises(ValidationError):
         RunBudgetLimits.model_validate(overrides)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"payload": []},
+        {"payload": {}, "useful_artifact": "yes"},
+    ],
+)
+def test_task_handler_result_enforces_payload_and_useful_signal(
+    invalid: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskHandlerResult.model_validate(invalid)
 
 
 @pytest.mark.postgres
@@ -352,4 +396,394 @@ async def test_admission_does_not_start_or_repair_unsupported_graphs(
     finally:
         for run_id in run_ids:
             await _cancel_run(database, run_id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_with_no_handlers_leaves_supported_work_queued(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="No-handler safety mission")
+    try:
+        worker = Worker(
+            database,
+            worker_id="empty-worker",
+            handlers=TaskHandlerRegistry(),
+        )
+        assert await worker.run_once() is False
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == "QUEUED"
+            assert task.status == "PENDING"
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("existing_runtime", "expected_runtime"),
+    [
+        ({"stage": "collected"}, {"stage": "collected", "useful_artifact": True}),
+        ("invalid-metadata", {"useful_artifact": True}),
+    ],
+)
+async def test_worker_admits_executes_and_finalizes_successful_root(
+    migrated_postgres_url: str,
+    existing_runtime: object,
+    expected_runtime: dict[str, object],
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="Successful runtime mission")
+
+    async with database.session() as session:
+        task = await session.get(ResearchTask, scheduled.task.id)
+        assert task is not None
+        task.checkpoint = {"runtime": existing_runtime, "collector_cursor": "page-2"}
+        await session.commit()
+
+    async def handler(_task: ResearchTask) -> TaskHandlerResult:
+        return TaskHandlerResult(payload={"result": "persisted"}, useful_artifact=True)
+
+    try:
+        worker = Worker(
+            database,
+            worker_id="success-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == "COMPLETED"
+            assert run.started_at is not None
+            assert task.status == "SUCCEEDED"
+            assert task.result == {"result": "persisted"}
+            assert task.checkpoint == {
+                "runtime": expected_runtime,
+                "collector_cursor": "page-2",
+            }
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_retries_transient_failure_then_finalizes_success(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="Retry runtime mission")
+    calls = 0
+
+    async def handler(_task: ResearchTask) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("do not persist this detail")
+        return {"attempt": calls}
+
+    try:
+        worker = Worker(
+            database,
+            worker_id="retry-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == "RUNNING"
+            assert task.status == "PENDING"
+            assert task.retry_class == "TRANSIENT_NETWORK"
+            task.available_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        assert await worker.run_once() is True
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == "COMPLETED"
+            assert task.status == "SUCCEEDED"
+            assert task.attempt_count == 2
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_reclaims_expired_lease_after_restart(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="Restart recovery mission")
+    try:
+        async with database.session() as session:
+            await RunController(session).admit_next(allowed_task_types=frozenset({ROOT_TASK_TYPE}))
+            claimed = await DurableQueue(session).claim(
+                worker_id="crashed-worker",
+                lease_duration=timedelta(minutes=5),
+                allowed_task_types=frozenset({ROOT_TASK_TYPE}),
+            )
+            assert claimed is not None
+            await session.commit()
+        async with database.session() as session:
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert task is not None
+            task.lease_expires_at = datetime.now(UTC) - timedelta(milliseconds=1)
+            await session.commit()
+
+        async def handler(_task: ResearchTask) -> dict[str, object]:
+            return {"reclaimed": True}
+
+        worker = Worker(
+            database,
+            worker_id="replacement-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == "COMPLETED"
+            assert task.status == "SUCCEEDED"
+            assert task.attempt_count == 2
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_finalizes_terminal_active_graph_before_next_admission(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    terminal = await _schedule_run(database, title="Terminal graph recovery mission")
+    follower_id: UUID | None = None
+    try:
+        async with database.session() as session:
+            await RunController(session).admit_next(allowed_task_types=frozenset({ROOT_TASK_TYPE}))
+            task = await DurableQueue(session).claim(
+                worker_id="crashed-after-write",
+                lease_duration=timedelta(minutes=5),
+                allowed_task_types=frozenset({ROOT_TASK_TYPE}),
+            )
+            assert task is not None
+            await DurableQueue(session).succeed(
+                task.id,
+                worker_id="crashed-after-write",
+                result={"persisted": True},
+            )
+            await session.commit()
+
+        follower = await _schedule_run(database, title="Follower admission mission")
+        follower_id = follower.run.id
+
+        async def handler(_task: ResearchTask) -> dict[str, object]:
+            return {"follower": "complete"}
+
+        worker = Worker(
+            database,
+            worker_id="reconciliation-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            terminal_run = await session.get(ResearchRun, terminal.run.id)
+            follower_run = await session.get(ResearchRun, follower.run.id)
+            assert terminal_run is not None
+            assert follower_run is not None
+            assert terminal_run.status == "COMPLETED"
+            assert follower_run.status == "COMPLETED"
+    finally:
+        await _cancel_run(database, terminal.run.id)
+        await _cancel_run(database, follower_id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_fails_missing_active_graph_without_fabricating_work(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    missing_id: UUID | None = None
+    follower_id: UUID | None = None
+    try:
+        async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+            _, revision = await uow.missions.create_with_revision(
+                title="Missing active graph mission",
+                mission_text="do not fabricate missing root work",
+                original_language="en",
+                output_locale="en",
+            )
+            assert uow.session is not None
+            missing = ResearchRun(
+                mission_revision_id=revision.id,
+                mode="HUNT",
+                status="RUNNING",
+                priority=0,
+                started_at=datetime.now(UTC),
+                deadline_at=datetime.now(UTC) + timedelta(minutes=30),
+                budget_limits=RunBudgetLimits().model_dump(mode="json"),
+                budget_used={},
+                warnings=[],
+                last_checkpoint={},
+            )
+            uow.session.add(missing)
+            await uow.commit()
+            missing_id = missing.id
+
+        follower = await _schedule_run(database, title="Missing graph follower mission")
+        follower_id = follower.run.id
+
+        async def handler(_task: ResearchTask) -> dict[str, object]:
+            return {"follower": "complete"}
+
+        worker = Worker(
+            database,
+            worker_id="missing-graph-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            missing_run = await session.get(ResearchRun, missing_id)
+            follower_run = await session.get(ResearchRun, follower.run.id)
+            assert missing_run is not None
+            assert follower_run is not None
+            assert missing_run.status == "FAILED"
+            assert missing_run.last_checkpoint["reason"] == "missing_task_graph"
+            assert follower_run.status == "COMPLETED"
+            fabricated = await session.scalar(
+                select(ResearchTask.id).where(ResearchTask.run_id == missing_id)
+            )
+            assert fabricated is None
+    finally:
+        await _cancel_run(database, missing_id)
+        await _cancel_run(database, follower_id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("kind", "expected_status"),
+    [
+        (ErrorKind.AUTH_REQUIRED, "AUTH_REQUIRED"),
+        (ErrorKind.BUDGET_EXHAUSTED, "BUDGET_EXHAUSTED"),
+        (ErrorKind.DEADLINE_EXCEEDED, "BUDGET_EXHAUSTED"),
+        (ErrorKind.PERMANENT, "FAILED"),
+    ],
+)
+async def test_worker_maps_typed_terminal_failure_to_run_status(
+    migrated_postgres_url: str,
+    kind: ErrorKind,
+    expected_status: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title=f"Terminal {kind.value} mission")
+
+    async def handler(_task: ResearchTask) -> dict[str, object]:
+        raise TaskHandlerError(kind, error_class="source_access_failed")
+
+    try:
+        worker = Worker(
+            database,
+            worker_id=f"terminal-{kind.value.lower()}",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == expected_status
+            assert task.status == "FAILED"
+            assert task.retry_class == kind.value
+            assert task.last_error == "source_access_failed"
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("useful_artifact", "expected_status"),
+    [(True, "COMPLETED_WITH_WARNINGS"), (False, "FAILED")],
+)
+async def test_worker_only_preserves_useful_partial_success_as_warning(
+    migrated_postgres_url: str,
+    useful_artifact: bool,
+    expected_status: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="Partial runtime mission")
+    try:
+        async with database.session() as session:
+            _, created = await DurableQueue(session).enqueue(
+                run_id=scheduled.run.id,
+                task_type="research.followup",
+                idempotency_key="followup:v1",
+                payload={},
+                priority=1,
+            )
+            assert created is True
+            await session.commit()
+
+        async def root_handler(_task: ResearchTask) -> TaskHandlerResult:
+            return TaskHandlerResult(
+                payload={"root": "complete"},
+                useful_artifact=useful_artifact,
+            )
+
+        async def failing_handler(_task: ResearchTask) -> dict[str, object]:
+            raise TaskHandlerError(ErrorKind.PERMANENT, error_class="followup_failed")
+
+        worker = Worker(
+            database,
+            worker_id="partial-worker",
+            handlers=TaskHandlerRegistry(
+                {
+                    ROOT_TASK_TYPE: root_handler,
+                    "research.followup": failing_handler,
+                }
+            ),
+        )
+        assert await worker.run_once() is True
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            assert run is not None
+            assert run.status == expected_status
+            if useful_artifact:
+                assert run.warnings == [
+                    {
+                        "failed_tasks": 1,
+                        "failure_classes": ["PERMANENT"],
+                        "useful_successes": 1,
+                    }
+                ]
+            else:
+                assert run.warnings == []
+                assert run.last_checkpoint["reason"] == "all_tasks_failed"
+    finally:
+        await _cancel_run(database, scheduled.run.id)
         await database.dispose()

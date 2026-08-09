@@ -39,7 +39,7 @@ from gapforge.storage.models import (
     ResearchTask,
 )
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
-from gapforge.worker import Worker
+from gapforge.worker import TaskHandlerRegistry, Worker
 
 app = typer.Typer(name="gap", no_args_is_help=True, pretty_exceptions_enable=False)
 mission_app = typer.Typer(no_args_is_help=True)
@@ -83,6 +83,12 @@ def _settings() -> Settings:
 
 def _database(settings: Settings) -> Database:
     return Database.from_url(settings.database_url.get_secret_value())
+
+
+def _build_task_handler_registry() -> TaskHandlerRegistry:
+    """Integration seam for I3's concrete research orchestrator handler."""
+
+    return TaskHandlerRegistry()
 
 
 def _jsonable(value: Any) -> Any:
@@ -505,17 +511,27 @@ def worker(
     json_output: JsonOption = False,
 ) -> None:
     async def operation() -> dict[str, Any]:
+        registry = _build_task_handler_registry()
+        registered_task_types = sorted(registry.task_types)
+        if not registered_task_types:
+            raise CliError(
+                "WORKER_NOT_CONFIGURED",
+                "no research task handlers are registered",
+                exit_code=4,
+            )
         database = _database(_settings())
         try:
             runtime = Worker(
-                database, worker_id=f"{socket.gethostname()}:{os_getpid()}", handlers={}
+                database,
+                worker_id=f"{socket.gethostname()}:{os_getpid()}",
+                handlers=registry,
             )
             if not once:
                 await runtime.run_forever()
-                return {"processed": False, "registered_task_types": []}
+                return {"processed": False, "registered_task_types": registered_task_types}
             return {
                 "processed": await runtime.run_once(),
-                "registered_task_types": [],
+                "registered_task_types": registered_task_types,
             }
         finally:
             await database.dispose()
