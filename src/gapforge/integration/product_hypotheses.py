@@ -47,6 +47,15 @@ class ProductHypothesisService:
             raise ValueError("request ID must contain 1 to 160 characters")
         if any(ord(character) < 32 or ord(character) == 127 for character in request_id):
             raise ValueError("request ID cannot contain control characters")
+        proposition = proposition.strip()
+        if not proposition or len(proposition) > 20_000:
+            raise ValueError("proposition must contain 1 to 20000 characters")
+        if "\x00" in proposition:
+            raise ValueError("proposition cannot contain a NUL character")
+        content = {
+            "schema_version": "0.1",
+            "proposition": proposition,
+        }
 
         async with self._session_factory() as session:
             assessment = await session.scalar(
@@ -56,6 +65,19 @@ class ProductHypothesisService:
             )
             if assessment is None:
                 raise LookupError("assessment not found")
+            identifier = uuid5(assessment.id, f"product-hypothesis:{request_id}")
+            existing = await session.get(models.ProductHypothesis, identifier)
+            if existing is not None:
+                if (
+                    existing.assessment_id != assessment.id
+                    or existing.requested_by != request_id
+                    or existing.content != content
+                ):
+                    raise ProductHypothesisConflictError(
+                        "Product Hypothesis request identity already has different content"
+                    )
+                return _domain_product_hypothesis(existing)
+
             if assessment.verdict != "VALIDATE" or assessment.lifecycle_status != "VALIDATE":
                 raise ProductHypothesisStateError(
                     "Product Hypothesis requires a current VALIDATE assessment"
@@ -66,7 +88,6 @@ class ProductHypothesisService:
                     "Product Hypothesis requires a persisted VALIDATE final snapshot"
                 )
 
-            identifier = uuid5(assessment.id, f"product-hypothesis:{request_id}")
             created_at = self._clock()
             typed_assessment = _domain_assessment(assessment, snapshot)
             requested = create_product_hypothesis(
@@ -76,23 +97,6 @@ class ProductHypothesisService:
                 proposition=proposition,
                 created_at=created_at,
             )
-            content = {
-                "schema_version": "0.1",
-                "proposition": requested.proposition,
-            }
-            existing = await session.get(models.ProductHypothesis, identifier)
-            if existing is not None:
-                if (
-                    existing.assessment_id != assessment.id
-                    or existing.requested_by != requested.explicit_request_id
-                    or existing.content != content
-                    or existing.evidence_card_id != snapshot.evidence_card_id
-                ):
-                    raise ProductHypothesisConflictError(
-                        "Product Hypothesis request identity already has different content"
-                    )
-                return _domain_product_hypothesis(existing)
-
             row = models.ProductHypothesis(
                 id=identifier,
                 assessment_id=assessment.id,

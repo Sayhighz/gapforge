@@ -809,7 +809,7 @@ class ProductHypothesis(IdMixin, CreatedAtMixin, Base):
             "AND content - 'schema_version' - 'proposition' = '{}'::jsonb "
             "AND length(btrim(content ->> 'proposition')) BETWEEN 1 AND 20000 "
             "AND content ->> 'proposition' = btrim(content ->> 'proposition') "
-            "AND octet_length(content::text) <= 80000",
+            "AND octet_length(content::text) <= 81000",
             name="bounded_content",
         ),
         Index("ix_product_hypotheses_assessment", "assessment_id", "created_at"),

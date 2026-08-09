@@ -80,6 +80,23 @@ async def _revision_and_product_count(url: str) -> tuple[str, int]:
         await database.dispose()
 
 
+async def _product_hypothesis_triggers(url: str) -> set[str]:
+    database = Database.from_url(url)
+    try:
+        async with database.session() as session:
+            return set(
+                await session.scalars(
+                    text(
+                        "SELECT tgname FROM pg_trigger "
+                        "WHERE tgrelid = 'product_hypotheses'::regclass "
+                        "AND NOT tgisinternal"
+                    )
+                )
+            )
+    finally:
+        await database.dispose()
+
+
 @pytest.mark.postgres
 def test_empty_product_hypothesis_guard_upgrade_has_exact_catalog(postgres_url: str) -> None:
     config = _config(postgres_url)
@@ -185,4 +202,7 @@ def test_guard_downgrade_refuses_rows_without_data_loss(postgres_url: str) -> No
 
     asyncio.run(_clear_guarded_rows(postgres_url))
     command.downgrade(config, PRE_GUARD_REVISION)
+    assert asyncio.run(_product_hypothesis_triggers(postgres_url)) == {
+        "trg_product_hypotheses_append_only"
+    }
     command.upgrade(config, "head")

@@ -196,7 +196,19 @@ def test_product_hypothesis_cli_rejects_non_validate_assessment(
     migrated_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, _, assessment_id, _ = asyncio.run(_seed_validated_run(migrated_postgres_url))
+    _, _, assessment_id, evidence_card_id = asyncio.run(_seed_validated_run(migrated_postgres_url))
+    monkeypatch.setenv("DATABASE_URL", migrated_postgres_url)
+    original_arguments = [
+        "product-hypothesis",
+        "create",
+        str(assessment_id),
+        "--request-id",
+        "request-before-monitor",
+        "--proposition",
+        "Preserve this exact validated snapshot",
+    ]
+    original, original_exit, _ = _invoke_json(original_arguments)
+    assert original_exit == 0
 
     async def move_back_to_research() -> None:
         database = Database.from_url(migrated_postgres_url)
@@ -211,7 +223,16 @@ def test_product_hypothesis_cli_rejects_non_validate_assessment(
             await database.dispose()
 
     asyncio.run(move_back_to_research())
-    monkeypatch.setenv("DATABASE_URL", migrated_postgres_url)
+    replayed, replay_exit, _ = _invoke_json(original_arguments)
+    assert replay_exit == 0
+    assert replayed["data"] == original["data"]
+
+    conflict, conflict_exit, _ = _invoke_json(
+        [*original_arguments[:-1], "Changed content after MONITOR"]
+    )
+    assert conflict_exit == 4
+    assert conflict["error"]["code"] == "CONFLICT"
+
     result, exit_code, stderr = _invoke_json(
         [
             "product-hypothesis",
@@ -227,6 +248,21 @@ def test_product_hypothesis_cli_rejects_non_validate_assessment(
     assert exit_code == 4
     assert stderr == ""
     assert result["error"]["code"] == "INVALID_STATE"
+
+    async def assert_original_card() -> None:
+        database = Database.from_url(migrated_postgres_url)
+        try:
+            async with database.session() as session:
+                row = await session.get(
+                    models.ProductHypothesis,
+                    UUID(str(original["data"]["id"])),
+                )
+                assert row is not None
+                assert row.evidence_card_id == evidence_card_id
+        finally:
+            await database.dispose()
+
+    asyncio.run(assert_original_card())
 
 
 @pytest.mark.postgres
@@ -246,6 +282,18 @@ async def test_product_hypothesis_database_enforces_lineage_bounds_and_append_on
             proposition="Persist only against the exact VALIDATE snapshot",
         )
         product_id = UUID(product.id)
+        unicode_product = await service.create(
+            assessment_id,
+            request_id="unicode-boundary",
+            proposition="🧾" * 20_000,
+        )
+        assert len(unicode_product.proposition) == 20_000
+        with pytest.raises(ValueError, match="20000"):
+            await service.create(
+                assessment_id,
+                request_id="unicode-over-limit",
+                proposition="🧾" * 20_001,
+            )
         async with database.session() as session:
             constraints = set(
                 await session.scalars(

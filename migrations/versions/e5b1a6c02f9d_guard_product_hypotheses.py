@@ -52,7 +52,7 @@ def upgrade() -> None:
         "AND content - 'schema_version' - 'proposition' = '{}'::jsonb "
         "AND length(btrim(content ->> 'proposition')) BETWEEN 1 AND 20000 "
         "AND content ->> 'proposition' = btrim(content ->> 'proposition') "
-        "AND octet_length(content::text) <= 80000",
+        "AND octet_length(content::text) <= 81000",
     )
     op.execute(
         """
@@ -101,11 +101,6 @@ def upgrade() -> None:
         "BEFORE INSERT ON product_hypotheses "
         "FOR EACH ROW EXECUTE FUNCTION gapforge_validate_product_hypothesis_insert()"
     )
-    op.execute(
-        "CREATE TRIGGER trg_product_hypotheses_append_only "
-        "BEFORE UPDATE OR DELETE ON product_hypotheses "
-        "FOR EACH ROW EXECUTE FUNCTION gapforge_reject_append_only_mutation()"
-    )
 
 
 def downgrade() -> None:
@@ -121,7 +116,6 @@ def downgrade() -> None:
         $$
         """
     )
-    op.execute("DROP TRIGGER IF EXISTS trg_product_hypotheses_append_only ON product_hypotheses")
     op.execute(
         "DROP TRIGGER IF EXISTS trg_product_hypotheses_validate_insert ON product_hypotheses"
     )
