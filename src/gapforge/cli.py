@@ -914,6 +914,7 @@ def _backup_service(settings: Settings) -> BackupService:
     return BackupService(
         database_url=settings.database_url.get_secret_value(),
         backups_dir=settings.backups_dir,
+        maintenance_database=settings.backup_maintenance_database,
     )
 
 

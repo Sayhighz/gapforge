@@ -13,6 +13,7 @@ x-runtime-environment: &runtime-environment
   CODEX_HOME: /var/lib/gapforge/codex
   REPORTS_DIR: /var/lib/gapforge/reports
   BACKUPS_DIR: /var/lib/gapforge/backups
+  BACKUP_MAINTENANCE_DATABASE: ${BACKUP_MAINTENANCE_DATABASE:-postgres}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_JSON: ${LOG_JSON:-true}
   RUN_INTERVAL_HOURS: ${RUN_INTERVAL_HOURS:-12}
@@ -118,6 +119,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://gapforge:gapforge@postgres:5432/gapforge}
       BACKUPS_DIR: /var/lib/gapforge/backups
+      BACKUP_MAINTENANCE_DATABASE: ${BACKUP_MAINTENANCE_DATABASE:-postgres}
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
     volumes:
       - backups_data:/var/lib/gapforge/backups

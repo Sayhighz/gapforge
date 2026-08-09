@@ -46,17 +46,20 @@ class BackupVerification(BaseModel):
 
 
 class _Connection:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, maintenance_database: str) -> None:
         parsed = make_url(database_url)
         if not parsed.drivername.startswith("postgresql"):
             raise BackupError("backup requires a PostgreSQL DATABASE_URL")
         if not parsed.database or not parsed.username:
             raise BackupError("DATABASE_URL must include database and username")
+        if not _DATABASE_NAME.fullmatch(maintenance_database):
+            raise BackupError("backup maintenance database name is invalid")
         self.host = parsed.host or "localhost"
         self.port = parsed.port or 5432
         self.username = parsed.username
         self.password = parsed.password
         self.database = parsed.database
+        self.maintenance_database = maintenance_database
 
     def arguments(self, *, database: str | None = None) -> list[str]:
         return [
@@ -79,7 +82,7 @@ class _Connection:
             "--username",
             self.username,
             "--maintenance-db",
-            self.database,
+            self.maintenance_database,
         ]
 
 
@@ -98,8 +101,12 @@ class BackupService:
         pg_restore_binary: str = "pg_restore",
         createdb_binary: str = "createdb",
         dropdb_binary: str = "dropdb",
+        maintenance_database: str = "postgres",
     ) -> None:
-        self.connection = _Connection(database_url)
+        self.connection = _Connection(
+            database_url,
+            maintenance_database=maintenance_database,
+        )
         self.backups_dir = backups_dir
         self.runner = runner or AsyncProcessRunner()
         self.parent_env = dict(parent_env if parent_env is not None else os.environ)

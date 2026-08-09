@@ -11,6 +11,7 @@ def test_settings_defaults_match_specification() -> None:
 
     assert settings.agent_provider is AgentProviderName.CODEX_CLI
     assert settings.codex_model == ""
+    assert settings.backup_maintenance_database == "postgres"
     assert settings.budget_snapshot() == {
         "run_interval_hours": 12,
         "max_research_rounds": 2,
@@ -43,6 +44,8 @@ def test_settings_load_environment_and_paths(monkeypatch: pytest.MonkeyPatch) ->
     ("values", "message"),
     [
         ({"max_research_rounds": 0}, "greater than or equal to 1"),
+        ({"max_research_rounds": 3}, "less than or equal to 2"),
+        ({"max_parallel_agent_calls": 3}, "less than or equal to 2"),
         (
             {"max_agent_calls_per_run": 1, "max_parallel_agent_calls": 2},
             "MAX_PARALLEL_AGENT_CALLS",

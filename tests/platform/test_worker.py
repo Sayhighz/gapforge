@@ -64,23 +64,36 @@ async def test_worker_heartbeats_work_longer_than_original_lease(
     database = Database.from_url(migrated_postgres_url)
     run, task = await _create_worker_task(database)
     started = asyncio.Event()
+    finish = asyncio.Event()
 
     async def slow_handler(_task: ResearchTask) -> dict[str, object]:
         started.set()
-        await asyncio.sleep(0.16)
+        await finish.wait()
         return {"ok": True}
 
     worker = Worker(
         database,
         worker_id="worker-a",
         handlers={"slow": slow_handler},
-        lease_duration=timedelta(seconds=0.06),
-        heartbeat_interval_seconds=0.015,
+        lease_duration=timedelta(seconds=0.3),
+        heartbeat_interval_seconds=0.05,
     )
     try:
         work = asyncio.create_task(worker.run_once())
         await started.wait()
-        await asyncio.sleep(0.08)
+        async with database.session() as session:
+            persisted = await session.get(ResearchTask, task.id)
+            assert persisted is not None
+            initial_expiry = persisted.lease_expires_at
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            async with database.session() as session:
+                persisted = await session.get(ResearchTask, task.id)
+                assert persisted is not None
+                if persisted.lease_expires_at > initial_expiry:
+                    break
+        else:
+            pytest.fail("worker did not renew the task lease within two seconds")
         async with database.session() as session:
             stolen = await DurableQueue(session).claim(
                 worker_id="worker-b",
@@ -88,6 +101,7 @@ async def test_worker_heartbeats_work_longer_than_original_lease(
                 allowed_task_types=frozenset({"slow"}),
             )
         assert stolen is None
+        finish.set()
         assert await work is True
 
         async with database.session() as session:
@@ -96,6 +110,7 @@ async def test_worker_heartbeats_work_longer_than_original_lease(
             assert persisted.status == "SUCCEEDED"
             assert persisted.attempt_count == 1
     finally:
+        finish.set()
         await _cancel_run(database, run.id)
         await database.dispose()
 

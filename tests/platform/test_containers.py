@@ -62,6 +62,14 @@ def test_dockerignore_excludes_credentials_and_derived_artifacts() -> None:
     assert ".git" in ignored
 
 
+def test_manual_smoke_checks_out_only_reviewed_main_without_persisting_credentials() -> None:
+    workflow = (ROOT / ".github/workflows/platform-smoke.yml").read_text(encoding="utf-8")
+
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1" in workflow
+    assert "ref: main" in workflow
+    assert "persist-credentials: false" in workflow
+
+
 def test_compose_configuration_is_valid_and_auth_service_has_no_app_secrets() -> None:
     command = _compose_command()
     if command is None:

@@ -21,5 +21,8 @@ jobs:
       GAPFORGE_PLATFORM_SMOKE_CONFIRM: ${{ inputs.confirm }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
       - name: Check configured device auth and platform health
         run: scripts/platform-smoke

@@ -20,9 +20,10 @@ from gapforge.storage.uow import SqlAlchemyUnitOfWork
 
 
 class BackupRunner(AsyncProcessRunner):
-    def __init__(self, *, archive_valid: bool = True) -> None:
+    def __init__(self, *, archive_valid: bool = True, restore_valid: bool = True) -> None:
         self.calls: list[tuple[list[str], dict[str, str]]] = []
         self.archive_valid = archive_valid
+        self.restore_valid = restore_valid
 
     async def run(
         self,
@@ -46,6 +47,8 @@ class BackupRunner(AsyncProcessRunner):
             )
         if command[0] == "pg_restore" and command[1] == "--list" and not self.archive_valid:
             return ProcessResult(1, b"", b"untrusted database error", False, False, False)
+        if command[0] == "pg_restore" and command[1] != "--list" and not self.restore_valid:
+            return ProcessResult(1, b"", b"restore failed", False, False, False)
         return ProcessResult(0, b"archive listing\n", b"", False, False, False)
 
 
@@ -140,7 +143,53 @@ async def test_restore_verifies_first_requires_confirmation_and_safe_target(tmp_
     restore_commands = [command for command, _ in runner.calls if command[0] == "pg_restore"]
     assert restore_commands[0][1] == "--list"
     assert "--exit-on-error" in restore_commands[-1]
-    assert any(command[0] == "createdb" for command, _ in runner.calls)
+    createdb_command = next(command for command, _ in runner.calls if command[0] == "createdb")
+    assert createdb_command[createdb_command.index("--maintenance-db") + 1] == "postgres"
+
+
+@pytest.mark.asyncio
+async def test_failed_restore_drops_target_through_maintenance_database(tmp_path: Path) -> None:
+    runner = BackupRunner(restore_valid=False)
+    service = BackupService(
+        database_url="postgresql://user:password@localhost/source",
+        backups_dir=tmp_path,
+        runner=runner,
+        now=lambda: datetime(2026, 8, 9, tzinfo=UTC),
+    )
+    record = await service.create()
+
+    with pytest.raises(BackupError, match="pg_restore"):
+        await service.restore(record.name, target_database="restored_copy", confirmed=True)
+
+    dropdb_command = next(command for command, _ in runner.calls if command[0] == "dropdb")
+    assert dropdb_command[dropdb_command.index("--maintenance-db") + 1] == "postgres"
+
+
+@pytest.mark.asyncio
+async def test_backup_maintenance_database_is_configurable(tmp_path: Path) -> None:
+    runner = BackupRunner()
+    service = BackupService(
+        database_url="postgresql://user:password@localhost/source",
+        backups_dir=tmp_path,
+        runner=runner,
+        maintenance_database="administration",
+        now=lambda: datetime(2026, 8, 9, tzinfo=UTC),
+    )
+    record = await service.create()
+
+    await service.restore(record.name, target_database="restored_copy", confirmed=True)
+
+    createdb_command = next(command for command, _ in runner.calls if command[0] == "createdb")
+    assert createdb_command[createdb_command.index("--maintenance-db") + 1] == "administration"
+
+
+def test_backup_rejects_unsafe_maintenance_database(tmp_path: Path) -> None:
+    with pytest.raises(BackupError, match="maintenance database"):
+        BackupService(
+            database_url="postgresql://user:password@localhost/source",
+            backups_dir=tmp_path,
+            maintenance_database="../postgres",
+        )
 
 
 @pytest.mark.asyncio

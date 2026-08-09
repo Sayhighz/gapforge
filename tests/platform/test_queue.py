@@ -53,6 +53,36 @@ async def _finish_run(database: Database, run_id: UUID) -> None:
             await session.commit()
 
 
+async def _create_queued_run(
+    database: Database,
+    *,
+    queued_deadline: datetime,
+    duration: object = 30,
+) -> ResearchRun:
+    async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+        _, revision = await uow.missions.create_with_revision(
+            title=f"Delayed queue mission {uuid4()}",
+            mission_text="start the hard deadline when execution begins",
+            original_language="en",
+            output_locale="en",
+        )
+        run = ResearchRun(
+            mission_revision_id=revision.id,
+            mode="HUNT",
+            status="QUEUED",
+            priority=1,
+            deadline_at=queued_deadline,
+            budget_limits={"max_run_duration_minutes": duration},
+            budget_used={},
+            warnings=[],
+            last_checkpoint={},
+        )
+        assert uow.session is not None
+        uow.session.add(run)
+        await uow.commit()
+        return run
+
+
 def test_retry_classification_is_bounded_and_deterministic() -> None:
     first = classify_error(ErrorKind.TRANSIENT_NETWORK, attempt=2, seed="task-1")
     same = classify_error(ErrorKind.TRANSIENT_NETWORK, attempt=2, seed="task-1")
@@ -66,6 +96,52 @@ def test_retry_classification_is_bounded_and_deterministic() -> None:
     assert retry_delay_seconds(20, "task-1") == 60
     with pytest.raises(ValueError, match="at least 1"):
         retry_delay_seconds(0, "task-1")
+
+
+@pytest.mark.postgres
+async def test_delayed_queued_run_receives_full_duration_when_started(
+    migrated_postgres_url: str,
+) -> None:
+    queued_at = datetime(2026, 8, 9, 1, tzinfo=UTC)
+    started_at = queued_at + timedelta(hours=2)
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_queued_run(
+        database,
+        queued_deadline=queued_at + timedelta(minutes=30),
+    )
+    try:
+        async with database.session() as session:
+            started = await RunController(session).start(run.id, now=started_at)
+            await session.commit()
+
+        assert started.status == "RUNNING"
+        assert started.started_at == started_at
+        assert started.deadline_at == started_at + timedelta(minutes=30)
+    finally:
+        await _finish_run(database, run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("duration", [True, 0, "30"])
+async def test_run_start_rejects_invalid_persisted_duration(
+    migrated_postgres_url: str,
+    duration: object,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_queued_run(
+        database,
+        queued_deadline=datetime.now(UTC) + timedelta(minutes=30),
+        duration=duration,
+    )
+    try:
+        async with database.session() as session:
+            with pytest.raises(ValueError, match="max_run_duration_minutes"):
+                await RunController(session).start(run.id)
+            await session.rollback()
+    finally:
+        await _finish_run(database, run.id)
+        await database.dispose()
 
 
 @pytest.mark.postgres
@@ -660,3 +736,7 @@ async def test_agent_call_limiter_allows_at_most_two() -> None:
 def test_invalid_agent_call_limit_is_rejected() -> None:
     with pytest.raises(ValueError, match="positive"):
         AgentCallLimiter(max_parallel=0)
+    with pytest.raises(ValueError, match="at most 2"):
+        AgentCallLimiter(max_parallel=3)
+    with pytest.raises(ValueError, match="at most 2"):
+        DurableAgentCallAdmission(None, max_parallel=3)  # type: ignore[arg-type]

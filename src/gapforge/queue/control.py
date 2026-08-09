@@ -28,15 +28,27 @@ class RunController:
     async def start(self, run_id: UUID, *, now: datetime | None = None) -> ResearchRun:
         run = await self._locked_run(run_id)
         start_time = now or datetime.now(UTC)
-        if run.deadline_at <= start_time:
+        if run.status == "QUEUED":
+            raw_duration = run.budget_limits.get("max_run_duration_minutes")
+            if (
+                isinstance(raw_duration, bool)
+                or not isinstance(raw_duration, int)
+                or raw_duration < 1
+            ):
+                raise ValueError("persisted max_run_duration_minutes must be a positive integer")
+            try:
+                deadline = start_time + timedelta(minutes=raw_duration)
+            except OverflowError as error:
+                raise ValueError("persisted max_run_duration_minutes is too large") from error
+            run.status = "RUNNING"
+            run.started_at = start_time
+            run.deadline_at = deadline
+        elif run.status != "RUNNING":
+            raise ValueError(f"cannot start run in status {run.status}")
+        elif run.deadline_at <= start_time:
             run.status = "BUDGET_EXHAUSTED"
             run.last_checkpoint = {"reason": "run deadline reached before start"}
             run.completed_at = start_time
-        elif run.status == "QUEUED":
-            run.status = "RUNNING"
-            run.started_at = start_time
-        elif run.status != "RUNNING":
-            raise ValueError(f"cannot start run in status {run.status}")
         await self.session.flush()
         return run
 
@@ -109,6 +121,8 @@ class AgentCallLimiter:
     def __init__(self, max_parallel: int = 2) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
+        if max_parallel > 2:
+            raise ValueError("max_parallel must be at most 2")
         self._max_parallel = max_parallel
         self._semaphores: defaultdict[UUID, asyncio.Semaphore] = defaultdict(
             lambda: asyncio.Semaphore(self._max_parallel)
@@ -124,6 +138,8 @@ class DurableAgentCallAdmission:
     def __init__(self, session: AsyncSession, *, max_parallel: int = 2) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
+        if max_parallel > 2:
+            raise ValueError("max_parallel must be at most 2")
         self.session = session
         self.max_parallel = max_parallel
 

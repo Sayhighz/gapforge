@@ -37,9 +37,9 @@ class Settings(BaseSettings):
     codex_binary: str = "codex"
 
     run_interval_hours: int = Field(default=12, ge=1)
-    max_research_rounds: int = Field(default=2, ge=1)
+    max_research_rounds: int = Field(default=2, ge=1, le=2)
     max_agent_calls_per_run: int = Field(default=6, ge=1)
-    max_parallel_agent_calls: int = Field(default=2, ge=1)
+    max_parallel_agent_calls: int = Field(default=2, ge=1, le=2)
     max_run_duration_minutes: int = Field(default=30, ge=1)
     max_collector_requests_per_run: int = Field(default=60, ge=1)
     max_search_calls_per_run: int = Field(default=20, ge=0)
@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     log_json: bool = True
     reports_dir: Path = Path("reports")
     backups_dir: Path = Path("backups")
+    backup_maintenance_database: str = Field(
+        default="postgres",
+        min_length=1,
+        max_length=63,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
 
     @model_validator(mode="after")
     def validate_related_limits(self) -> Settings:

@@ -35,6 +35,8 @@ backup_json=$(compose exec -T worker gap backup create --json)
 backup_name=$(printf '%s' "$backup_json" | "$python_command" -c \
     'import json,sys; print(json.load(sys.stdin)["data"]["name"])')
 compose exec -T worker gap backup verify "$backup_name" --json >/dev/null
+compose exec -T -e PGPASSWORD=gapforge worker \
+    dropdb --host postgres --username gapforge --maintenance-db postgres --force gapforge
 compose exec -T worker gap backup restore "$backup_name" \
     --target gapforge_restore_ci \
     --yes \
