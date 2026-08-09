@@ -958,6 +958,8 @@ async def _commit_stage(
 
 async def _seed_pipeline_context(
     database: Database,
+    *,
+    output_locale: str = "en",
 ) -> tuple[FakeContext, dict[str, UUID | str]]:
     mission = models.ResearchMission(id=uuid4(), status="DRAFT", title="Accounting pain")
     revision = models.MissionRevision(
@@ -967,7 +969,7 @@ async def _seed_pipeline_context(
         change_reason="initial",
         mission_text="Find recurring accounting pain",
         original_language="en",
-        output_locale="en",
+        output_locale=output_locale,
         interpretation={},
     )
     run = models.ResearchRun(
@@ -1083,7 +1085,7 @@ async def _seed_pipeline_context(
             revision=1,
             change_reason="initial",
             prompt=revision.mission_text,
-            output_locale="en",
+            output_locale=output_locale,
             created_at=NOW,
         ),
         collection_until=NOW,
