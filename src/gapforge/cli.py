@@ -27,8 +27,10 @@ from gapforge.integration.persistence import (
     MergeDecisionService,
 )
 from gapforge.integration.queries import ResearchQueryService
+from gapforge.integration.semantic import build_semantic_reasoner
 from gapforge.providers.codex_cli import CodexCliProvider
 from gapforge.runtime import RunScheduler, RunScheduleRequest
+from gapforge.runtime.research_handler import ResearchRunHandler
 from gapforge.storage.admin import execute_read_only_sql
 from gapforge.storage.database import Database
 from gapforge.storage.models import (
@@ -84,10 +86,25 @@ def _database(settings: Settings) -> Database:
     return Database.from_url(settings.database_url.get_secret_value())
 
 
-def _build_task_handler_registry() -> TaskHandlerRegistry:
-    """Integration seam for I3's concrete research orchestrator handler."""
-
-    return TaskHandlerRegistry()
+def _build_task_handler_registry(
+    database: Database,
+    settings: Settings,
+    worker_id: str,
+) -> TaskHandlerRegistry:
+    reasoner = build_semantic_reasoner(
+        database=database,
+        settings=settings,
+        worker_id=worker_id,
+    )
+    return TaskHandlerRegistry(
+        {
+            "research.run": ResearchRunHandler(
+                database=database,
+                settings=settings,
+                reasoner=reasoner,
+            )
+        }
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -512,24 +529,15 @@ def worker(
     json_output: JsonOption = False,
 ) -> None:
     async def operation() -> dict[str, Any]:
-        registry = _build_task_handler_registry()
-        registered_task_types = sorted(registry.task_types)
-        if not registered_task_types and once:
-            raise CliError(
-                "WORKER_NOT_CONFIGURED",
-                "no research task handlers are registered",
-                exit_code=4,
-            )
-        if not registered_task_types:
-            typer.echo(
-                "warning: worker is idle because no research task handlers are registered",
-                err=True,
-            )
-        database = _database(_settings())
+        settings = _settings()
+        database = _database(settings)
+        worker_id = f"{socket.gethostname()}:{os_getpid()}"
         try:
+            registry = _build_task_handler_registry(database, settings, worker_id)
+            registered_task_types = sorted(registry.task_types)
             runtime = Worker(
                 database,
-                worker_id=f"{socket.gethostname()}:{os_getpid()}",
+                worker_id=worker_id,
                 handlers=registry,
             )
             if not once:
@@ -546,7 +554,6 @@ def worker(
         "worker",
         operation,
         json_output=json_output,
-        warnings=("research task handlers are registered during cross-lane integration",),
     )
 
 

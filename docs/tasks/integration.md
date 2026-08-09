@@ -9,7 +9,8 @@ Owner: integration lead
 GitHub issue: #7
 
 Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, I2 runtime admission, and
-I4 provider admission/audit are reviewed and merged. I3 evidence orchestration is in progress.
+I4 provider admission/audit are reviewed and merged. I3 evidence orchestration is implemented
+and awaiting integration-lead review in draft PR #11.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -39,27 +40,35 @@ research module depends on a database session.
 - [x] Make `gap hunt` and `gap monitor --once` atomically create an idempotent root task with each queued run.
 - [x] Promote eligible queued runs through `RunController` while preserving global RUNNING exclusivity.
 - [x] Start the configured run-duration clock at the `QUEUED` to `RUNNING` transition, not while waiting in the queue.
-- [ ] Register real worker handlers; remove the empty production handler registry.
+- [x] Register real worker handlers; remove the empty production handler registry.
 - [x] Finalize runs only after their durable task graph is terminal, preserving warnings and checkpoints.
 - [x] Map authentication and total/permanent handler failure to `AUTH_REQUIRED`/`FAILED`; use `COMPLETED_WITH_WARNINGS` only when useful partial work survived.
 - [x] Test concurrent admission, duplicate scheduling, restart, lease loss, and deadline exhaustion.
 
 Progress: PR #9 was squash-merged as `f30fc7b` after independent reproduction of 208 passed,
 1 environment-gated skip, whole-repository Ruff/format, strict mypy, diff-check, and green
-GitHub Python/container-backup jobs. The production registry deliberately remains empty and
-fail-closed until I3 supplies the real `research.run` orchestrator; no fake handler was added.
+GitHub Python/container-backup jobs. I3 draft PR #11 registers the production `research.run`
+handler with one shared database/settings/worker identity; commit `1281ab2` passed the complete
+credential-free GitHub Python and container-backup jobs.
 
 Acceptance: a queued HUNT is structurally reachable by a worker and resumes safely after process
 or host restart without duplicating committed effects.
 
 ## I3 — Evidence pipeline orchestration
 
-- [ ] Query existing intelligence before scheduling new collection.
-- [ ] Orchestrate query planning, time windows, source collection, normalization, revisions, and deduplication.
-- [ ] Orchestrate pain extraction, independence-aware clustering, Evidence Cards, hypotheses, competitor research, scoring, critic, and bounded follow-up rounds.
-- [ ] Persist deterministic duplicate groups before Evidence Card and trend calculations.
-- [ ] Persist a deterministic checkpoint and idempotency key at every stage boundary.
-- [ ] Isolate source failures as warnings and keep valid partial evidence.
+- [x] Query existing intelligence before scheduling new collection.
+- [x] Orchestrate query planning, time windows, source collection, normalization, revisions, and deduplication.
+- [x] Orchestrate pain extraction, independence-aware clustering, Evidence Cards, hypotheses, competitor research, scoring, critic, and bounded follow-up rounds.
+- [x] Persist deterministic duplicate groups before Evidence Card and trend calculations.
+- [x] Persist a deterministic checkpoint and idempotency key at every stage boundary.
+- [x] Isolate source failures as warnings and keep valid partial evidence.
+
+Progress: draft PR #11 head `1281ab2` implements the canonical R1 and coherent R2 pipeline,
+production handler/collector/search/fetch wiring, deterministic target lineage, conservative
+pre-call external reservations, per-source contract isolation, immutable source timestamps,
+and Python-owned competitor capture IDs. GitHub Quality run `31299658851` passed with 342 tests,
+1 environment-gated skip, whole-repository Ruff/111-file format, strict mypy over 61 source
+files, whitespace checks, and the 53-second container migration/health/backup/restore job.
 
 Acceptance: one fake-provider HUNT executes the canonical pipeline with full evidence lineage and
 may correctly return zero `VALIDATE` opportunities.
@@ -144,10 +153,9 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1, the I2 runtime admission/finalization checkpoint, and I4 are reviewed and
-merged. The I2 real handler-registration item remains open and is owned by I3; I3 and I5-I8
-remain pending.
+Current state: I1, I2 admission/finalization, and I4 are reviewed and merged. I3 and the I2
+real-handler item are implemented and green in draft PR #11 at `1281ab2`; I5-I8 remain pending.
 
-Exact next action: merge `26859dc` into the I3 branch, connect the reviewed semantic provider
-boundary, register the real `research.run` handler and adapters, then review the bounded
-follow-up, partial-source, budget, and crash-resume acceptance cases.
+Exact next action: integration lead reviews PR #11 against I3 acceptance and I5's coordinated
+atomic writer seam. Do not merge until that review is clean; after I3 lands, refresh I5 onto the
+new integration head and run the combined persistence/query-surface suite.
