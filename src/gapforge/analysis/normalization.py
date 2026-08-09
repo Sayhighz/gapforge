@@ -66,11 +66,7 @@ def append_revision(
     deleted: bool = False,
 ) -> tuple[RawSignalRevision, ...]:
     digest = content_hash(None, "[deleted]") if deleted else content_hash(title, body)
-    if (
-        history
-        and history[-1].content_hash == digest
-        and history[-1].tombstone == deleted
-    ):
+    if history and history[-1].content_hash == digest and history[-1].tombstone == deleted:
         return history
     revision = RawSignalRevision(
         id=f"{raw_signal_id}:r{len(history) + 1}",

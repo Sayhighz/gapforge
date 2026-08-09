@@ -17,9 +17,9 @@ from gapforge.collectors.base import (
 )
 from gapforge.domain.contracts import (
     Availability,
+    CollectedItem,
     CollectRequest,
     CollectResult,
-    CollectedItem,
     Engagement,
     Source,
     SourceCheckpoint,
@@ -54,7 +54,8 @@ class GitHubCollector:
             if request.checkpoint and request.checkpoint.cursor
             else 1
         )
-        query = f"{request.intent.concept} is:issue created:{request.since.date()}..{request.until.date()}"
+        date_range = f"{request.since.date()}..{request.until.date()}"
+        query = f"{request.intent.concept} is:issue created:{date_range}"
         try:
             payload = await bounded_get_json(
                 self._client,
@@ -69,9 +70,7 @@ class GitHubCollector:
                 },
                 headers=self.headers,
             )
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("items"), list
-            ):
+            if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
                 raise CollectorResponseError("GitHub response missing items")
             items: list[CollectedItem] = []
             for raw in payload["items"]:
@@ -81,14 +80,8 @@ class GitHubCollector:
                 items.append(normalized)
                 if len(items) >= request.max_signals:
                     break
-                comments_url = (
-                    raw.get("comments_url") if isinstance(raw, dict) else None
-                )
-                if (
-                    comments_url
-                    and int(raw.get("comments") or 0)
-                    and budget.used < budget.maximum
-                ):
+                comments_url = raw.get("comments_url") if isinstance(raw, dict) else None
+                if comments_url and int(raw.get("comments") or 0) and budget.used < budget.maximum:
                     comments = await bounded_get_json(
                         self._client,
                         str(comments_url),
@@ -100,8 +93,7 @@ class GitHubCollector:
                         items.extend(
                             item
                             for comment in comments[:20]
-                            if (item := self._normalize_comment(comment, normalized))
-                            is not None
+                            if (item := self._normalize_comment(comment, normalized)) is not None
                             and in_window(item, request)
                         )
             capped = cap_thread_items(items, request.max_signals)
@@ -154,11 +146,7 @@ class GitHubCollector:
         ):
             return None
         user = raw.get("user")
-        login = (
-            str(user.get("login"))
-            if isinstance(user, dict) and user.get("login")
-            else None
-        )
+        login = str(user.get("login")) if isinstance(user, dict) and user.get("login") else None
         return CollectedItem(
             source=Source.GITHUB,
             external_id=str(raw.get("id")),
@@ -171,9 +159,7 @@ class GitHubCollector:
             source_edited_at=utc_from_timestamp(raw["updated_at"])
             if raw.get("updated_at")
             else None,
-            engagement=Engagement(
-                comments=max(0, int(raw.get("comments") or 0)), reactions=0
-            ),
+            engagement=Engagement(comments=max(0, int(raw.get("comments") or 0)), reactions=0),
             metadata={
                 "repository_url": raw.get("repository_url"),
                 "number": raw.get("number"),
@@ -181,17 +167,11 @@ class GitHubCollector:
         )
 
     @classmethod
-    def _normalize_comment(
-        cls, raw: object, parent: CollectedItem
-    ) -> CollectedItem | None:
+    def _normalize_comment(cls, raw: object, parent: CollectedItem) -> CollectedItem | None:
         if not isinstance(raw, dict) or cls._is_bot(raw) or not raw.get("body"):
             return None
         user = raw.get("user")
-        login = (
-            str(user.get("login"))
-            if isinstance(user, dict) and user.get("login")
-            else None
-        )
+        login = str(user.get("login")) if isinstance(user, dict) and user.get("login") else None
         return CollectedItem(
             source=Source.GITHUB,
             external_id=str(raw.get("id")),

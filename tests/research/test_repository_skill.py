@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[2]
 CANONICAL = ROOT / ".agents/skills/business-gap/SKILL.md"
 COMMANDS = ROOT / ".agents/skills/business-gap/references/commands.md"

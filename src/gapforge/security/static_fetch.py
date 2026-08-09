@@ -77,10 +77,7 @@ class _VisibleTextParser(HTMLParser):
             self._hidden_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if (
-            tag.lower() in {"script", "style", "noscript", "template", "svg"}
-            and self._hidden_depth
-        ):
+        if tag.lower() in {"script", "style", "noscript", "template", "svg"} and self._hidden_depth:
             self._hidden_depth -= 1
 
     def handle_data(self, data: str) -> None:
@@ -111,9 +108,7 @@ class StaticFetcher:
         self._resolver = resolver
         self._max_redirects = max_redirects
         self._max_bytes = max_bytes
-        self._timeout = httpx.Timeout(
-            timeout_seconds, connect=min(5.0, timeout_seconds)
-        )
+        self._timeout = httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds))
 
     async def fetch(self, url: str, registry: ApprovedUrlRegistry) -> FetchResult:
         try:
@@ -135,9 +130,7 @@ class StaticFetcher:
             assert response is not None
             try:
                 response.raise_for_status()
-                content_type = (
-                    response.headers.get("content-type", "").split(";", 1)[0].lower()
-                )
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                 if content_type not in ALLOWED_CONTENT_TYPES:
                     raise ContentUnavailableError("unsupported content type")
                 body = await self._bounded_body(response)
@@ -148,9 +141,7 @@ class StaticFetcher:
                     text = parser.text()
                 text = " ".join(text.split())
                 if not text:
-                    raise ContentUnavailableError(
-                        "page contains no visible static text"
-                    )
+                    raise ContentUnavailableError("page contains no visible static text")
                 return FetchResult(
                     availability=Availability.AVAILABLE,
                     snapshot=FetchSnapshot(
@@ -176,9 +167,7 @@ class StaticFetcher:
                     SourceWarning(
                         code="CONTENT_UNAVAILABLE",
                         message=f"static fetch unavailable: {type(exc).__name__}",
-                        retryable=isinstance(
-                            exc, (httpx.TimeoutException, httpx.NetworkError)
-                        ),
+                        retryable=isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)),
                     ),
                 ),
             )
@@ -192,9 +181,7 @@ class StaticFetcher:
         parsed = urlsplit(url)
         display_address = f"[{address}]" if ":" in address else address
         netloc = display_address + (f":{port}" if port else "")
-        pinned_url = urlunsplit(
-            (parsed.scheme, netloc, parsed.path or "/", parsed.query, "")
-        )
+        pinned_url = urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))
         host_header = hostname + (f":{port}" if port else "")
         request = self._client.build_request(
             "GET",

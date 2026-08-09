@@ -69,9 +69,7 @@ class ScoringInputs:
 
 
 def weighted_axis(components: ScoreComponents) -> float:
-    return sum(
-        components.values[name] * components.weights[name] for name in components.values
-    )
+    return sum(components.values[name] * components.weights[name] for name in components.values)
 
 
 def score_opportunity(
@@ -83,9 +81,7 @@ def score_opportunity(
     evidence_confidence: float,
     created_at: datetime,
 ) -> OpportunityScoreSnapshot:
-    evidence = ScoreComponents(
-        values=inputs.evidence_values(), weights=EVIDENCE_WEIGHTS
-    )
+    evidence = ScoreComponents(values=inputs.evidence_values(), weights=EVIDENCE_WEIGHTS)
     fit = ScoreComponents(values=inputs.fit_values(), weights=FIT_WEIGHTS)
     evidence_axis, fit_axis = weighted_axis(evidence), weighted_axis(fit)
     pre_penalty = math.sqrt(evidence_axis * fit_axis)
@@ -181,13 +177,11 @@ def score_delta(
         previous_snapshot_id=previous.id,
         current_snapshot_id=current.id,
         evidence_strength=round(
-            weighted_axis(current.evidence_strength)
-            - weighted_axis(previous.evidence_strength),
+            weighted_axis(current.evidence_strength) - weighted_axis(previous.evidence_strength),
             6,
         ),
         opportunity_fit=round(
-            weighted_axis(current.opportunity_fit)
-            - weighted_axis(previous.opportunity_fit),
+            weighted_axis(current.opportunity_fit) - weighted_axis(previous.opportunity_fit),
             6,
         ),
         final_score=round(current.final_score - previous.final_score, 6),
@@ -222,9 +216,7 @@ def validation_decision(
         GateResult("known_authors", author_count >= 5, str(author_count), ">=5"),
         GateResult("independent_threads", thread_count >= 3, str(thread_count), ">=3"),
         GateResult("user_sources", source_count >= 2, str(source_count), ">=2"),
-        GateResult(
-            "behavioral_workaround", workaround_count >= 1, str(workaround_count), ">=1"
-        ),
+        GateResult("behavioral_workaround", workaround_count >= 1, str(workaround_count), ">=1"),
         GateResult("wtp_or_spend", paid_count >= 1, str(paid_count), ">=1"),
         GateResult(
             "competitor_research",
@@ -232,27 +224,21 @@ def validation_decision(
             competitor_research.value,
             "COMPLETE",
         ),
-        GateResult(
-            "gap_evidence", gap_evidence_present, str(gap_evidence_present), "present"
-        ),
+        GateResult("gap_evidence", gap_evidence_present, str(gap_evidence_present), "present"),
         GateResult(
             "fatal_flags",
             len(critic.fatal_flags) == 0,
             str(len(critic.fatal_flags)),
             "0",
         ),
-        GateResult(
-            "overall_score", score.final_score >= 70, f"{score.final_score:.2f}", ">=70"
-        ),
+        GateResult("overall_score", score.final_score >= 70, f"{score.final_score:.2f}", ">=70"),
         GateResult(
             "evidence_confidence_consistency",
             confidence_consistent,
             str(confidence_consistent),
             "card=snapshot",
         ),
-        GateResult(
-            "evidence_confidence", confidence >= 0.65, f"{confidence:.2f}", ">=0.65"
-        ),
+        GateResult("evidence_confidence", confidence >= 0.65, f"{confidence:.2f}", ">=0.65"),
         GateResult(
             "critic_verdict",
             critic.verdict is Verdict.VALIDATE,

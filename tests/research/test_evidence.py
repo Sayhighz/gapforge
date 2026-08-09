@@ -111,9 +111,7 @@ def test_evidence_card_captures_time_source_and_contradiction_diversity() -> Non
     assert card.contradicting_claim_ids == ("c-2",)
 
 
-def test_claim_validation_rejects_invented_id_url_excerpt_time_and_contradiction() -> (
-    None
-):
+def test_claim_validation_rejects_invented_id_url_excerpt_time_and_contradiction() -> None:
     citation = Citation(
         evidence_id="e-1",
         source_url="https://attacker.example/",
@@ -130,9 +128,7 @@ def test_claim_validation_rejects_invented_id_url_excerpt_time_and_contradiction
         contradicts_claim_ids=("missing",),
     )
     with pytest.raises(EvidenceValidationError) as exc:
-        validate_atomic_claim(
-            claim, {"e-1": record()}, known_claim_ids=frozenset({"c-2"})
-        )
+        validate_atomic_claim(claim, {"e-1": record()}, known_claim_ids=frozenset({"c-2"}))
     message = str(exc.value)
     assert "invented evidence" in message
     assert "URL does not match" in message

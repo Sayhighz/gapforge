@@ -59,16 +59,10 @@ def classify_trend(
         return tuple(selected.values())
 
     current = independent(
-        tuple(
-            item for item in observations if current_start <= item.observed_at < as_of
-        )
+        tuple(item for item in observations if current_start <= item.observed_at < as_of)
     )
     previous = independent(
-        tuple(
-            item
-            for item in observations
-            if previous_start <= item.observed_at < current_start
-        )
+        tuple(item for item in observations if previous_start <= item.observed_at < current_start)
     )
     authors = len({item.author_id for item in current if item.author_id})
     threads = len({item.thread_id for item in current})
@@ -89,9 +83,7 @@ def classify_trend(
         label = TrendLabel.FALLING
     else:
         label = TrendLabel.FLAT
-    return TrendResult(
-        label, len(current), authors, threads, current_rate, previous_rate
-    )
+    return TrendResult(label, len(current), authors, threads, current_rate, previous_rate)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,17 +134,13 @@ def transition_lifecycle(
             LifecycleState.VALIDATE,
             LifecycleState.REJECTED,
         },
-        LifecycleState.REJECTED: {LifecycleState.RESEARCH_MORE}
-        if reopen_allowed
-        else set(),
+        LifecycleState.REJECTED: {LifecycleState.RESEARCH_MORE} if reopen_allowed else set(),
         LifecycleState.VALIDATE: set(),
     }
     if target is LifecycleState.VALIDATE and not validation_passed:
         raise ValueError("VALIDATE transition requires all validation gates")
     if target not in allowed[current]:
-        raise ValueError(
-            f"invalid lifecycle transition {current.value}->{target.value}"
-        )
+        raise ValueError(f"invalid lifecycle transition {current.value}->{target.value}")
     return target
 
 

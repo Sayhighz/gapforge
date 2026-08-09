@@ -36,9 +36,7 @@ class ApprovedUrlRegistry:
     def require_approved(self, url: str) -> str:
         normalized = str(HttpUrl(url))
         if normalized not in self._urls:
-            raise ValueError(
-                "URL was not supplied by search results or explicit user input"
-            )
+            raise ValueError("URL was not supplied by search results or explicit user input")
         return normalized
 
 
@@ -94,17 +92,11 @@ class BraveSearchProvider:
             observed_at = datetime.now(UTC)
             results: list[SearchResult] = []
             for raw in raw_results[:max_results]:
-                if (
-                    not isinstance(raw, dict)
-                    or not raw.get("url")
-                    or not raw.get("title")
-                ):
+                if not isinstance(raw, dict) or not raw.get("url") or not raw.get("title"):
                     continue
                 try:
                     normalized_url = HttpUrl(str(raw["url"]))
-                    result_id = hashlib.sha256(
-                        str(normalized_url).encode()
-                    ).hexdigest()[:24]
+                    result_id = hashlib.sha256(str(normalized_url).encode()).hexdigest()[:24]
                     results.append(
                         SearchResult(
                             id=f"brave-{result_id}",

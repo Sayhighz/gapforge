@@ -12,8 +12,8 @@ from gapforge.domain.contracts import (
     AtomicClaim,
     ClaimKind,
     EpistemicStatus,
-    MissionRevision,
     MissionOpportunityAssessment,
+    MissionRevision,
     QueryIntent,
     QueryIntentKind,
     QueryPlan,
@@ -25,9 +25,7 @@ from gapforge.domain.contracts import (
 NOW = datetime(2026, 8, 9, tzinfo=UTC)
 
 
-def intent(
-    identifier: str, kind: QueryIntentKind = QueryIntentKind.BROAD
-) -> QueryIntent:
+def intent(identifier: str, kind: QueryIntentKind = QueryIntentKind.BROAD) -> QueryIntent:
     return QueryIntent(
         id=identifier,
         kind=kind,
@@ -61,9 +59,7 @@ def test_mission_revision_parent_invariant() -> None:
 
 def test_query_plan_rejects_cap_and_duplicate_bypass() -> None:
     with pytest.raises(ValidationError, match="8 broad"):
-        QueryPlan(
-            round_number=1, intents=tuple(intent(f"q-{index}") for index in range(9))
-        )
+        QueryPlan(round_number=1, intents=tuple(intent(f"q-{index}") for index in range(9)))
     with pytest.raises(ValidationError, match="must be unique"):
         QueryPlan(round_number=1, intents=(intent("same"), intent("same")))
     with pytest.raises(ValidationError):

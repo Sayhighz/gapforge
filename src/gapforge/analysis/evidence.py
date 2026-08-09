@@ -55,9 +55,7 @@ class EvidenceObservation:
 
 def validate_pain_extraction(signal: PainSignal, evidence: EvidenceRecord) -> None:
     if signal.raw_signal_revision_id != evidence.evidence_id:
-        raise EvidenceValidationError(
-            ("pain signal references an unpermitted evidence ID",)
-        )
+        raise EvidenceValidationError(("pain signal references an unpermitted evidence ID",))
     haystack = normalize_text(evidence.text)
     errors = []
     if normalize_text(signal.excerpt) not in haystack:
@@ -80,9 +78,7 @@ def build_evidence_card(
 ) -> EvidenceCard:
     """Build metrics from one deterministic representative per duplicate group."""
     independent: dict[str, EvidenceObservation] = {}
-    for item in sorted(
-        observations, key=lambda value: (value.duplicate_group, value.evidence_id)
-    ):
+    for item in sorted(observations, key=lambda value: (value.duplicate_group, value.evidence_id)):
         independent.setdefault(item.duplicate_group, item)
     values = tuple(independent.values())
     authors = tuple(sorted({item.author_id for item in values if item.author_id}))

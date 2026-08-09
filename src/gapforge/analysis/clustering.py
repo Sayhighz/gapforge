@@ -72,9 +72,7 @@ def cluster_state(last_growth_at: datetime, now: datetime) -> str:
     return "DORMANT" if now - last_growth_at >= timedelta(days=90) else "ACTIVE"
 
 
-def apply_merge_decision(
-    candidate: MergeCandidate, decision: MergeDecision
-) -> MergeCandidate:
+def apply_merge_decision(candidate: MergeCandidate, decision: MergeDecision) -> MergeCandidate:
     if decision.candidate_id != candidate.id:
         raise ValueError("decision does not match merge candidate")
     transitions = {

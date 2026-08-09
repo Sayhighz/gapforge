@@ -19,15 +19,9 @@ from pydantic import (
 
 SCHEMA_VERSION = "0.1"
 
-ShortText = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
-]
-LongText = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
-]
-Identifier = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
-]
+ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+LongText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)]
+Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 class Contract(BaseModel):
@@ -275,9 +269,7 @@ class RawSignal(Contract):
     author_identity: Identifier | None = None
     title: ShortText | None = None
     body: LongText | None = None
-    original_language: Annotated[
-        str, StringConstraints(min_length=2, max_length=16)
-    ] = "und"
+    original_language: Annotated[str, StringConstraints(min_length=2, max_length=16)] = "und"
     source_created_at: datetime
     collected_at: datetime
     source_edited_at: datetime | None = None
@@ -387,9 +379,7 @@ class AtomicClaim(Contract):
     status: EpistemicStatus
     evidence_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
     citations: tuple[Citation, ...] = Field(default_factory=tuple, max_length=50)
-    contradicts_claim_ids: tuple[Identifier, ...] = Field(
-        default_factory=tuple, max_length=50
-    )
+    contradicts_claim_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
 
     @model_validator(mode="after")
     def supported_claim_has_evidence(self) -> AtomicClaim:
@@ -400,12 +390,8 @@ class AtomicClaim(Contract):
             and self.status is EpistemicStatus.SUPPORTED
         ):
             if not self.citations:
-                raise ValueError(
-                    "supported price/feature claims require captured citations"
-                )
-        if any(
-            citation.evidence_id not in self.evidence_ids for citation in self.citations
-        ):
+                raise ValueError("supported price/feature claims require captured citations")
+        if any(citation.evidence_id not in self.evidence_ids for citation in self.citations):
             raise ValueError("citation evidence IDs must be declared by the claim")
         return self
 
@@ -413,28 +399,20 @@ class AtomicClaim(Contract):
 class EvidenceCard(Contract):
     id: Identifier
     opportunity_id: Identifier
-    known_author_ids: tuple[Identifier, ...] = Field(
-        default_factory=tuple, max_length=500
-    )
+    known_author_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=500)
     thread_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=500)
     user_sources: tuple[Source, ...] = Field(default_factory=tuple, max_length=5)
     observed_days: tuple[datetime, ...] = Field(default_factory=tuple, max_length=500)
     severity: float = Field(ge=0, le=1)
     behavioral_workarounds: int = Field(ge=0)
     paid_or_wtp_signals: int = Field(ge=0)
-    supporting_claim_ids: tuple[Identifier, ...] = Field(
-        default_factory=tuple, max_length=500
-    )
-    contradicting_claim_ids: tuple[Identifier, ...] = Field(
-        default_factory=tuple, max_length=500
-    )
+    supporting_claim_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=500)
+    contradicting_claim_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=500)
     representative_evidence_ids: tuple[Identifier, ...] = Field(
         default_factory=tuple, max_length=50
     )
     confidence: float = Field(ge=0, le=1)
-    missing_evidence: tuple[ShortText, ...] = Field(
-        default_factory=tuple, max_length=50
-    )
+    missing_evidence: tuple[ShortText, ...] = Field(default_factory=tuple, max_length=50)
 
     @field_validator(
         "known_author_ids",
@@ -461,9 +439,7 @@ class ProblemHypothesis(Contract):
     workflow_failure: ShortText
     falsification_test: ShortText
     supporting_claim_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=50)
-    contradicting_claim_ids: tuple[Identifier, ...] = Field(
-        default_factory=tuple, max_length=50
-    )
+    contradicting_claim_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
 
 
 class Competitor(Contract):
@@ -508,9 +484,7 @@ class MissionOpportunityAssessment(Contract):
         if self.verdict is Verdict.VALIDATE and not (
             self.score_snapshot_id and self.evidence_card_id
         ):
-            raise ValueError(
-                "VALIDATE assessment requires score snapshot and Evidence Card"
-            )
+            raise ValueError("VALIDATE assessment requires score snapshot and Evidence Card")
         return self
 
 
@@ -591,16 +565,10 @@ class CriticResult(Contract):
     verdict: Verdict
     confidence: float = Field(ge=0, le=1)
     fatal_flags: tuple[ShortText, ...] = Field(default_factory=tuple, max_length=20)
-    weak_assumptions: tuple[ShortText, ...] = Field(
-        default_factory=tuple, max_length=30
-    )
+    weak_assumptions: tuple[ShortText, ...] = Field(default_factory=tuple, max_length=30)
     contradictions: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
-    missing_evidence: tuple[ShortText, ...] = Field(
-        default_factory=tuple, max_length=30
-    )
-    recommended_intents: tuple[QueryIntent, ...] = Field(
-        default_factory=tuple, max_length=4
-    )
+    missing_evidence: tuple[ShortText, ...] = Field(default_factory=tuple, max_length=30)
+    recommended_intents: tuple[QueryIntent, ...] = Field(default_factory=tuple, max_length=4)
     summary: ShortText
 
 
@@ -609,12 +577,8 @@ class CriticInput(Contract):
     problem_hypothesis: ProblemHypothesis
     evidence_card: EvidenceCard
     gap_hypothesis: GapHypothesis
-    competitor_claims: tuple[AtomicClaim, ...] = Field(
-        default_factory=tuple, max_length=100
-    )
-    permitted_claim_ids: tuple[Identifier, ...] = Field(
-        default_factory=tuple, max_length=500
-    )
+    competitor_claims: tuple[AtomicClaim, ...] = Field(default_factory=tuple, max_length=100)
+    permitted_claim_ids: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=500)
 
 
 class SourceCheckpoint(Contract):
@@ -814,9 +778,7 @@ def _bounded_metadata(value: dict[str, Any]) -> dict[str, Any]:
     if len(value) > 50:
         raise ValueError("metadata may contain at most 50 keys")
     try:
-        encoded = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
         raise ValueError("metadata must be JSON serializable") from exc
     if len(encoded.encode("utf-8")) > 20_000:

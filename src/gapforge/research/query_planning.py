@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterable
 
 from gapforge.domain.contracts import (
     QueryIntent,
@@ -109,9 +109,7 @@ def compile_plan(plan: QueryPlan) -> tuple[CompiledQuery, ...]:
     )
 
 
-def stratified_windows(
-    until: datetime, lookback_days: int = 365
-) -> tuple[TimeWindow, ...]:
+def stratified_windows(until: datetime, lookback_days: int = 365) -> tuple[TimeWindow, ...]:
     """Return the required four initial-HUNT strata, clipped for emerging missions."""
     if not 1 <= lookback_days <= 365:
         raise ValueError("lookback_days must be between 1 and 365")
@@ -135,8 +133,7 @@ def stratified_windows(
         )
     total = sum(item.allocation for item in windows)
     return tuple(
-        TimeWindow(item.label, item.since, item.until, item.allocation / total)
-        for item in windows
+        TimeWindow(item.label, item.since, item.until, item.allocation / total) for item in windows
     )
 
 

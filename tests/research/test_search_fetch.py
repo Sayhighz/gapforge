@@ -112,9 +112,7 @@ async def test_fetch_blocks_private_loopback_link_local_and_metadata(
     def handler(req: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(
-            200, text="should not fetch", headers={"content-type": "text/plain"}
-        )
+        return httpx.Response(200, text="should not fetch", headers={"content-type": "text/plain"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await StaticFetcher(client, resolver=resolver).fetch(
@@ -131,7 +129,10 @@ async def test_fetch_pins_validated_ip_and_extracts_visible_text() -> None:
         assert req.headers["host"] == "example.com"
         return httpx.Response(
             200,
-            content=b"<html><style>hidden</style><body>Useful <b>workflow</b><script>bad()</script></body></html>",
+            content=(
+                b"<html><style>hidden</style><body>Useful <b>workflow</b>"
+                b"<script>bad()</script></body></html>"
+            ),
             headers={"content-type": "text/html; charset=utf-8"},
         )
 
@@ -166,12 +167,8 @@ async def test_redirect_to_private_and_dns_rebinding_seam_are_blocked() -> None:
 async def test_oversized_unsupported_and_agent_created_urls_fail_closed() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/pdf":
-            return httpx.Response(
-                200, content=b"pdf", headers={"content-type": "application/pdf"}
-            )
-        return httpx.Response(
-            200, content=b"x" * 11, headers={"content-type": "text/plain"}
-        )
+            return httpx.Response(200, content=b"pdf", headers={"content-type": "application/pdf"})
+        return httpx.Response(200, content=b"x" * 11, headers={"content-type": "text/plain"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         fetcher = StaticFetcher(client, resolver=public_resolver, max_bytes=10)

@@ -18,9 +18,9 @@ from gapforge.collectors.base import (
 )
 from gapforge.domain.contracts import (
     Availability,
+    CollectedItem,
     CollectRequest,
     CollectResult,
-    CollectedItem,
     Engagement,
     Source,
     SourceCheckpoint,
@@ -30,7 +30,7 @@ from gapforge.domain.contracts import (
 
 class RedditCollector:
     endpoint = "https://oauth.reddit.com"
-    token_endpoint = "https://www.reddit.com/api/v1/access_token"
+    token_endpoint = "https://www.reddit.com/api/v1/access_token"  # noqa: S105 -- public endpoint
 
     def __init__(
         self,
@@ -88,8 +88,7 @@ class RedditCollector:
             items = [
                 item
                 for child in children
-                if (item := self._normalize(child)) is not None
-                and in_window(item, request)
+                if (item := self._normalize(child)) is not None and in_window(item, request)
             ]
             capped = cap_thread_items(items, request.max_signals)
             return CollectResult(
@@ -122,9 +121,7 @@ class RedditCollector:
 
     async def _access_token(self, budget: RequestBudget) -> str:
         assert self._client_id is not None and self._client_secret is not None
-        basic = base64.b64encode(
-            f"{self._client_id}:{self._client_secret}".encode()
-        ).decode()
+        basic = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
         payload = await bounded_request_json(
             self._client,
             "POST",
@@ -136,9 +133,7 @@ class RedditCollector:
                 "User-Agent": self._user_agent,
             },
         )
-        if not isinstance(payload, dict) or not isinstance(
-            payload.get("access_token"), str
-        ):
+        if not isinstance(payload, dict) or not isinstance(payload.get("access_token"), str):
             raise CollectorResponseError("Reddit token response is invalid")
         return str(payload["access_token"])
 
@@ -147,9 +142,7 @@ class RedditCollector:
         if not isinstance(child, dict) or not isinstance(child.get("data"), dict):
             return None
         raw = child["data"]
-        if raw.get("distinguished") or str(raw.get("author", "")).lower().endswith(
-            "bot"
-        ):
+        if raw.get("distinguished") or str(raw.get("author", "")).lower().endswith("bot"):
             return None
         identifier = str(raw.get("name") or raw.get("id") or "")
         title, body = (

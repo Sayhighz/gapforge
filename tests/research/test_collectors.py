@@ -26,9 +26,7 @@ from gapforge.domain.contracts import (
 NOW = datetime(2026, 8, 9, tzinfo=UTC)
 
 
-def request(
-    source: Source, max_requests: int = 10, max_signals: int = 30
-) -> CollectRequest:
+def request(source: Source, max_requests: int = 10, max_signals: int = 30) -> CollectRequest:
     return CollectRequest(
         mission_revision_id=uuid4(),
         intent=QueryIntent(
@@ -149,9 +147,7 @@ async def test_github_filters_pr_bot_template_and_generic_bug() -> None:
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await GitHubCollector(client, token="secret").collect(
-            request(Source.GITHUB)
-        )
+        result = await GitHubCollector(client, token="secret").collect(request(Source.GITHUB))
     assert [item.external_id for item in result.items] == ["7", "70"]
     assert result.items[1].parent_thread_id == "7"
     assert result.request_count == 2
@@ -167,9 +163,9 @@ async def test_reddit_missing_credentials_is_structured_and_makes_no_request() -
         return httpx.Response(500)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await RedditCollector(
-            client, client_id=None, client_secret=None
-        ).collect(request(Source.REDDIT))
+        result = await RedditCollector(client, client_id=None, client_secret=None).collect(
+            request(Source.REDDIT)
+        )
     assert result.availability is Availability.SOURCE_UNAVAILABLE
     assert result.warnings[0].code == "REDDIT_CREDENTIALS_MISSING"
     assert calls == 0
@@ -208,9 +204,9 @@ async def test_reddit_filters_results_to_exact_requested_window() -> None:
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await RedditCollector(
-            client, client_id="id", client_secret="secret"
-        ).collect(request(Source.REDDIT))
+        result = await RedditCollector(client, client_id="id", client_secret="secret").collect(
+            request(Source.REDDIT)
+        )
     assert [item.external_id for item in result.items] == ["inside"]
 
 
@@ -235,9 +231,7 @@ async def test_retries_are_bounded_by_request_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nonretryable_http_and_declared_size_fail_without_unbounded_read() -> (
-    None
-):
+async def test_nonretryable_http_and_declared_size_fail_without_unbounded_read() -> None:
     calls = 0
 
     def unauthorized(req: httpx.Request) -> httpx.Response:
@@ -257,9 +251,7 @@ async def test_nonretryable_http_and_declared_size_fail_without_unbounded_read()
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(oversized)) as client:
         with pytest.raises(CollectorResponseError, match="byte limit"):
-            await bounded_get_json(
-                client, "https://example.com", budget=RequestBudget(1)
-            )
+            await bounded_get_json(client, "https://example.com", budget=RequestBudget(1))
 
 
 @pytest.mark.asyncio

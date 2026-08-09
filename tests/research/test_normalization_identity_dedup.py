@@ -43,9 +43,7 @@ def test_url_text_and_exact_duplicate_order_are_deterministic() -> None:
         == "SOURCE_EXTERNAL_ID"
     )
     assert (
-        exact_duplicate_reason(
-            left, dedup_key(item("2", "https://example.com/post", "different"))
-        )
+        exact_duplicate_reason(left, dedup_key(item("2", "https://example.com/post", "different")))
         == "NORMALIZED_URL"
     )
     assert (
@@ -64,9 +62,7 @@ def test_minhash_near_duplicate_is_stable_and_bounded() -> None:
     right = minhash_signature(
         "manual invoice export takes several hours every friday for accountants"
     )
-    assert left == minhash_signature(
-        "manual invoice export takes several hours every friday"
-    )
+    assert left == minhash_signature("manual invoice export takes several hours every friday")
     assert minhash_similarity(left, right) > 0.4
     with pytest.raises(ValueError):
         minhash_signature("x", permutations=2)
@@ -79,19 +75,14 @@ def test_author_pseudonyms_are_source_scoped_and_unknown_bots_do_not_count() -> 
     other_source = pseudonymize_author(Source.REDDIT, "alice", secret)
     assert first == same
     assert first.pseudonym != other_source.pseudonym
-    assert (
-        pseudonymize_author(Source.GITHUB, "dependabot[bot]", secret).known_human
-        is False
-    )
+    assert pseudonymize_author(Source.GITHUB, "dependabot[bot]", secret).known_human is False
     assert pseudonymize_author(Source.GITHUB, "[deleted]", secret).pseudonym is None
     with pytest.raises(ValueError, match="32 bytes"):
         pseudonymize_author(Source.GITHUB, "alice", b"short")
 
 
 def test_edits_and_tombstones_append_history_without_duplicate_revisions() -> None:
-    history = append_revision(
-        (), raw_signal_id="raw-1", title="Pain", body="old", observed_at=NOW
-    )
+    history = append_revision((), raw_signal_id="raw-1", title="Pain", body="old", observed_at=NOW)
     unchanged = append_revision(
         history, raw_signal_id="raw-1", title=" pain ", body="OLD", observed_at=NOW
     )

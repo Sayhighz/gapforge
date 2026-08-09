@@ -24,11 +24,11 @@ from gapforge.analysis.lifecycle import (
     transition_lifecycle,
 )
 from gapforge.domain.contracts import (
-    AtomicClaim,
     AlternativeKind,
+    AtomicClaim,
     ClaimKind,
-    CompetitorResearchStatus,
     Competitor,
+    CompetitorResearchStatus,
     CriticInput,
     CriticResult,
     EpistemicStatus,
@@ -142,9 +142,7 @@ def test_geometric_mean_penalties_explanation_and_append_only_history() -> None:
 
 
 def test_score_delta_and_lifecycle_history_are_append_only() -> None:
-    previous = score(60).model_copy(
-        update={"id": "s-old", "created_at": NOW - timedelta(days=1)}
-    )
+    previous = score(60).model_copy(update={"id": "s-old", "created_at": NOW - timedelta(days=1)})
     current = score(80).model_copy(update={"id": "s-new", "created_at": NOW})
     delta = score_delta(previous, current)
     assert delta.final_score == 20
@@ -165,9 +163,7 @@ def test_score_delta_and_lifecycle_history_are_append_only() -> None:
         reason="threshold met",
         created_at=NOW,
     )
-    history = append_lifecycle_event(
-        append_lifecycle_event((), discovered), researching
-    )
+    history = append_lifecycle_event(append_lifecycle_event((), discovered), researching)
     assert [event.to_state for event in history] == [
         LifecycleState.DISCOVERED,
         LifecycleState.RESEARCHING,
@@ -280,20 +276,14 @@ def test_critic_input_is_blind_schema_and_citations_are_allowlisted() -> None:
         validate_critic_result(critic(contradictions=("invented",)), frozenset({"c-1"}))
 
 
-def test_hypotheses_are_falsifiable_allowlisted_and_cover_nonsoftware_alternatives() -> (
-    None
-):
+def test_hypotheses_are_falsifiable_allowlisted_and_cover_nonsoftware_alternatives() -> None:
     validate_problem_hypothesis(hypothesis(), frozenset({"c-1"}))
-    vague = hypothesis().model_copy(
-        update={"falsification_test": "Ask whether people like it"}
-    )
+    vague = hypothesis().model_copy(update={"falsification_test": "Ask whether people like it"})
     with pytest.raises(ValueError, match="falsifiable"):
         validate_problem_hypothesis(vague, frozenset({"c-1"}))
     alternatives = (
         Competitor(id="c-1", name="Spreadsheet", kind=AlternativeKind.SPREADSHEET),
-        Competitor(
-            id="c-2", name="Keep current process", kind=AlternativeKind.DO_NOTHING
-        ),
+        Competitor(id="c-2", name="Keep current process", kind=AlternativeKind.DO_NOTHING),
     )
     validate_alternative_coverage(alternatives)
     with pytest.raises(ValueError, match="doing nothing"):
@@ -342,18 +332,11 @@ def test_research_more_respects_round_and_call_budgets() -> None:
         for i in range(4)
     )
     result = critic(verdict=Verdict.RESEARCH_MORE, recommended_intents=intents)
-    assert (
-        len(research_more_intents(result, completed_rounds=1, remaining_agent_calls=2))
-        == 2
-    )
-    assert (
-        research_more_intents(result, completed_rounds=2, remaining_agent_calls=6) == ()
-    )
+    assert len(research_more_intents(result, completed_rounds=1, remaining_agent_calls=2)) == 2
+    assert research_more_intents(result, completed_rounds=2, remaining_agent_calls=6) == ()
 
 
-def test_trend_requires_five_signals_three_authors_two_threads_and_volume_normalization() -> (
-    None
-):
+def test_trend_requires_five_signals_three_authors_two_threads_and_volume_normalization() -> None:
     viral = tuple(
         TrendObservation(f"s-{i}", f"a-{i % 4}", "one-thread", NOW - timedelta(days=1))
         for i in range(10)
@@ -389,9 +372,7 @@ def test_trend_requires_five_signals_three_authors_two_threads_and_volume_normal
     assert duplicate_result.label is TrendLabel.INSUFFICIENT_DATA
 
 
-def test_validation_rejects_cross_opportunity_artifacts_and_low_snapshot_confidence() -> (
-    None
-):
+def test_validation_rejects_cross_opportunity_artifacts_and_low_snapshot_confidence() -> None:
     with pytest.raises(ValueError, match="different opportunities"):
         validation_decision(
             card=card(),
@@ -409,9 +390,7 @@ def test_validation_rejects_cross_opportunity_artifacts_and_low_snapshot_confide
         critic=critic(),
     )
     assert decision.verdict is not Verdict.VALIDATE
-    assert not next(
-        gate for gate in decision.gates if gate.name == "evidence_confidence"
-    ).passed
+    assert not next(gate for gate in decision.gates if gate.name == "evidence_confidence").passed
 
 
 def test_reopen_cooldown_wtp_exception_and_lifecycle_guard() -> None:
@@ -429,9 +408,7 @@ def test_reopen_cooldown_wtp_exception_and_lifecycle_guard() -> None:
         is LifecycleState.RESEARCH_MORE
     )
     with pytest.raises(ValueError):
-        transition_lifecycle(
-            LifecycleState.REJECTED, LifecycleState.VALIDATE, reopen_allowed=True
-        )
+        transition_lifecycle(LifecycleState.REJECTED, LifecycleState.VALIDATE, reopen_allowed=True)
     with pytest.raises(ValueError, match="validation gates"):
         transition_lifecycle(LifecycleState.RESEARCHING, LifecycleState.VALIDATE)
     assert (

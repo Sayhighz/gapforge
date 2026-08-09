@@ -77,8 +77,6 @@ def test_source_budget_is_fair_and_capped() -> None:
     assert budget == {Source.GITHUB: 100, Source.HACKER_NEWS: 100, Source.REDDIT: 100}
     two_sources = allocate_signal_budget((Source.HACKER_NEWS, Source.GITHUB))
     assert max(two_sources.values()) <= 150
-    tiny = allocate_signal_budget(
-        (Source.HACKER_NEWS, Source.GITHUB, Source.REDDIT), total=2
-    )
+    tiny = allocate_signal_budget((Source.HACKER_NEWS, Source.GITHUB, Source.REDDIT), total=2)
     assert sum(tiny.values()) == 2
     assert all(value > 0 for value in tiny.values())

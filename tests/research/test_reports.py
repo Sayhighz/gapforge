@@ -155,9 +155,7 @@ def test_report_claim_wrapper_rejects_unvalidated_claim_and_quote() -> None:
     )
     with pytest.raises(EvidenceValidationError):
         validated_claim_view(claim, {})
-    evidence = EvidenceRecord(
-        "e-1", Source.GITHUB, "https://example.com", "captured text", NOW
-    )
+    evidence = EvidenceRecord("e-1", Source.GITHUB, "https://example.com", "captured text", NOW)
     grounded = AtomicClaim(
         id="c-2",
         text="Captured",
