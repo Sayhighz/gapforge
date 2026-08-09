@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Research developer agent
 
-Last checkpoint: B1-B8 pushed through `93897cc`; B9 audit and handoff next
+Last checkpoint: B1-B9 complete through `888f13a`; draft PR #6 updated for integration review
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -116,16 +116,16 @@ Acceptance: Codex and Claude can use CLI JSON without knowing database internals
 
 ## B9 — PR handoff
 
-- [ ] Re-read `docs/spec-v0.1.md` and audit owned deliverables.
-- [ ] Run all available checks and record exact output in the PR.
-- [ ] Update this file's `Last checkpoint` and completed boxes.
-- [ ] Push all commits and open/update a draft PR targeting `integration/v0.1`.
-- [ ] Document cross-lane integration needs without editing Lane A paths.
+- [x] Re-read `docs/spec-v0.1.md` and audit owned deliverables.
+- [x] Run all available checks and record exact output in the PR.
+- [x] Update this file's `Last checkpoint` and completed boxes.
+- [x] Push all commits and open/update a draft PR targeting `integration/v0.1`.
+- [x] Document cross-lane integration needs without editing Lane A paths.
 
 ## Resume note
 
-Current state: B1-B8 complete.
+Current state: B1-B9 complete; draft PR #6 awaits integration-lead review.
 
-Last pushed commit: `93897cc` (`remove generated report bytecode`) after `c916f01` (`add deterministic reports and repository skill`).
+Last pushed commit: `888f13a` (`align research lane with integration lint config`).
 
-Next action: re-read the canonical specification, audit every owned deliverable, run all checks, update the draft PR, and complete B9 handoff.
+Next action: integration lead reviews PR #6, merges it into `integration/v0.1`, and reruns bare repo-wide checks with Lane A package configuration.
