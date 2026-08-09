@@ -14,6 +14,7 @@ from gapforge.integration.persistence import (
     MergeDecisionConflictError,
     MergeDecisionService,
 )
+from gapforge.integration.queries import ResearchQueryService
 from gapforge.storage.database import Database
 from gapforge.storage.models import (
     CanonicalProblem,
@@ -58,9 +59,45 @@ async def test_merge_decisions_are_reversible_and_append_only(
         rationale="Potentially the same workflow pain",
         status="PENDING",
     )
+    left_gap = GapHypothesis(
+        id=uuid4(),
+        canonical_problem_id=left.id,
+        gap_type="WORKFLOW",
+        statement="Left gap",
+        user_evidence_ids=[uuid4()],
+        competitor_evidence_ids=[uuid4()],
+        contradicting_claim_ids=[],
+    )
+    right_gap = GapHypothesis(
+        id=uuid4(),
+        canonical_problem_id=right.id,
+        gap_type="WORKFLOW",
+        statement="Right gap",
+        user_evidence_ids=[uuid4()],
+        competitor_evidence_ids=[uuid4()],
+        contradicting_claim_ids=[],
+    )
+    left_opportunity = Opportunity(
+        id=uuid4(),
+        canonical_problem_id=left.id,
+        gap_hypothesis_id=left_gap.id,
+        canonical_key=f"left-opportunity-{uuid4()}",
+        title="Left opportunity",
+    )
+    right_opportunity = Opportunity(
+        id=uuid4(),
+        canonical_problem_id=right.id,
+        gap_hypothesis_id=right_gap.id,
+        canonical_key=f"right-opportunity-{uuid4()}",
+        title="Right opportunity",
+    )
     try:
         async with database.session() as session:
-            session.add_all((left, right, candidate))
+            session.add_all((left, right))
+            await session.flush()
+            session.add_all((candidate, left_gap, right_gap))
+            await session.flush()
+            session.add_all((left_opportunity, right_opportunity))
             await session.commit()
 
         service = MergeDecisionService(database.session_factory, clock=lambda: NOW)
@@ -70,6 +107,13 @@ async def test_merge_decisions_are_reversible_and_append_only(
             actor="local-owner",
             reason="Reviewed the source lineage",
         )
+        queries = ResearchQueryService(database.session_factory)
+        accepted_opportunities = await queries.opportunities()
+        assert {
+            tuple(item["equivalent_problem_ids"])
+            for item in accepted_opportunities
+            if item["canonical_problem_id"] in {left.id, right.id}
+        } == {(left.id,), (right.id,)}
         reversed_decision = await service.decide(
             candidate.id,
             action="REVERSE",
@@ -80,6 +124,36 @@ async def test_merge_decisions_are_reversible_and_append_only(
         assert (reversed_decision.from_status, reversed_decision.to_status) == (
             "ACCEPTED",
             "REVERSED",
+        )
+        assert await queries.merge_history(candidate.id) == [
+            {
+                "id": accepted.id,
+                "candidate_id": candidate.id,
+                "decision_number": 1,
+                "action": "ACCEPT",
+                "from_status": "PENDING",
+                "to_status": "ACCEPTED",
+                "actor": "local-owner",
+                "reason": "Reviewed the source lineage",
+                "created_at": NOW,
+            },
+            {
+                "id": reversed_decision.id,
+                "candidate_id": candidate.id,
+                "decision_number": 2,
+                "action": "REVERSE",
+                "from_status": "ACCEPTED",
+                "to_status": "REVERSED",
+                "actor": "local-owner",
+                "reason": "Later evidence separates the problems",
+                "created_at": NOW,
+            },
+        ]
+        reversed_opportunities = await queries.opportunities()
+        assert all(
+            item["equivalent_problem_ids"] == []
+            for item in reversed_opportunities
+            if item["canonical_problem_id"] in {left.id, right.id}
         )
 
         async with database.session() as session:

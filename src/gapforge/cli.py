@@ -6,7 +6,7 @@ import asyncio
 import json
 import socket
 from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -15,7 +15,7 @@ from uuid import UUID
 
 import typer
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from gapforge.backup import BackupError, BackupService
@@ -26,19 +26,13 @@ from gapforge.integration.persistence import (
     MergeDecisionConflictError,
     MergeDecisionService,
 )
+from gapforge.integration.queries import ResearchQueryService
 from gapforge.providers.codex_cli import CodexCliProvider
 from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.storage.admin import execute_read_only_sql
 from gapforge.storage.database import Database
 from gapforge.storage.models import (
-    AtomicClaim,
-    EvidenceCard,
-    LifecycleEvent,
-    MergeCandidate,
-    MissionOpportunityAssessment,
     MissionRevision,
-    Opportunity,
-    OpportunityScoreSnapshot,
     ResearchMission,
     ResearchRun,
     ResearchTask,
@@ -97,6 +91,8 @@ def _build_task_handler_registry() -> TaskHandlerRegistry:
 
 
 def _jsonable(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
     if isinstance(value, Enum):
@@ -565,14 +561,7 @@ def opportunity_list(json_output: JsonOption = False) -> None:
     async def operation() -> list[dict[str, Any]]:
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                rows = (
-                    await session.scalars(select(Opportunity).order_by(Opportunity.created_at))
-                ).all()
-                return [
-                    {"id": row.id, "canonical_key": row.canonical_key, "title": row.title}
-                    for row in rows
-                ]
+            return await ResearchQueryService(database.session_factory).opportunities()
         finally:
             await database.dispose()
 
@@ -580,42 +569,10 @@ def opportunity_list(json_output: JsonOption = False) -> None:
 
 
 async def _opportunity_detail(database: Database, identifier: UUID) -> dict[str, Any]:
-    async with database.session() as session:
-        opportunity = await session.get(Opportunity, identifier)
-        if opportunity is None:
-            raise CliError("NOT_FOUND", "opportunity not found", exit_code=3)
-        assessments = (
-            await session.scalars(
-                select(MissionOpportunityAssessment).where(
-                    MissionOpportunityAssessment.opportunity_id == identifier
-                )
-            )
-        ).all()
-        assessment_data: list[dict[str, Any]] = []
-        for assessment in assessments:
-            score = await session.scalar(
-                select(OpportunityScoreSnapshot)
-                .where(OpportunityScoreSnapshot.assessment_id == assessment.id)
-                .order_by(desc(OpportunityScoreSnapshot.created_at))
-                .limit(1)
-            )
-            assessment_data.append(
-                {
-                    "id": assessment.id,
-                    "mission_revision_id": assessment.mission_revision_id,
-                    "status": assessment.lifecycle_status,
-                    "verdict": assessment.verdict,
-                    "score": score.final_score if score else None,
-                }
-            )
-        return {
-            "id": opportunity.id,
-            "canonical_key": opportunity.canonical_key,
-            "title": opportunity.title,
-            "canonical_problem_id": opportunity.canonical_problem_id,
-            "gap_hypothesis_id": opportunity.gap_hypothesis_id,
-            "assessments": assessment_data,
-        }
+    try:
+        return await ResearchQueryService(database.session_factory).opportunity(identifier)
+    except LookupError as error:
+        raise CliError("NOT_FOUND", str(error), exit_code=3) from error
 
 
 @opportunity_app.command("show")
@@ -656,22 +613,7 @@ def evidence_list(
     async def operation() -> list[dict[str, Any]]:
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                cards = (
-                    await session.scalars(
-                        select(EvidenceCard).order_by(desc(EvidenceCard.created_at)).limit(limit)
-                    )
-                ).all()
-                return [
-                    {
-                        "id": card.id,
-                        "canonical_problem_id": card.canonical_problem_id,
-                        "run_id": card.run_id,
-                        "confidence": card.confidence,
-                        "created_at": card.created_at,
-                    }
-                    for card in cards
-                ]
+            return await ResearchQueryService(database.session_factory).evidence(limit=limit)
         finally:
             await database.dispose()
 
@@ -681,32 +623,14 @@ def evidence_list(
 @evidence_app.command("show")
 def evidence_show(evidence_id: str, json_output: JsonOption = False) -> None:
     async def operation() -> dict[str, Any]:
-        identifier = _parse_uuid(evidence_id, "evidence")
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                card = await session.get(EvidenceCard, identifier)
-                claim = await session.get(AtomicClaim, identifier) if card is None else None
-                if card is None and claim is None:
-                    raise CliError("NOT_FOUND", "evidence not found", exit_code=3)
-                if card is not None:
-                    return {
-                        "kind": "evidence_card",
-                        "id": card.id,
-                        "metrics": card.metrics,
-                        "confidence": card.confidence,
-                        "supporting_claim_ids": card.supporting_claim_ids,
-                        "contradicting_claim_ids": card.contradicting_claim_ids,
-                        "missing_evidence": card.missing_evidence,
-                    }
-                assert claim is not None
-                return {
-                    "kind": "atomic_claim",
-                    "id": claim.id,
-                    "status": claim.status,
-                    "text": claim.text,
-                    "evidence_ids": claim.evidence_ids,
-                }
+            try:
+                return await ResearchQueryService(database.session_factory).evidence_item(
+                    evidence_id
+                )
+            except LookupError as error:
+                raise CliError("NOT_FOUND", str(error), exit_code=3) from error
         finally:
             await database.dispose()
 
@@ -721,25 +645,7 @@ def changes(
     async def operation() -> list[dict[str, Any]]:
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                events = (
-                    await session.scalars(
-                        select(LifecycleEvent)
-                        .order_by(desc(LifecycleEvent.created_at))
-                        .limit(limit)
-                    )
-                ).all()
-                return [
-                    {
-                        "id": event.id,
-                        "assessment_id": event.assessment_id,
-                        "from_status": event.from_status,
-                        "to_status": event.to_status,
-                        "reason": event.reason,
-                        "created_at": event.created_at,
-                    }
-                    for event in events
-                ]
+            return await ResearchQueryService(database.session_factory).changes(limit=limit)
         finally:
             await database.dispose()
 
@@ -751,24 +657,7 @@ def rejected(json_output: JsonOption = False) -> None:
     async def operation() -> list[dict[str, Any]]:
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                rows = (
-                    await session.scalars(
-                        select(MissionOpportunityAssessment)
-                        .where(MissionOpportunityAssessment.lifecycle_status == "REJECTED")
-                        .order_by(desc(MissionOpportunityAssessment.rejected_at))
-                    )
-                ).all()
-                return [
-                    {
-                        "id": row.id,
-                        "opportunity_id": row.opportunity_id,
-                        "mission_revision_id": row.mission_revision_id,
-                        "verdict": row.verdict,
-                        "rejected_at": row.rejected_at,
-                    }
-                    for row in rows
-                ]
+            return await ResearchQueryService(database.session_factory).rejected()
         finally:
             await database.dispose()
 
@@ -780,27 +669,28 @@ def merge_list(json_output: JsonOption = False) -> None:
     async def operation() -> list[dict[str, Any]]:
         database = _database(_settings())
         try:
-            async with database.session() as session:
-                rows = (
-                    await session.scalars(
-                        select(MergeCandidate).order_by(desc(MergeCandidate.created_at))
-                    )
-                ).all()
-                return [
-                    {
-                        "id": row.id,
-                        "left_problem_id": row.left_problem_id,
-                        "right_problem_id": row.right_problem_id,
-                        "similarity": row.similarity,
-                        "status": row.status,
-                        "rationale": row.rationale,
-                    }
-                    for row in rows
-                ]
+            return await ResearchQueryService(database.session_factory).merge_candidates()
         finally:
             await database.dispose()
 
     _execute("merge-candidate.list", operation, json_output=json_output)
+
+
+@merge_app.command("history")
+def merge_history(candidate_id: str, json_output: JsonOption = False) -> None:
+    async def operation() -> list[dict[str, Any]]:
+        database = _database(_settings())
+        try:
+            try:
+                return await ResearchQueryService(database.session_factory).merge_history(
+                    _parse_uuid(candidate_id, "merge candidate")
+                )
+            except LookupError as error:
+                raise CliError("NOT_FOUND", str(error), exit_code=3) from error
+        finally:
+            await database.dispose()
+
+    _execute("merge-candidate.history", operation, json_output=json_output)
 
 
 def _merge_decision(
@@ -879,25 +769,38 @@ def merge_reverse(
     _merge_decision("merge-candidate.reverse", candidate_id, "REVERSE", actor, reason, json_output)
 
 
-def _integration_placeholder(command: str, json_output: bool) -> None:
-    _emit(
-        command,
-        {"available": False},
-        json_output=json_output,
-        warnings=("command is wired during cross-lane research integration",),
-    )
-
-
 @report_app.command("run")
 def report_run(run_id: str, json_output: JsonOption = False) -> None:
-    _parse_uuid(run_id, "run")
-    _integration_placeholder("report.run", json_output)
+    async def operation() -> Any:
+        database = _database(_settings())
+        try:
+            try:
+                return await ResearchQueryService(database.session_factory).run_report(
+                    _parse_uuid(run_id, "run")
+                )
+            except LookupError as error:
+                raise CliError("NOT_FOUND", str(error), exit_code=3) from error
+        finally:
+            await database.dispose()
+
+    _execute("report.run", operation, json_output=json_output)
 
 
 @report_app.command("opportunity")
 def report_opportunity(opportunity_id: str, json_output: JsonOption = False) -> None:
-    _parse_uuid(opportunity_id, "opportunity")
-    _integration_placeholder("report.opportunity", json_output)
+    async def operation() -> Any:
+        database = _database(_settings())
+        try:
+            try:
+                return await ResearchQueryService(database.session_factory).opportunity_report(
+                    _parse_uuid(opportunity_id, "opportunity")
+                )
+            except LookupError as error:
+                raise CliError("NOT_FOUND", str(error), exit_code=3) from error
+        finally:
+            await database.dispose()
+
+    _execute("report.opportunity", operation, json_output=json_output)
 
 
 @app.command("health")

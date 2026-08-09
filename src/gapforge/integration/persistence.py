@@ -849,7 +849,7 @@ class ResearchArtifactWriter:
                 gap_id=gap_id,
                 round_number=round_number,
             )
-            decision = await _validation_from_storage(
+            decision = await validation_from_storage(
                 session,
                 assessment=assessment,
                 card=card,
@@ -1019,11 +1019,14 @@ def _hypothesis_card_links(raw: object) -> dict[UUID, tuple[UUID, UUID]]:
     result: dict[UUID, tuple[UUID, UUID]] = {}
     for item in raw:
         if not isinstance(item, dict) or set(item) != {
+            "schema_version",
             "hypothesis_id",
             "opportunity_id",
             "evidence_card_id",
         }:
             raise ValueError("hypothesis card link shape is invalid")
+        if item["schema_version"] != "0.1":
+            raise ValueError("hypothesis card link schema version is invalid")
         hypothesis_id = _uuid_text(str(item["hypothesis_id"]), "problem hypothesis")
         if hypothesis_id in result:
             raise ValueError("hypothesis card link IDs must be unique")
@@ -1187,7 +1190,7 @@ async def _final_artifacts(
     return score, critic, gap
 
 
-async def _validation_from_storage(
+async def validation_from_storage(
     session: AsyncSession,
     *,
     assessment: models.MissionOpportunityAssessment,
@@ -1212,9 +1215,7 @@ async def _validation_from_storage(
     claims = {
         item: str(item)
         for item in await session.scalars(
-            select(models.AtomicClaim.id).where(
-                models.AtomicClaim.id.in_(requested_claim_ids)
-            )
+            select(models.AtomicClaim.id).where(models.AtomicClaim.id.in_(requested_claim_ids))
         )
     }
     typed_card = evidence_card_from_storage(

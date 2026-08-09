@@ -238,8 +238,7 @@ def downgrade() -> None:
         "DROP TRIGGER IF EXISTS trg_merge_decision_events_append_only ON merge_decision_events"
     )
     op.execute(
-        "DROP TRIGGER IF EXISTS trg_merge_decision_events_project_insert "
-        "ON merge_decision_events"
+        "DROP TRIGGER IF EXISTS trg_merge_decision_events_project_insert ON merge_decision_events"
     )
     op.execute("DROP FUNCTION IF EXISTS gapforge_project_merge_decision_insert()")
     op.execute(

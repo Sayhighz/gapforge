@@ -602,8 +602,31 @@ def test_atomic_claim_typed_mapping_round_trips_and_rejects_bad_lineage() -> Non
     assert (
         atomic_claim_from_storage(stored, revision_identifiers={evidence_id: "raw-1:r1"}) == claim
     )
-    with pytest.raises(MappingError, match="revision ID"):
+    with pytest.raises(MappingError, match="evidence ID"):
         atomic_claim_from_storage(stored, revision_identifiers={})
+
+    captured_id = uuid4()
+    stored.evidence_ids = [captured_id]
+    stored.citations = [
+        {
+            "evidence_id": str(captured_id),
+            "source_url": "https://example.com/pricing",
+            "excerpt": "$20 per month",
+            "observed_at": NOW.isoformat(),
+        }
+    ]
+    captured_claim = atomic_claim_from_storage(
+        stored,
+        revision_identifiers={},
+        captured_evidence_identifiers={captured_id: str(captured_id)},
+    )
+    assert captured_claim.evidence_ids == (str(captured_id),)
+    with pytest.raises(MappingError, match="captured evidence ID"):
+        atomic_claim_from_storage(
+            stored,
+            revision_identifiers={},
+            captured_evidence_identifiers={captured_id: str(uuid4())},
+        )
 
 
 def test_competitor_evidence_mapping_preserves_capture_and_claim_semantics() -> None:
