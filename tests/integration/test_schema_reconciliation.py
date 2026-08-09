@@ -56,6 +56,7 @@ from gapforge.storage.models import (
     CompetitorEvidence,
     EvidenceCard,
     GapHypothesis,
+    LifecycleEvent,
     MissionOpportunityAssessment,
     MissionRevision,
     Opportunity,
@@ -220,10 +221,11 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
         id=uuid4(),
         mission_revision_id=revision.id,
         mode="HUNT",
-        status="RUNNING",
+        status="COMPLETED",
         priority=1,
         deadline_at=NOW + timedelta(minutes=30),
         started_at=NOW,
+        completed_at=NOW,
         budget_limits={"max_agent_calls_per_run": 6},
         budget_used={"agent_calls": 0},
     )
@@ -254,16 +256,16 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
         id=str(uuid4()),
         mission_revision_id=revision.id,
         opportunity_id=str(opportunity.id),
-        lifecycle_state="RESEARCHING",
+        lifecycle_state="RESEARCH_MORE",
         relevance=0.8123456789012345,
         verdict="RESEARCH_MORE",
         competitor_research_status="COMPLETE",
         assessed_at=NOW,
     )
-    assessment = MissionOpportunityAssessment(
-        **assessment_to_storage_values(domain_assessment),
-        updated_at=NOW,
-    )
+    assessment_values = assessment_to_storage_values(domain_assessment)
+    assessment_values["lifecycle_status"] = "DISCOVERED"
+    assessment_values["verdict"] = None
+    assessment = MissionOpportunityAssessment(**assessment_values, updated_at=NOW)
     revision_storage_id = storage_uuid_for_identifier("raw-signal-revision", "raw-1:r1")
     claim_id = uuid4()
     domain_card = DomainEvidenceCard(
@@ -370,6 +372,25 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
             await session.flush()
             session.add(assessment)
             await session.flush()
+            for number, from_status, to_status in (
+                (1, None, "DISCOVERED"),
+                (2, "DISCOVERED", "RESEARCHING"),
+                (3, "RESEARCHING", "RESEARCH_MORE"),
+            ):
+                session.add(
+                    LifecycleEvent(
+                        assessment_id=assessment.id,
+                        event_number=number,
+                        run_id=run.id,
+                        gap_hypothesis_id=gap.id,
+                        from_status=from_status,
+                        to_status=to_status,
+                        reason="typed mapper round trip",
+                        details={},
+                        created_at=NOW,
+                    )
+                )
+                await session.flush()
             session.add_all((stored_card, stored_claim, stored_score, stored_competitor_evidence))
             await session.commit()
 

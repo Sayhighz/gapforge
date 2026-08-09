@@ -847,6 +847,8 @@ def _stage_payloads(
 ) -> list[tuple[str, dict[str, object]]]:
     raw_domain = ids["raw_domain"]
     assert isinstance(raw_domain, str)
+    competitor_url = f"https://vendor-{ids['competitor']}.example"
+    competitor_evidence_url = f"{competitor_url}/pricing"
     citation = {
         "schema_version": "0.1",
         "evidence_id": raw_domain,
@@ -857,7 +859,7 @@ def _stage_payloads(
     competitor_citation = {
         "schema_version": "0.1",
         "evidence_id": str(ids["competitor_evidence"]),
-        "source_url": "https://vendor.example/pricing",
+        "source_url": competitor_evidence_url,
         "excerpt": "$99 per month",
         "observed_at": NOW.isoformat(),
     }
@@ -964,7 +966,7 @@ def _stage_payloads(
                         "id": str(ids["competitor"]),
                         "name": "Ledger Tool",
                         "kind": "SAAS",
-                        "canonical_url": "https://vendor.example",
+                        "canonical_url": competitor_url,
                     }
                 ],
                 "competitor_evidence": [
@@ -972,7 +974,7 @@ def _stage_payloads(
                         "schema_version": "0.1",
                         "id": str(ids["competitor_evidence"]),
                         "competitor_id": str(ids["competitor"]),
-                        "source_url": "https://vendor.example/pricing",
+                        "source_url": competitor_evidence_url,
                         "captured_excerpt": "$99 per month",
                         "observed_at": NOW.isoformat(),
                         "content_hash": hashlib.sha256(b"$99 per month").hexdigest(),
