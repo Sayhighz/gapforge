@@ -1210,6 +1210,7 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "repair_attempts": "provider execution maps the bounded repair flag to count",
                 "usage": "provider result context supplies bounded usage metadata",
                 "error_class": "provider result supplies sanitized stable error class",
+                "output_json": "validated completed output retained for deterministic replay",
                 "output_sha256": "provider execution hashes retained validated output",
             },
         ),
