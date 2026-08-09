@@ -233,7 +233,16 @@ async def test_later_monitor_persists_snapshots_without_mutating_terminal_valida
                 )
                 is not None
             )
-            assert await _count(session, models.FinalAssessmentSnapshot) == 2
+            snapshot_count = await session.scalar(
+                select(func.count())
+                .select_from(models.FinalAssessmentSnapshot)
+                .where(
+                    models.FinalAssessmentSnapshot.run_id.in_(
+                        (initial_context.run_id, monitor_context.run_id)
+                    )
+                )
+            )
+            assert snapshot_count == 2
     finally:
         await database.dispose()
 
@@ -542,7 +551,12 @@ async def test_final_rejects_another_opportunity_gap_from_the_same_problem(
                 )
             await session.rollback()
         async with database.session() as session:
-            assert await _count(session, models.FinalAssessmentSnapshot) == 0
+            snapshot_count = await session.scalar(
+                select(func.count())
+                .select_from(models.FinalAssessmentSnapshot)
+                .where(models.FinalAssessmentSnapshot.run_id == context.run_id)
+            )
+            assert snapshot_count == 0
     finally:
         await database.dispose()
 
