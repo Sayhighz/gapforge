@@ -378,7 +378,7 @@ Live smoke commands exist for credential-free HN and credential-gated GitHub, Re
 - [x] Evidence, scores, verdicts, rejections, changes, and reopen events are queryable.
 - [x] Backup verification passes.
 - [x] README and Ubuntu-on-Hyper-V deployment guide are complete.
-- [ ] Final integration PR is reviewed before merge to `main`.
+- [x] Final integration PR is reviewed before merge to `main`.
 
 ## 23. Change control
 

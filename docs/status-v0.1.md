@@ -26,7 +26,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `21bef48` |
+| Integration | `integration/v0.1` | #4 | full-diff review complete | `e93791f` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
@@ -98,20 +98,23 @@ Completed:
   `container-backup`, and `arm64-build` checks, PR-only changes, resolved conversations, linear
   history, admin enforcement, and force-push/deletion disabled. Required approvals are zero because
   the repository currently has one owner and GitHub does not permit self-approval.
+- The integration lead reviewed all 148 changed files in `origin/main...e93791f`, including the
+  commit/migration chain, dependencies and lockfile, executable/container/workflow surfaces,
+  provider/network boundaries, generated-file and secret hygiene, and full-range whitespace.
+  No blocking finding remained. PR-event Quality run `31304612051` passed 414 tests with one
+  environment-gated skip plus all required Python, container-backup, and native arm64 checks.
 
 In progress:
 
-- Final full-range review and release evidence for integration PR #4.
+- Final review checkpoint CI and merge of integration PR #4 into protected `main`.
 - The protected credentialed smoke remains a post-`main` operational gate because the trusted
   workflow intentionally hard-checks out protected `main`; no self-hosted runner or
   `platform-smoke` environment exists yet.
 
 Exact next action:
 
-1. Review the complete `origin/main...origin/integration/v0.1` diff and update PR #4 with exact
-   release evidence and deliberately open gates.
-2. Mark PR #4 ready and merge the reviewed branch into protected `main` only after required checks
-   remain green.
+1. Wait for the final review-checkpoint required checks, then mark PR #4 ready.
+2. Merge the reviewed branch into protected `main` only if all required checks remain green.
 3. Provision the external runner/environment/auth prerequisites before dispatching the protected
    credentialed source/Codex smoke; record any real result in a follow-up PR without inventing an
    execution record.

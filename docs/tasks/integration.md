@@ -180,27 +180,28 @@ non-public smoke command.
 - [x] Re-read `docs/spec-v0.1.md` and audit every master acceptance item against code and test evidence.
 - [x] Update `docs/status-v0.1.md`, this checklist, README, and Ubuntu-on-Hyper-V deployment guide.
 - [x] Record exact commands/results, remaining limitations, and security boundaries in PR #4.
-- [ ] Review the complete `integration/v0.1...main` diff before marking PR #4 ready.
-  Progress: developer audit and `git diff --check origin/main...HEAD` are clean. Independent
-  integration-lead review of PR #4 remains required.
+- [x] Review the complete `integration/v0.1...main` diff before marking PR #4 ready.
 - [ ] Merge only after the final integration review is clean and close the lane issues.
 
 Progress: PR #15 was independently reviewed and squash-merged as `21bef48`; docs-head Quality run
 `31304363528` is green with Ruff, formatting across 132 files, strict mypy across 66 source files,
 414 tests with 1 environment-gated skip, Compose migration/health/persistence/backup/restore, and
 native arm64. The integration lead updated the master checklist, status, PR #4 evidence, and enabled
-strict `main` branch protection. Live Codex skill-following, protected credentialed source/Codex
-execution, final full-diff review, and merge remain deliberately open.
+strict `main` branch protection. The final audit covered 148 changed files, linear Alembic history,
+the locked dependency/container/workflow surfaces, provider/network boundaries, generated/secret
+hygiene, and full-range whitespace; PR-event run `31304612051` passed all required jobs at
+`e93791f`. Live Codex skill-following, protected credentialed source/Codex execution, and merge
+remain deliberately open.
 
 ## Resume note
 
 Current state: I8 documentation PR #15 is reviewed and merged as `21bef48`; the integration lead has
 applied the evidence-backed master/status checkpoint and exact PR #4 handoff. `main` now has strict
-required Quality checks and PR-only protection. The protected credentialed live-call execution
-record and final integration review/merge remain pending.
+required Quality checks and PR-only protection. The independent full-diff review is complete with
+no blocking finding. The protected credentialed live-call execution record and final merge remain
+pending.
 
-Exact next action: integration lead reviews the complete `origin/main...origin/integration/v0.1`
-diff, waits for the lead-owned checkpoint Quality run, then marks PR #4 ready and merges only if all
-required checks stay green. Credentialed dispatch remains prohibited until the required
+Exact next action: wait for the final review-checkpoint Quality run, then mark PR #4 ready and merge
+only if all required checks stay green. Credentialed dispatch remains prohibited until the required
 self-hosted runner/environment/auth prerequisites exist; capture any later bounded smoke in a
 follow-up checkpoint/PR.
