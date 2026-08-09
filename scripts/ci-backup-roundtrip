@@ -17,40 +17,60 @@ else
     }
 fi
 cleanup() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+        compose ps >&2 || true
+        compose logs --no-color >&2 || true
+        for container in $(compose ps -aq 2>/dev/null); do
+            docker inspect --format \
+                '{{.Name}} OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}' \
+                "$container" >&2 || true
+        done
+    fi
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+    exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 export AGENT_PROVIDER=fake
 export AUTHOR_HMAC_KEY=ci-test-only-author-hmac-key-32-bytes
 
-compose up -d --build postgres migrate worker
-compose exec -T worker gap mission create \
+# Build the shared application image once. Building migrate and worker together
+# makes Compose export the same large image twice and can exhaust small CI runners.
+compose build worker
+compose up -d postgres
+compose run --rm migrate
+compose run --rm --no-deps worker python /app/scripts/container-healthcheck.py
+compose run --rm --no-deps worker gap mission create \
     "Verify credential-free backup and restore" \
     --title "CI backup sentinel" \
     --output-locale en \
     --json >/dev/null
 
-backup_json=$(compose exec -T worker gap backup create --json)
+backup_json=$(compose run --rm --no-deps worker gap backup create --json)
 backup_name=$(printf '%s' "$backup_json" | "$python_command" -c \
     'import json,sys; print(json.load(sys.stdin)["data"]["name"])')
-compose exec -T worker gap backup verify "$backup_name" --json >/dev/null
-compose exec -T -e PGPASSWORD=gapforge worker \
+compose run --rm --no-deps worker gap backup verify "$backup_name" --json >/dev/null
+compose run --rm --no-deps -e PGPASSWORD=gapforge worker \
     dropdb --host postgres --username gapforge --maintenance-db postgres --force gapforge
-compose exec -T worker gap backup restore "$backup_name" \
+compose run --rm --no-deps worker gap backup restore "$backup_name" \
     --target gapforge_restore_ci \
     --yes \
     --json >/dev/null
 
-restored_count=$(compose exec -T -e PGPASSWORD=gapforge worker \
+restored_count=$(compose run --rm --no-deps -e PGPASSWORD=gapforge worker \
     psql --host postgres --username gapforge --dbname gapforge_restore_ci \
     --tuples-only --no-align \
     --command "SELECT count(*) FROM research_missions WHERE title = 'CI backup sentinel'")
 test "$restored_count" = "1"
 
-compose exec -T -e BACKUP_NAME="$backup_name" worker python -c \
+compose run --rm --no-deps -e BACKUP_NAME="$backup_name" worker python -c \
     'import os,pathlib; p=pathlib.Path("/var/lib/gapforge/backups")/os.environ["BACKUP_NAME"]; p.write_bytes(p.read_bytes()+b"corrupt")'
-if compose exec -T worker gap backup verify "$backup_name" --json >/dev/null 2>&1; then
+if compose run --rm --no-deps worker gap backup verify "$backup_name" --json \
+    >/dev/null 2>&1; then
     echo "corrupt backup unexpectedly verified" >&2
     exit 1
 fi
