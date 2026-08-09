@@ -128,6 +128,89 @@ async def test_writer_persists_complete_typed_lineage_in_stage_transactions(
 
 
 @pytest.mark.postgres
+async def test_later_monitor_persists_snapshots_without_mutating_terminal_validate(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    initial_context, initial_ids = await _seed_pipeline_context(database)
+    writer = ResearchArtifactWriter()
+    try:
+        for stage, payload in _stage_payloads(initial_context, initial_ids):
+            async with database.session() as session:
+                await writer.persist_stage(
+                    session,
+                    initial_context,
+                    FakeCommit(stage, payload),
+                )
+                await session.commit()
+
+        monitor_context = await _seed_followup_context(database, initial_context)
+        monitor_ids = dict(initial_ids)
+        monitor_ids["gap"] = uuid4()
+        monitor_ids["card"] = uuid5(
+            monitor_context.run_id,
+            f"card:{monitor_ids['opportunity']}",
+        )
+        monitor_ids["score"] = uuid5(
+            monitor_context.run_id,
+            f"score:{monitor_ids['opportunity']}",
+        )
+        monitor_stages = {
+            stage: copy.deepcopy(payload)
+            for stage, payload in _stage_payloads(monitor_context, monitor_ids)
+        }
+        monitor_stages["GAP"]["gaps"][0]["statement"] = (
+            "Later monitoring confirms the same reconciliation gap"
+        )
+        for stage in ("GAP", "CARD_SCORE", "HYPOTHESIS", "CRITIC", "FINAL"):
+            async with database.session() as session:
+                await writer.persist_stage(
+                    session,
+                    monitor_context,
+                    FakeCommit(stage, monitor_stages[stage]),
+                )
+                await session.commit()
+
+        async with database.session() as session:
+            assessment = await session.scalar(
+                select(models.MissionOpportunityAssessment).where(
+                    models.MissionOpportunityAssessment.opportunity_id == initial_ids["opportunity"]
+                )
+            )
+            assert assessment is not None
+            assert assessment.lifecycle_status == "VALIDATE"
+            assert assessment.verdict == "VALIDATE"
+            events = tuple(
+                await session.scalars(
+                    select(models.LifecycleEvent)
+                    .where(models.LifecycleEvent.assessment_id == assessment.id)
+                    .order_by(models.LifecycleEvent.event_number)
+                )
+            )
+            assert [event.to_status for event in events] == [
+                "DISCOVERED",
+                "RESEARCHING",
+                "VALIDATE",
+            ]
+            assert all(event.run_id != monitor_context.run_id for event in events)
+            assert await session.get(models.GapHypothesis, monitor_ids["gap"]) is not None
+            assert await session.get(models.EvidenceCard, monitor_ids["card"]) is not None
+            assert (
+                await session.get(models.OpportunityScoreSnapshot, monitor_ids["score"]) is not None
+            )
+            assert (
+                await session.scalar(
+                    select(models.CriticResult).where(
+                        models.CriticResult.run_id == monitor_context.run_id
+                    )
+                )
+                is not None
+            )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
 async def test_writer_rejects_unknown_lineage_atomically(
     migrated_postgres_url: str,
 ) -> None:
@@ -531,10 +614,11 @@ async def _seed_pipeline_context(
         id=uuid4(),
         mission_revision_id=revision.id,
         mode="HUNT",
-        status="RUNNING",
+        status="COMPLETED",
         priority=1,
         deadline_at=NOW + timedelta(minutes=30),
         started_at=NOW,
+        completed_at=NOW,
         budget_limits={"max_agent_calls_per_run": 6},
         budget_used={"agent_calls": 1},
         warnings=[],
@@ -700,6 +784,62 @@ async def _seed_critic_call(
             )
         )
         await session.commit()
+
+
+async def _seed_followup_context(
+    database: Database,
+    initial_context: FakeContext,
+) -> FakeContext:
+    collected_at = initial_context.collection_until + timedelta(days=1)
+    run = models.ResearchRun(
+        id=uuid4(),
+        mission_revision_id=initial_context.mission_revision.id,
+        mode="MONITOR",
+        status="COMPLETED",
+        priority=1,
+        deadline_at=collected_at + timedelta(minutes=30),
+        started_at=collected_at,
+        completed_at=collected_at,
+        budget_limits={"max_agent_calls_per_run": 6},
+        budget_used={"agent_calls": 1},
+        warnings=[],
+        last_checkpoint={},
+    )
+    task = models.ResearchTask(
+        id=uuid4(),
+        run_id=run.id,
+        task_type="research.run",
+        status="SUCCEEDED",
+        priority=1,
+        idempotency_key=f"monitor-{uuid4()}",
+        payload={},
+        checkpoint={
+            "pipeline": {
+                "stages": {
+                    "COMPETITOR_RESEARCH": {
+                        "payload": {"status": "COMPLETE"},
+                    }
+                }
+            }
+        },
+        result={},
+        attempt_count=1,
+        max_attempts=3,
+        available_at=collected_at,
+        completed_at=collected_at,
+    )
+    async with database.session() as session:
+        session.add_all((run, task))
+        await session.commit()
+    context = FakeContext(
+        run_id=run.id,
+        task_id=task.id,
+        task_attempt=task.attempt_count,
+        mission_revision=initial_context.mission_revision,
+        collection_until=collected_at,
+    )
+    await _seed_critic_call(database, context, round_number=1)
+    return context
 
 
 def _stage_payloads(

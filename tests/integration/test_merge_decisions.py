@@ -318,8 +318,8 @@ async def test_merge_decision_database_constraints_reject_invalid_audit_rows_and
 
         invalid_rows = (
             ("UNKNOWN", "PENDING", "ACCEPTED", "actor", "reason"),
-            ("ACCEPT", "ACCEPTED", "ACCEPTED", "actor", "reason"),
-            ("REVERSE", "ACCEPTED", "REVERSED", " ", "reason"),
+            ("ACCEPT", "PENDING", "REJECTED", "actor", "reason"),
+            ("ACCEPT", "PENDING", "ACCEPTED", " ", "reason"),
             ("REJECT", "PENDING", "REJECTED", "actor", "x" * 501),
         )
         for action, from_status, to_status, actor, reason in invalid_rows:
@@ -454,7 +454,10 @@ async def test_migration_preserves_populated_legacy_lifecycle_link_on_upgrade_an
     try:
         async with database.engine.begin() as connection:
             await connection.execute(
-                text("TRUNCATE merge_decision_events, merge_candidates CASCADE")
+                text(
+                    "TRUNCATE merge_decision_events, merge_candidates, "
+                    "lifecycle_events, mission_opportunity_assessments CASCADE"
+                )
             )
     finally:
         await database.dispose()

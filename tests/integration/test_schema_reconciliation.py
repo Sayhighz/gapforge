@@ -625,8 +625,7 @@ async def test_reconciliation_migration_transforms_supported_legacy_rows(
                     "INSERT INTO mission_opportunity_assessments "
                     "(id, mission_revision_id, opportunity_id, lifecycle_status, "
                     "relevance, verdict) "
-                    "VALUES (:id, :revision_id, :opportunity_id, 'RESEARCHING', 0.8, "
-                    "'RESEARCH_MORE')"
+                    "VALUES (:id, :revision_id, :opportunity_id, 'DISCOVERED', 0.8, NULL)"
                 ),
                 {
                     "id": ids["assessment"],

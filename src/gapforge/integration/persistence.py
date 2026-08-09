@@ -861,6 +861,12 @@ class ResearchArtifactWriter:
             verdict = decision.verdict
             if str(raw["verdict"]) != verdict.value:
                 raise ValueError("FINAL verdict disagrees with persisted validation artifacts")
+            if assessment.lifecycle_status == "VALIDATE":
+                if verdict is not domain.Verdict.VALIDATE:
+                    raise ValueError(
+                        "terminal VALIDATE assessment cannot be changed by a later run"
+                    )
+                continue
             target = {
                 domain.Verdict.REJECT: "REJECTED",
                 domain.Verdict.RESEARCH_MORE: "RESEARCH_MORE",
