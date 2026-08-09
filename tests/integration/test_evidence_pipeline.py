@@ -20,13 +20,14 @@ from gapforge.domain.contracts import (
     Source,
 )
 from gapforge.integration.evidence_store import (
-    CollectionBudgetExhausted,
     SqlAlchemyEvidencePipelineStore,
     StageConflictError,
 )
 from gapforge.integration.semantic import SemanticCall, SemanticContext
 from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.runtime.evidence_pipeline import (
+    CapturedEvidence,
+    CollectionBudgetExhaustedError,
     EvidencePipeline,
     ExistingIntelligence,
     PipelineContext,
@@ -35,6 +36,7 @@ from gapforge.runtime.evidence_pipeline import (
 from gapforge.storage.database import Database
 from gapforge.storage.models import RawSignalRevision, ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
+from gapforge.worker import TaskHandlerRegistry, Worker
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
@@ -57,6 +59,13 @@ class RecordingStore:
 
     async def load_stage(self, context: PipelineContext, stage: str) -> dict[str, object] | None:
         return self.completed.get(stage)
+
+    async def load_evidence(
+        self,
+        context: PipelineContext,
+        evidence_ids: tuple[str, ...],
+    ) -> tuple[CapturedEvidence, ...]:
+        raise AssertionError("empty collection must not load evidence")
 
     async def commit_stage(
         self,
@@ -115,12 +124,236 @@ class EmptyCollector:
         )
 
 
+class FullCollector:
+    async def collect(self, request: CollectRequest) -> CollectResult:
+        return CollectResult.model_validate(
+            {
+                "source": "HACKER_NEWS",
+                "availability": "AVAILABLE",
+                "items": [
+                    {
+                        "source": "HACKER_NEWS",
+                        "external_id": "full-1",
+                        "canonical_url": "https://example.test/full-1",
+                        "parent_thread_id": "thread-1",
+                        "author_identity": "author-1",
+                        "title": "Invoice reconciliation takes hours",
+                        "body": "We copy every line into a spreadsheet each week.",
+                        "source_created_at": NOW,
+                    }
+                ],
+                "request_count": 1,
+            }
+        )
+
+
+class FullStore(RecordingStore):
+    async def commit_stage(
+        self,
+        context: PipelineContext,
+        commit: PipelineStageCommit,
+    ) -> None:
+        self.events.append(f"commit:{commit.stage}")
+        self.commits.append(commit)
+        if commit.stage == "COLLECT":
+            self.completed[commit.stage] = {
+                **commit.payload,
+                "evidence_ids": ["HACKER_NEWS:full-1:r1"],
+            }
+        else:
+            self.completed[commit.stage] = commit.payload
+
+    async def load_evidence(
+        self,
+        context: PipelineContext,
+        evidence_ids: tuple[str, ...],
+    ) -> tuple[CapturedEvidence, ...]:
+        assert evidence_ids == ("HACKER_NEWS:full-1:r1",)
+        return (
+            CapturedEvidence(
+                evidence_id=evidence_ids[0],
+                source=Source.HACKER_NEWS,
+                url="https://example.test/full-1",
+                text=(
+                    "Invoice reconciliation takes hours\n"
+                    "We copy every line into a spreadsheet each week."
+                ),
+                observed_at=NOW,
+                duplicate_group="a" * 64,
+                author_id="author-pseudonym-1",
+                thread_id="thread-1",
+            ),
+        )
+
+
+class FullReasoner:
+    def __init__(self) -> None:
+        self.operations: list[SemanticOperation] = []
+
+    async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
+        operation = call.request.task
+        self.operations.append(operation)
+        outputs = {
+            SemanticOperation.QUERY_PLAN: {
+                "round_number": 1,
+                "intents": [
+                    {
+                        "id": "intent-1",
+                        "kind": "BROAD",
+                        "concept": "invoice reconciliation",
+                        "sources": ["HACKER_NEWS"],
+                        "rationale": "recurring manual work",
+                    }
+                ],
+            },
+            SemanticOperation.EXTRACT: {
+                "pain_signals": [
+                    {
+                        "id": "pain-1",
+                        "raw_signal_revision_id": "HACKER_NEWS:full-1:r1",
+                        "pain": "Invoice reconciliation takes hours",
+                        "severity": 0.8,
+                        "frequency": 0.7,
+                        "workaround": "copy every line into a spreadsheet",
+                        "payment_signal": False,
+                        "confidence": 0.9,
+                        "excerpt": "Invoice reconciliation takes hours",
+                    }
+                ]
+            },
+            SemanticOperation.CLUSTER: {
+                "problems": [{"id": "problem-1", "summary": "Manual invoice reconciliation"}],
+                "clusters": [
+                    {
+                        "id": "cluster-1",
+                        "canonical_problem_id": "problem-1",
+                        "state": "PROVISIONAL",
+                        "last_growth_at": NOW.isoformat(),
+                    }
+                ],
+                "memberships": [
+                    {
+                        "cluster_id": "cluster-1",
+                        "pain_signal_id": "pain-1",
+                        "accepted_at": NOW.isoformat(),
+                    }
+                ],
+            },
+            SemanticOperation.GAP: {
+                "claims": [
+                    {
+                        "id": "claim-1",
+                        "text": "Users manually reconcile invoice lines",
+                        "kind": "USER_PAIN",
+                        "status": "SUPPORTED",
+                        "evidence_ids": ["HACKER_NEWS:full-1:r1"],
+                    }
+                ],
+                "competitors": [
+                    {"id": "manual-1", "name": "Manual work", "kind": "MANUAL_WORK"},
+                    {"id": "nothing-1", "name": "Do nothing", "kind": "DO_NOTHING"},
+                ],
+                "competitor_evidence": [
+                    {
+                        "id": "competitor-evidence-1",
+                        "competitor_id": "manual-1",
+                        "source_url": "https://example.test/full-1",
+                        "captured_excerpt": "copy every line into a spreadsheet",
+                        "observed_at": NOW.isoformat(),
+                        "content_hash": "b" * 64,
+                        "evidence_kind": "WORKAROUND",
+                        "claim_ids": ["claim-1"],
+                    }
+                ],
+                "gaps": [
+                    {
+                        "id": "gap-1",
+                        "canonical_problem_id": "problem-1",
+                        "gap_type": "WORKFLOW",
+                        "statement": "Existing manual reconciliation is slow",
+                        "user_evidence_ids": ["HACKER_NEWS:full-1:r1"],
+                        "competitor_evidence_ids": ["competitor-evidence-1"],
+                    }
+                ],
+                "opportunities": [
+                    {"id": "opportunity-1", "gap_hypothesis_id": "gap-1", "title": "Reconcile"}
+                ],
+                "score_inputs": [
+                    {
+                        "opportunity_id": "opportunity-1",
+                        **{
+                            name: 50
+                            for name in (
+                                "severity",
+                                "frequency",
+                                "independent_diversity",
+                                "behavioral_workaround",
+                                "wtp_or_spend",
+                                "recency_trend",
+                                "gap_strength",
+                                "competitor_dissatisfaction",
+                                "reachability",
+                                "technical_feasibility",
+                                "small_team_feasibility",
+                                "inverse_switching_friction",
+                                "why_now",
+                            )
+                        },
+                    }
+                ],
+                "competitor_research_status": "COMPLETE",
+            },
+            SemanticOperation.HYPOTHESIS: {
+                "hypotheses": [
+                    {
+                        "id": "hypothesis-1",
+                        "canonical_problem_id": "problem-1",
+                        "icp": "Small accounting teams",
+                        "job_to_be_done": "Reconcile invoices",
+                        "trigger": "Weekly close",
+                        "current_behavior": "Copy spreadsheet lines",
+                        "pain": "Takes hours",
+                        "workflow_failure": "Manual matching",
+                        "falsification_test": "Fails if fewer than five teams report this",
+                        "supporting_claim_ids": ["claim-1"],
+                    }
+                ]
+            },
+            SemanticOperation.CRITIC: {
+                "results": [
+                    {
+                        "opportunity_id": "opportunity-1",
+                        "verdict": "RESEARCH_MORE",
+                        "confidence": 0.8,
+                        "summary": "Independent evidence is insufficient",
+                    }
+                ]
+            },
+        }
+        return AgentResult(
+            call_id=call.request.call_id,
+            status=AgentStatus.COMPLETED,
+            output_json=outputs[operation],
+            provider="fake",
+            effort=call.request.effort,
+            duration_ms=1,
+        )
+
+
+class BudgetStore(RecordingStore):
+    async def commit_stage(self, context: PipelineContext, commit: PipelineStageCommit) -> None:
+        if commit.stage == "COLLECT":
+            raise CollectionBudgetExhaustedError("test budget")
+        await super().commit_stage(context, commit)
+
+
 def context(run_id: UUID, task_id: UUID) -> PipelineContext:
     revision_id = uuid4()
     return PipelineContext(
         run_id=run_id,
         task_id=task_id,
         task_attempt=1,
+        worker_id="test-worker",
         mission_revision=MissionRevision(
             id=revision_id,
             mission_id=uuid4(),
@@ -170,6 +403,8 @@ async def test_hunt_queries_existing_before_collection_and_allows_zero_validate(
         attempt_count=1,
         max_attempts=3,
         available_at=NOW,
+        lease_owner="test-worker",
+        lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
     )
 
     result = await pipeline(task)
@@ -225,6 +460,8 @@ async def test_resume_skips_durably_completed_semantic_and_collection_stages() -
         attempt_count=1,
         max_attempts=3,
         available_at=NOW,
+        lease_owner="test-worker",
+        lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
     )
 
     with pytest.raises(RuntimeError, match="simulated process crash"):
@@ -239,6 +476,69 @@ async def test_resume_skips_durably_completed_semantic_and_collection_stages() -
         "QUERY_PLAN",
         "COLLECT",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fake_hunt_runs_complete_lineage_and_valid_zero_validate() -> None:
+    events: list[str] = []
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), events)
+    reasoner = FullReasoner()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        clock=lambda: NOW,
+    )
+    task = ResearchTask(
+        id=task_id,
+        run_id=run_id,
+        task_type="research.run",
+        status="LEASED",
+        priority=1,
+        idempotency_key="run-root:v1",
+        payload={"run_id": str(run_id)},
+        checkpoint={},
+        attempt_count=1,
+        max_attempts=3,
+        available_at=NOW,
+        lease_owner="test-worker",
+        lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
+    )
+
+    result = await pipeline(task)
+
+    assert result.payload == {
+        "opportunities": 1,
+        "validated": 0,
+        "warnings": [],
+        "completed_stage": "FINAL",
+    }
+    assert reasoner.operations == [
+        SemanticOperation.QUERY_PLAN,
+        SemanticOperation.EXTRACT,
+        SemanticOperation.CLUSTER,
+        SemanticOperation.GAP,
+        SemanticOperation.HYPOTHESIS,
+        SemanticOperation.CRITIC,
+    ]
+    assert [commit.stage for commit in store.commits] == [
+        "EXISTING",
+        "QUERY_PLAN",
+        "COLLECT",
+        "EXTRACT",
+        "CLUSTER",
+        "GAP",
+        "HYPOTHESIS",
+        "CRITIC",
+        "FINAL",
+    ]
+    decisions = store.completed["FINAL"]["decisions"]
+    assert isinstance(decisions, list)
+    first_decision = decisions[0]
+    assert isinstance(first_decision, dict)
+    assert first_decision["verdict"] == "RESEARCH_MORE"
 
 
 @pytest.mark.postgres
@@ -486,7 +786,7 @@ async def test_collection_budget_refusal_is_atomic_and_terminal(
             }
             for index in range(2)
         ]
-        with pytest.raises(CollectionBudgetExhausted):
+        with pytest.raises(CollectionBudgetExhaustedError):
             await store.commit_stage(
                 pipeline_context,
                 PipelineStageCommit(
@@ -510,9 +810,87 @@ async def test_collection_budget_refusal_is_atomic_and_terminal(
             task = await session.get(ResearchTask, scheduled.task.id)
         assert run is not None
         assert task is not None
-        assert run.status == "BUDGET_EXHAUSTED"
+        assert run.status == "RUNNING"
         assert run.budget_used == {}
-        assert run.last_checkpoint["reason"] == "budget"
         assert "COLLECT" not in task.checkpoint.get("pipeline", {}).get("stages", {})
+
+        old_context = pipeline_context
+        async with database.session() as session:
+            current_task = await session.get(ResearchTask, scheduled.task.id)
+            assert current_task is not None
+            current_task.attempt_count = 2
+            current_task.lease_owner = "replacement-worker"
+            current_task.lease_expires_at = datetime(2026, 8, 9, 12, 10, tzinfo=UTC)
+            await session.commit()
+        with pytest.raises(PermissionError, match="lease was lost"):
+            await store.commit_stage(
+                old_context,
+                PipelineStageCommit(
+                    stage="STALE",
+                    idempotency_key=str(uuid5(scheduled.run.id, "pipeline:STALE:v1")),
+                    payload={"attempt": 1},
+                ),
+            )
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            run.status = "CANCELLED"
+            run.completed_at = NOW
+            task.status = "CANCELLED"
+            task.completed_at = NOW
+            task.lease_owner = None
+            task.lease_expires_at = None
+            await session.commit()
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_owns_budget_terminal_transition(migrated_postgres_url: str) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    try:
+        async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+            _, revision = await uow.missions.create_with_revision(
+                title="Worker budget ownership",
+                mission_text="Bound worker collection",
+                original_language="en",
+                output_locale="en",
+            )
+            assert uow.session is not None
+            scheduled = await RunScheduler(uow.session).schedule(
+                request=RunScheduleRequest(
+                    mission_revision_id=revision.id,
+                    mode="HUNT",
+                    priority=0,
+                    budget_limits={"max_run_duration_minutes": 30},
+                ),
+            )
+            await uow.commit()
+        pipeline_context = context(scheduled.run.id, scheduled.task.id)
+        store = BudgetStore(pipeline_context, [])
+        pipeline = EvidencePipeline(
+            store=store,
+            reasoner=RecordingReasoner([]),
+            collectors={Source.HACKER_NEWS: FullCollector()},
+            clock=lambda: NOW,
+        )
+        worker = Worker(
+            database,
+            worker_id="test-worker",
+            handlers=TaskHandlerRegistry({"research.run": pipeline}),
+        )
+
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+        assert run is not None
+        assert task is not None
+        assert task.status == "FAILED"
+        assert task.retry_class == "BUDGET_EXHAUSTED"
+        assert run.status == "BUDGET_EXHAUSTED"
     finally:
         await database.dispose()

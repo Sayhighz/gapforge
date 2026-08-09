@@ -27,6 +27,8 @@ from gapforge.integration.mappers import (
     storage_uuid_for_identifier,
 )
 from gapforge.runtime.evidence_pipeline import (
+    CapturedEvidence,
+    CollectionBudgetExhaustedError,
     ExistingCandidate,
     ExistingIntelligence,
     PipelineContext,
@@ -37,10 +39,6 @@ from gapforge.storage import models
 
 class StageConflictError(RuntimeError):
     """A stage key was reused with different durable content."""
-
-
-class CollectionBudgetExhausted(RuntimeError):
-    """The durable run cannot admit all collection counters atomically."""
 
 
 class SqlAlchemyEvidencePipelineStore:
@@ -62,6 +60,8 @@ class SqlAlchemyEvidencePipelineStore:
             fresh = await session.get(models.ResearchTask, task.id)
             if fresh is None:
                 raise LookupError("research task no longer exists")
+            if fresh.lease_owner is None:
+                raise PermissionError("research task has no active worker lease")
             run = await session.get(models.ResearchRun, fresh.run_id)
             if run is None:
                 raise LookupError("research run no longer exists")
@@ -95,6 +95,7 @@ class SqlAlchemyEvidencePipelineStore:
                 run_id=run.id,
                 task_id=fresh.id,
                 task_attempt=fresh.attempt_count,
+                worker_id=fresh.lease_owner,
                 mission_revision=mission_revision_from_storage(revision),
                 mode=RunMode(run.mode),
                 budget_limits=limits,
@@ -157,6 +158,14 @@ class SqlAlchemyEvidencePipelineStore:
             task = await session.get(models.ResearchTask, context.task_id)
             if task is None:
                 raise LookupError("research task no longer exists")
+            run = await session.scalar(
+                select(models.ResearchRun)
+                .where(models.ResearchRun.id == context.run_id)
+                .with_for_update()
+            )
+            if run is None:
+                raise LookupError("research run no longer exists")
+            _assert_stage_lease(task, run, context, self.clock())
             stages = _pipeline_stages(task.checkpoint)
             record = stages.get(stage)
             if not isinstance(record, dict):
@@ -165,6 +174,39 @@ class SqlAlchemyEvidencePipelineStore:
             if not isinstance(payload, dict):
                 raise StageConflictError("durable stage payload is invalid")
             return cast(dict[str, object], payload)
+
+    async def load_evidence(
+        self,
+        context: PipelineContext,
+        evidence_ids: tuple[str, ...],
+    ) -> tuple[CapturedEvidence, ...]:
+        async with self.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(models.RawSignalRevision, models.RawSignal)
+                    .join(
+                        models.RawSignal,
+                        models.RawSignal.id == models.RawSignalRevision.raw_signal_id,
+                    )
+                    .where(models.RawSignalRevision.domain_revision_id.in_(evidence_ids))
+                )
+            ).all()
+        by_id = {
+            revision.domain_revision_id: CapturedEvidence(
+                evidence_id=revision.domain_revision_id,
+                source=Source(raw.source),
+                url=raw.canonical_url,
+                text="\n".join(value for value in (revision.title, revision.body) if value),
+                observed_at=revision.observed_at,
+                duplicate_group=revision.duplicate_group_key,
+                author_id=raw.author_pseudonym,
+                thread_id=raw.parent_external_id or raw.external_id,
+            )
+            for revision, raw in rows
+        }
+        if set(by_id) != set(evidence_ids):
+            raise LookupError("checkpoint references missing evidence revisions")
+        return tuple(by_id[evidence_id] for evidence_id in evidence_ids)
 
     async def commit_stage(
         self,
@@ -179,6 +221,14 @@ class SqlAlchemyEvidencePipelineStore:
             )
             if task is None:
                 raise LookupError("research task no longer exists")
+            run = await session.scalar(
+                select(models.ResearchRun)
+                .where(models.ResearchRun.id == context.run_id)
+                .with_for_update()
+            )
+            if run is None:
+                raise LookupError("research run no longer exists")
+            _assert_stage_lease(task, run, context, self.clock())
             stages = _pipeline_stages(task.checkpoint)
             existing = stages.get(commit.stage)
             input_sha256 = _payload_sha256(commit.payload)
@@ -201,8 +251,8 @@ class SqlAlchemyEvidencePipelineStore:
                         context,
                         commit.payload,
                     )
-                except CollectionBudgetExhausted:
-                    await session.commit()
+                except CollectionBudgetExhaustedError:
+                    await session.rollback()
                     raise
             stages[commit.stage] = {
                 **expected_identity,
@@ -211,9 +261,6 @@ class SqlAlchemyEvidencePipelineStore:
             pipeline = dict(cast(dict[str, Any], task.checkpoint.get("pipeline", {})))
             pipeline["stages"] = stages
             task.checkpoint = {**task.checkpoint, "pipeline": pipeline}
-            run = await session.get(models.ResearchRun, context.run_id)
-            if run is None:
-                raise LookupError("research run no longer exists")
             run.last_checkpoint = {
                 "task_id": str(task.id),
                 "stage": commit.stage,
@@ -299,17 +346,7 @@ class SqlAlchemyEvidencePipelineStore:
             if int(run.budget_used.get(counter, 0)) + amount > int(run.budget_limits[limit_key])
         ]
         if run.deadline_at <= now or exhausted:
-            run.status = "BUDGET_EXHAUSTED"
-            run.completed_at = now
-            run.last_checkpoint = {
-                "reason": "deadline" if run.deadline_at <= now else "budget",
-                "counters": [
-                    {"counter": counter, "used": used, "limit": limit}
-                    for counter, used, limit in exhausted
-                ],
-            }
-            await session.flush()
-            raise CollectionBudgetExhausted("collection budget exhausted")
+            raise CollectionBudgetExhaustedError("collection budget exhausted")
         run.budget_used = {
             **run.budget_used,
             **{
@@ -447,8 +484,7 @@ class SqlAlchemyEvidencePipelineStore:
                 await session.scalars(
                     select(models.RawSignalRevision)
                     .where(models.RawSignalRevision.is_tombstone.is_(False))
-                    .order_by(models.RawSignalRevision.observed_at.desc())
-                    .limit(200)
+                    .order_by(models.RawSignalRevision.domain_revision_id)
                 )
             ).all()
             near_matches = [
@@ -501,3 +537,21 @@ def _payload_sha256(payload: dict[str, Any]) -> str:
 
 def _summary(title: str | None, body: str | None) -> str:
     return " ".join(part for part in (title, body) if part)[:500] or "unavailable"
+
+
+def _assert_stage_lease(
+    task: models.ResearchTask,
+    run: models.ResearchRun,
+    context: PipelineContext,
+    now: datetime,
+) -> None:
+    if (
+        task.status != "LEASED"
+        or task.lease_owner != context.worker_id
+        or task.attempt_count != context.task_attempt
+        or task.lease_expires_at is None
+        or task.lease_expires_at <= now
+    ):
+        raise PermissionError("research task lease was lost")
+    if run.status != "RUNNING" or run.deadline_at <= now:
+        raise PermissionError("research run is no longer writable")
