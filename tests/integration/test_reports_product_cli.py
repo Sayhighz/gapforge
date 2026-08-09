@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 from collections.abc import Iterator
@@ -21,6 +22,7 @@ from gapforge.storage.database import Database
 from tests.integration.test_artifact_persistence import (
     FakeContext,
     _commit_stage,
+    _seed_followup_context,
     _seed_pipeline_context,
     _stage_payloads,
 )
@@ -29,15 +31,24 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _remove_product_hypotheses(migrated_postgres_url: str) -> Iterator[None]:
+def _isolate_application_rows(migrated_postgres_url: str) -> Iterator[None]:
     async def cleanup() -> None:
         database = Database.from_url(migrated_postgres_url)
         try:
             async with database.session() as session:
-                await session.execute(text("ALTER TABLE product_hypotheses DISABLE TRIGGER USER"))
-                await session.execute(text("DELETE FROM product_hypotheses"))
-                await session.execute(text("ALTER TABLE product_hypotheses ENABLE TRIGGER USER"))
-                await session.commit()
+                existing = set(
+                    await session.scalars(
+                        text(
+                            "SELECT tablename FROM pg_tables "
+                            "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                        )
+                    )
+                )
+                tables = sorted(existing & set(models.Base.metadata.tables))
+                if tables:
+                    quoted = ", ".join(f'"{table}"' for table in tables)
+                    await session.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+                    await session.commit()
         finally:
             await database.dispose()
 
@@ -69,6 +80,63 @@ async def _seed_validated_run(
             )
             assert snapshot is not None
             return context, identifiers, assessment.id, snapshot.evidence_card_id
+    finally:
+        await database.dispose()
+
+
+async def _seed_monitor_snapshot(
+    database_url: str,
+    initial_context: FakeContext,
+    identifiers: dict[str, UUID | str],
+) -> UUID:
+    database = Database.from_url(database_url)
+    try:
+        context = await _seed_followup_context(database, initial_context)
+        monitor_ids = dict(identifiers)
+        monitor_ids["gap"] = uuid4()
+        monitor_ids["card"] = uuid5(
+            context.run_id,
+            f"card:{monitor_ids['opportunity']}",
+        )
+        monitor_ids["score"] = uuid5(
+            context.run_id,
+            f"score:{monitor_ids['opportunity']}",
+        )
+        stages = {
+            stage: copy.deepcopy(payload)
+            for stage, payload in _stage_payloads(context, monitor_ids)
+        }
+        stages["GAP"]["gaps"][0]["statement"] = (
+            "Later monitoring confirms this exact validated opportunity"
+        )
+        writer = ResearchArtifactWriter()
+        for stage in ("GAP", "CARD_SCORE", "HYPOTHESIS", "CRITIC", "FINAL"):
+            await _commit_stage(database, writer, context, stage, stages[stage])
+        card_id = monitor_ids["card"]
+        assert isinstance(card_id, UUID)
+        return card_id
+    finally:
+        await database.dispose()
+
+
+async def _seed_researching_assessment(database_url: str) -> UUID:
+    database = Database.from_url(database_url)
+    try:
+        context, identifiers = await _seed_pipeline_context(database, output_locale="th")
+        writer = ResearchArtifactWriter()
+        for stage, payload in _stage_payloads(context, identifiers):
+            if stage not in {"EXTRACT", "CLUSTER", "GAP"}:
+                continue
+            await _commit_stage(database, writer, context, stage, payload)
+        async with database.session() as session:
+            assessment = await session.scalar(
+                select(models.MissionOpportunityAssessment).where(
+                    models.MissionOpportunityAssessment.opportunity_id == identifiers["opportunity"]
+                )
+            )
+            assert assessment is not None
+            assert assessment.lifecycle_status == "RESEARCHING"
+            return assessment.id
     finally:
         await database.dispose()
 
@@ -189,7 +257,9 @@ def test_product_hypothesis_cli_rejects_non_validate_assessment(
     migrated_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, _, assessment_id, evidence_card_id = asyncio.run(_seed_validated_run(migrated_postgres_url))
+    context, identifiers, assessment_id, evidence_card_id = asyncio.run(
+        _seed_validated_run(migrated_postgres_url)
+    )
     monkeypatch.setenv("DATABASE_URL", migrated_postgres_url)
     original_arguments = [
         "product-hypothesis",
@@ -203,19 +273,8 @@ def test_product_hypothesis_cli_rejects_non_validate_assessment(
     original, original_exit, _ = _invoke_json(original_arguments)
     assert original_exit == 0
 
-    async def move_back_to_research() -> None:
-        database = Database.from_url(migrated_postgres_url)
-        try:
-            async with database.session() as session:
-                assessment = await session.get(models.MissionOpportunityAssessment, assessment_id)
-                assert assessment is not None
-                assessment.lifecycle_status = "RESEARCH_MORE"
-                assessment.verdict = "RESEARCH_MORE"
-                await session.commit()
-        finally:
-            await database.dispose()
-
-    asyncio.run(move_back_to_research())
+    later_card_id = asyncio.run(_seed_monitor_snapshot(migrated_postgres_url, context, identifiers))
+    assert later_card_id != evidence_card_id
     replayed, replay_exit, _ = _invoke_json(original_arguments)
     assert replay_exit == 0
     assert replayed["data"] == original["data"]
@@ -226,11 +285,12 @@ def test_product_hypothesis_cli_rejects_non_validate_assessment(
     assert conflict_exit == 4
     assert conflict["error"]["code"] == "CONFLICT"
 
+    researching_assessment_id = asyncio.run(_seed_researching_assessment(migrated_postgres_url))
     result, exit_code, stderr = _invoke_json(
         [
             "product-hypothesis",
             "create",
-            str(assessment_id),
+            str(researching_assessment_id),
             "--request-id",
             "request-blocked",
             "--proposition",
@@ -382,7 +442,7 @@ async def test_product_hypothesis_database_enforces_lineage_bounds_and_append_on
 
 
 @pytest.mark.postgres
-async def test_product_hypothesis_insert_serializes_against_assessment_transition(
+async def test_product_hypothesis_insert_serializes_against_assessment_lock(
     migrated_postgres_url: str,
 ) -> None:
     _, _, assessment_id, evidence_card_id = await _seed_validated_run(migrated_postgres_url)
@@ -390,20 +450,18 @@ async def test_product_hypothesis_insert_serializes_against_assessment_transitio
     first = database.session_factory()
     second = database.session_factory()
     try:
-        assessment = await first.scalar(
+        locked_assessment = await first.scalar(
             select(models.MissionOpportunityAssessment)
             .where(models.MissionOpportunityAssessment.id == assessment_id)
             .with_for_update()
         )
-        assert assessment is not None
-        assessment.lifecycle_status = "RESEARCH_MORE"
-        assessment.verdict = "RESEARCH_MORE"
-        await first.flush()
+        assert locked_assessment is not None
+        product_id = uuid4()
 
         async def direct_insert() -> None:
             await second.execute(
                 insert(models.ProductHypothesis).values(
-                    id=uuid4(),
+                    id=product_id,
                     assessment_id=assessment_id,
                     requested_by="racing-request",
                     content={
@@ -419,9 +477,11 @@ async def test_product_hypothesis_insert_serializes_against_assessment_transitio
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(asyncio.shield(insertion), timeout=0.1)
         await first.commit()
-        with pytest.raises(DBAPIError, match="current VALIDATE"):
-            await insertion
-        await second.rollback()
+        await insertion
+        async with database.session() as session:
+            stored = await session.get(models.ProductHypothesis, product_id)
+            assert stored is not None
+            assert stored.evidence_card_id == evidence_card_id
     finally:
         await first.close()
         await second.close()
