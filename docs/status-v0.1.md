@@ -33,7 +33,8 @@ This is the first file to read after interruption. It records only reviewed/push
 GitHub issues:
 
 - Lane A: #2 — platform, persistence, Codex provider, and operations.
-- Lane B: #3 — collectors, evidence pipeline, scoring, critic, and reports.
+- Lane B: #3 — collectors, evidence pipeline, scoring, critic, and reports (closed after merge).
+- Integration: #7 — end-to-end research runtime and release verification.
 
 ## Current checkpoint
 

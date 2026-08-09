@@ -6,6 +6,8 @@ PR target: `main`
 
 Owner: integration lead
 
+GitHub issue: #7
+
 Last checkpoint: Lane B merged; Lane A is reviewed through A6 and implementing A7-A8.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
