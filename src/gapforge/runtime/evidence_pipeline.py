@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -30,6 +30,7 @@ from gapforge.domain.contracts import (
     AgentRequest,
     AgentStatus,
     Availability,
+    CanonicalProblem,
     CollectRequest,
     CollectResult,
     CompetitorResearchStatus,
@@ -47,6 +48,7 @@ from gapforge.domain.contracts import (
     SemanticOperation,
     Source,
     SourceCheckpoint,
+    SourceWarning,
     TrendLabel,
     Verdict,
 )
@@ -128,6 +130,7 @@ class CapturedEvidence:
     url: str
     text: str
     observed_at: datetime
+    source_created_at: datetime
     duplicate_group: str
     author_id: str | None
     thread_id: str
@@ -192,6 +195,15 @@ class EvidencePipelineStore(Protocol):
 
     async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]: ...
 
+    async def reserve_external_budget(
+        self,
+        context: PipelineContext,
+        *,
+        stage: str,
+        collector_requests: int = 0,
+        search_calls: int = 0,
+    ) -> bool: ...
+
 
 class CompetitorSearchPort(Protocol):
     async def search(
@@ -228,6 +240,16 @@ class EvidencePipeline:
             return await self._run(task)
         except SemanticAdmissionError as error:
             raise _semantic_task_error(error) from error
+        except CollectionBudgetExhaustedError as error:
+            raise TaskHandlerError(
+                ErrorKind.BUDGET_EXHAUSTED,
+                error_class="ExternalRequestBudgetExhausted",
+            ) from error
+        except ExternalAttemptIndeterminateError as error:
+            raise TaskHandlerError(
+                ErrorKind.INTEGRITY,
+                error_class="ExternalAttemptIndeterminate",
+            ) from error
 
     async def _run(self, task: ResearchTask) -> TaskHandlerResult:
         context = await self.store.load_context(task)
@@ -272,7 +294,7 @@ class EvidencePipeline:
 
         collect_payload = await self.store.load_stage(context, "COLLECT")
         if collect_payload is None:
-            results = await self._collect(context, plan)
+            results = await self._collect(context, plan, stage="COLLECT")
             collect_payload = {
                 "results": [result.model_dump(mode="json") for result in results],
                 "item_count": sum(len(result.items) for result in results),
@@ -403,7 +425,7 @@ class EvidencePipeline:
                 card=card_by_opportunity.get(result.opportunity_id),
                 score=score_by_opportunity[result.opportunity_id],
                 competitor_research=competitor_research.status,
-                gap_evidence_present=bool(gap.competitor_evidence),
+                gap_evidence_present=_gap_evidence_present(gap, result.opportunity_id),
                 critic=result,
             )
             decisions.append(
@@ -463,8 +485,8 @@ class EvidencePipeline:
         CriticBatch,
         str | None,
     ]:
-        recommendations = tuple(
-            intent
+        recommendation_pairs = tuple(
+            (intent, result.opportunity_id)
             for result in critics.results
             if result.verdict is Verdict.RESEARCH_MORE
             for intent in research_more_intents(
@@ -473,10 +495,42 @@ class EvidencePipeline:
                 remaining_agent_calls=4,
             )
         )
-        unique = {intent.id: intent for intent in recommendations}
+        unique = {intent.id: intent for intent, _ in recommendation_pairs}
         intents = tuple(unique[key] for key in sorted(unique))[:4]
         if not intents:
             return gap, cards, scores, hypotheses, critics, None
+        selected_intent_ids = {intent.id for intent in intents}
+        intent_targets = {
+            intent_id: tuple(
+                sorted(
+                    {
+                        opportunity_id
+                        for intent, opportunity_id in recommendation_pairs
+                        if intent.id == intent_id
+                    }
+                )
+            )
+            for intent_id in sorted(selected_intent_ids)
+        }
+        opportunity_by_id = {item.id: item for item in gap.opportunities}
+        gap_by_id = {item.id: item for item in gap.gaps}
+        problem_by_id = {item.id: item for item in clusters.problems}
+        target_contexts = []
+        for intent_id, opportunity_ids in intent_targets.items():
+            for opportunity_id in opportunity_ids:
+                opportunity = opportunity_by_id.get(opportunity_id)
+                if opportunity is None:
+                    raise ValueError("research-more intent references an unknown opportunity")
+                target_gap = gap_by_id[opportunity.gap_hypothesis_id]
+                target_problem = problem_by_id[target_gap.canonical_problem_id]
+                target_contexts.append(
+                    {
+                        "intent_id": intent_id,
+                        "opportunity": opportunity.model_dump(mode="json"),
+                        "gap_hypothesis": target_gap.model_dump(mode="json"),
+                        "canonical_problem": target_problem.model_dump(mode="json"),
+                    }
+                )
         existing = await self.store.load_stage(context, "RESEARCH_MORE_CONTROL")
         semantic_stages = ("EXTRACT_R2", "CLUSTER_R2", "GAP_R2", "HYPOTHESIS_R2", "CRITIC_R2")
         completed_values: list[str] = []
@@ -501,6 +555,7 @@ class EvidencePipeline:
                     "remaining_agent_calls": remaining,
                     "required_agent_calls": required,
                     "intents": [intent.model_dump(mode="json") for intent in intents],
+                    "intent_targets": target_contexts,
                 },
             )
         else:
@@ -509,6 +564,12 @@ class EvidencePipeline:
             if not isinstance(stored_intents, list):
                 raise ValueError("research-more checkpoint intents must be a list")
             intents = tuple(QueryIntent.model_validate(item) for item in stored_intents)
+            stored_targets = existing.get("intent_targets")
+            if not isinstance(stored_targets, list) or not all(
+                isinstance(item, dict) for item in stored_targets
+            ):
+                raise ValueError("research-more checkpoint targets must be a list")
+            target_contexts = [dict(item) for item in stored_targets]
         if status.startswith("STOPPED_"):
             warning = (
                 "RESEARCH_MORE_STOPPED_AGENT_BUDGET"
@@ -548,12 +609,13 @@ class EvidencePipeline:
         collect_payload = await self.store.load_stage(context, "COLLECT_R2")
         if collect_payload is None:
             plan = QueryPlan(round_number=2, intents=intents)
-            results = await self._collect(round_context, plan)
+            results = await self._collect(round_context, plan, stage="COLLECT_R2")
             collect_payload = {
                 "results": [item.model_dump(mode="json") for item in results],
                 "item_count": sum(len(item.items) for item in results),
                 "examined_volume": _examined_volume(results, as_of=context.collection_until),
                 "examined_items": _examined_items(results),
+                "intent_targets": target_contexts,
             }
             await self._commit(context, "COLLECT_R2", collect_payload)
             collect_payload = await self.store.load_stage(context, "COLLECT_R2") or collect_payload
@@ -602,6 +664,7 @@ class EvidencePipeline:
             stage="CLUSTER_R2",
             round_number=2,
             priority_pain_ids=frozenset(item.id for item in new_extraction.pain_signals),
+            target_contexts=tuple(target_contexts),
         )
         clusters = _merge_cluster_batches(clusters, round_two_clusters)
         round_two_gap = await self._research_gap(
@@ -614,6 +677,7 @@ class EvidencePipeline:
             stage="GAP_R2",
             round_number=2,
             priority_evidence_ids=frozenset(genuinely_new_ids),
+            target_contexts=tuple(target_contexts),
         )
         gap = _merge_gap_batches(gap, round_two_gap)
         round_two_examined_items = _examined_items_field(collect_payload)
@@ -659,6 +723,13 @@ class EvidencePipeline:
         result_payload = {
             "status": "COMPLETE",
             "new_evidence_ids": list(genuinely_new_ids),
+            "target_opportunity_ids": sorted(
+                {
+                    opportunity_id
+                    for opportunity_ids in intent_targets.values()
+                    for opportunity_id in opportunity_ids
+                }
+            ),
         }
         if await self.store.load_stage(context, "RESEARCH_MORE_RESULT") is None:
             await self._commit(context, "RESEARCH_MORE_RESULT", result_payload)
@@ -741,6 +812,15 @@ class EvidencePipeline:
             )
         else:
             query = " OR ".join(problem.summary for problem in clusters.problems[:4])[:500]
+            admitted = await self.store.reserve_external_budget(
+                context,
+                stage="COMPETITOR_RESEARCH",
+                search_calls=min(1, remaining_search_calls),
+            )
+            if not admitted:
+                raise ExternalAttemptIndeterminateError(
+                    "competitor search reservation is indeterminate after interruption"
+                )
             response = await self.competitor_search.search(
                 query,
                 max_results=10,
@@ -785,7 +865,14 @@ class EvidencePipeline:
         stage: str = "CLUSTER",
         round_number: int = 1,
         priority_pain_ids: frozenset[str] = frozenset(),
+        target_contexts: tuple[dict[str, Any], ...] = (),
     ) -> ClusterBatch:
+        target_problems = {
+            problem.id: problem
+            for item in target_contexts
+            if isinstance((value := item.get("canonical_problem")), dict)
+            for problem in (CanonicalProblem.model_validate(value),)
+        }
         input_json = _bounded_stage_input(
             (
                 (
@@ -795,6 +882,13 @@ class EvidencePipeline:
             ),
             total_counts={"pain_signals": len(extraction.pain_signals)},
             priority_ids={"pain_signals": priority_pain_ids},
+            fixed={
+                "target_problems": [
+                    target_problems[key].model_dump(mode="json") for key in sorted(target_problems)
+                ]
+            }
+            if target_problems
+            else None,
         )
         selected_pain_ids = frozenset(_selected_ids(input_json, "pain_signals"))
         selected_extraction = PainExtractionBatch(
@@ -817,9 +911,17 @@ class EvidencePipeline:
             execution=execution,
             round_number=round_number,
         )
+        provider_batch = ClusterBatch.model_validate(payload)
+        if target_problems:
+            provider_problem_ids = {item.id for item in provider_batch.problems}
+            if provider_problem_ids != set(target_problems):
+                raise ValueError("round-two clusters must use exact target problem IDs")
+            provider_batch = provider_batch.model_copy(
+                update={"problems": tuple(target_problems[key] for key in sorted(target_problems))}
+            )
         batch = _normalize_clusters(
             context,
-            ClusterBatch.model_validate(payload),
+            provider_batch,
             selected_extraction,
         )
         problem_ids = {problem.id for problem in batch.problems}
@@ -853,6 +955,7 @@ class EvidencePipeline:
         stage: str = "GAP",
         round_number: int = 1,
         priority_evidence_ids: frozenset[str] = frozenset(),
+        target_contexts: tuple[dict[str, Any], ...] = (),
     ) -> GapResearchBatch:
         existing = await self.store.load_stage(context, stage)
         if existing is not None:
@@ -876,6 +979,7 @@ class EvidencePipeline:
         snapshot_input = [
             {
                 **item.model_dump(mode="json"),
+                "evidence_id": _competitor_snapshot_evidence_id(item),
                 "text": item.text[:1_200],
             }
             for item in competitor_research.snapshots[:10]
@@ -894,11 +998,24 @@ class EvidencePipeline:
                 "competitor_snapshots": len(competitor_research.snapshots),
                 "evidence": len(evidence),
             },
-            priority_ids={"evidence": priority_evidence_ids},
+            priority_ids={
+                "problems": frozenset(
+                    problem["id"]
+                    for item in target_contexts
+                    if isinstance((problem := item.get("canonical_problem")), dict)
+                    and isinstance(problem.get("id"), str)
+                ),
+                "evidence": priority_evidence_ids,
+            },
+            fixed={"target_opportunities": list(target_contexts)} if target_contexts else None,
         )
         selected_evidence_ids = _selected_ids(input_json, "evidence")
         selected_problem_ids = _selected_ids(input_json, "problems")
         selected_snapshot_urls = _selected_urls(
+            input_json,
+            "competitor_snapshots",
+        )
+        selected_competitor_evidence_ids = _selected_evidence_ids(
             input_json,
             "competitor_snapshots",
         )
@@ -909,12 +1026,26 @@ class EvidencePipeline:
             effort=AgentEffort.MEDIUM,
             schema_type=GapResearchBatch,
             input_json=input_json,
-            permitted_evidence_ids=selected_evidence_ids,
+            permitted_evidence_ids=tuple(
+                sorted({*selected_evidence_ids, *selected_competitor_evidence_ids})
+            ),
             permitted_urls=selected_snapshot_urls,
             execution=execution,
             round_number=round_number,
         )
-        batch = _normalize_gap(context, GapResearchBatch.model_validate(payload))
+        provider_batch = GapResearchBatch.model_validate(payload)
+        if target_contexts:
+            provider_batch = _bind_round_two_gap(provider_batch, target_contexts)
+        batch = _normalize_gap(context, provider_batch)
+        if target_contexts:
+            target_opportunity_ids = {
+                opportunity["id"]
+                for item in target_contexts
+                if isinstance((opportunity := item.get("opportunity")), dict)
+                and isinstance(opportunity.get("id"), str)
+            }
+            if {item.id for item in batch.opportunities} != target_opportunity_ids:
+                raise ValueError("round-two normalization changed target opportunity identity")
         _require_unique_ids("claims", batch.claims)
         _require_unique_ids("competitors", batch.competitors)
         _require_unique_ids("competitor evidence", batch.competitor_evidence)
@@ -941,6 +1072,9 @@ class EvidencePipeline:
             snapshot = snapshots_by_url.get(normalize_url(str(item.source_url)))
             if snapshot is None:
                 raise ValueError("competitor evidence URL was not captured")
+            expected_evidence_id = _competitor_snapshot_evidence_id(snapshot)
+            if item.id != expected_evidence_id or item.id not in selected_competitor_evidence_ids:
+                raise ValueError("competitor evidence ID was not assigned by Python")
             if (
                 normalize_text(item.captured_excerpt) not in normalize_text(snapshot.text)
                 or item.content_hash != snapshot.sha256
@@ -1039,7 +1173,7 @@ class EvidencePipeline:
                         author_id=captured.author_id,
                         thread_id=captured.thread_id,
                         source=captured.source,
-                        observed_at=captured.observed_at,
+                        observed_at=captured.source_created_at,
                         severity=pain.severity,
                         behavioral_workaround=bool(pain.workaround),
                         paid_or_wtp=pain.payment_signal,
@@ -1364,6 +1498,7 @@ class EvidencePipeline:
                     "evidence": existing.evidence_count,
                 },
                 "round": 1,
+                "available_collection_sources": sorted(source.value for source in self.collectors),
             },
         )
         omitted_counts = input_json["input_bounds"]["omitted_counts"]
@@ -1390,10 +1525,27 @@ class EvidencePipeline:
         plan = QueryPlan.model_validate(result.output_json)
         if plan.round_number != 1:
             raise ValueError("initial query plan must have round_number=1")
+        available_sources = set(self.collectors)
+        unsupported = sorted(
+            {
+                source.value
+                for intent in plan.intents
+                for source in intent.sources
+                if source not in available_sources
+            }
+        )
+        if unsupported:
+            raise ValueError(
+                "query plan referenced unavailable collection sources: " + ", ".join(unsupported)
+            )
         return plan
 
     async def _collect(
-        self, context: PipelineContext, plan: QueryPlan
+        self,
+        context: PipelineContext,
+        plan: QueryPlan,
+        *,
+        stage: str,
     ) -> tuple[CollectResult, ...]:
         compiled = compile_plan(plan)
         sources = tuple(item.source for item in compiled if item.source in self.collectors)
@@ -1453,7 +1605,19 @@ class EvidencePipeline:
                     ),
                 )
             )
-        return await collect_isolated(jobs)
+        if not jobs:
+            return ()
+        admitted = await self.store.reserve_external_budget(
+            context,
+            stage=stage,
+            collector_requests=sum(request.max_requests for _, _, request in jobs),
+        )
+        if not admitted:
+            raise ExternalAttemptIndeterminateError(
+                f"{stage} collector reservation is indeterminate after interruption"
+            )
+        results = await collect_isolated(jobs)
+        return _validate_collection_contract(tuple(jobs), results)
 
     async def _commit(
         self,
@@ -1713,6 +1877,15 @@ def _stable_id(kind: str, *parts: object) -> str:
     return str(uuid5(ARTIFACT_NAMESPACE, canonical))
 
 
+def _competitor_snapshot_evidence_id(snapshot: FetchSnapshot) -> str:
+    return _stable_id(
+        "competitor-evidence",
+        normalize_url(str(snapshot.final_url)),
+        snapshot.sha256,
+        snapshot.observed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    )
+
+
 def _normalize_clusters(
     context: PipelineContext,
     batch: ClusterBatch,
@@ -1782,16 +1955,7 @@ def _normalize_gap(context: PipelineContext, batch: GapResearchBatch) -> GapRese
         )
         for item in batch.competitors
     }
-    competitor_evidence_ids = {
-        item.id: _stable_id(
-            "competitor-evidence",
-            competitor_ids.get(item.competitor_id, item.competitor_id),
-            normalize_url(str(item.source_url)),
-            item.content_hash,
-            normalize_text(item.captured_excerpt),
-        )
-        for item in batch.competitor_evidence
-    }
+    competitor_evidence_ids = {item.id: item.id for item in batch.competitor_evidence}
     claim_ids = {
         item.id: _stable_id(
             "claim",
@@ -1927,6 +2091,38 @@ def _normalize_gap(context: PipelineContext, batch: GapResearchBatch) -> GapRese
         opportunities=tuple(sorted(normalized_opportunities, key=lambda value: value.id)),
         opportunity_fit=tuple(sorted(normalized_fits, key=lambda value: value.opportunity_id)),
     )
+
+
+def _bind_round_two_gap(
+    batch: GapResearchBatch,
+    target_contexts: tuple[dict[str, Any], ...],
+) -> GapResearchBatch:
+    targets = {
+        opportunity["id"]: {
+            "opportunity": opportunity,
+            "problem_id": problem["id"],
+        }
+        for item in target_contexts
+        if isinstance((opportunity := item.get("opportunity")), dict)
+        and isinstance(opportunity.get("id"), str)
+        and isinstance((problem := item.get("canonical_problem")), dict)
+        and isinstance(problem.get("id"), str)
+    }
+    returned_ids = {item.id for item in batch.opportunities}
+    if not targets or returned_ids != set(targets):
+        raise ValueError("round-two gap output must cover exact target opportunities")
+    gaps = {item.id: item for item in batch.gaps}
+    normalized_opportunities = []
+    for opportunity in batch.opportunities:
+        target = targets[opportunity.id]
+        gap = gaps.get(opportunity.gap_hypothesis_id)
+        if gap is None or gap.canonical_problem_id != target["problem_id"]:
+            raise ValueError("round-two opportunity does not match its target problem")
+        target_opportunity = target["opportunity"]
+        normalized_opportunities.append(
+            opportunity.model_copy(update={"title": target_opportunity["title"]})
+        )
+    return batch.model_copy(update={"opportunities": tuple(normalized_opportunities)})
 
 
 def _normalize_hypotheses(
@@ -2131,6 +2327,17 @@ def _selected_ids(payload: Mapping[str, Any], section: str) -> tuple[str, ...]:
     )
 
 
+def _selected_evidence_ids(payload: Mapping[str, Any], section: str) -> tuple[str, ...]:
+    values = payload.get(section)
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        value["evidence_id"]
+        for value in values
+        if isinstance(value, dict) and isinstance(value.get("evidence_id"), str)
+    )
+
+
 def _selected_urls(payload: Mapping[str, Any], section: str) -> tuple[str, ...]:
     values = payload.get(section)
     if not isinstance(values, list):
@@ -2250,5 +2457,83 @@ def _selected_case_evidence_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _gap_evidence_present(batch: GapResearchBatch, opportunity_id: str) -> bool:
+    opportunity = next(
+        (item for item in batch.opportunities if item.id == opportunity_id),
+        None,
+    )
+    if opportunity is None:
+        return False
+    gap = next(
+        (item for item in batch.gaps if item.id == opportunity.gap_hypothesis_id),
+        None,
+    )
+    known_competitor_evidence = {item.id for item in batch.competitor_evidence}
+    return bool(
+        gap
+        and gap.user_evidence_ids
+        and gap.competitor_evidence_ids
+        and set(gap.competitor_evidence_ids) <= known_competitor_evidence
+    )
+
+
+def _validate_collection_contract(
+    jobs: tuple[tuple[Source, Collector, CollectRequest], ...],
+    results: tuple[CollectResult, ...],
+) -> tuple[CollectResult, ...]:
+    validated: list[CollectResult] = []
+    for index, (expected_source, _, request) in enumerate(jobs):
+        result = results[index] if index < len(results) else None
+        violation = None
+        if result is None:
+            violation = "result count"
+        elif result.source is not expected_source:
+            violation = "result source"
+        elif any(item.source is not expected_source for item in result.items):
+            violation = "item source"
+        elif result.checkpoint is not None and result.checkpoint.source is not expected_source:
+            violation = "checkpoint source"
+        elif result.request_count > request.max_requests:
+            violation = "request budget"
+        elif len(result.items) > request.max_signals:
+            violation = "signal budget"
+        if violation is None and result is not None:
+            validated.append(result)
+            continue
+        validated.append(
+            CollectResult(
+                source=expected_source,
+                availability=Availability.SOURCE_UNAVAILABLE,
+                request_count=request.max_requests,
+                warnings=(
+                    SourceWarning(
+                        code="COLLECTOR_CONTRACT_VIOLATION",
+                        message=f"collector violated its {violation} contract",
+                        retryable=False,
+                    ),
+                ),
+            )
+        )
+    if len(results) > len(jobs) and validated:
+        first = validated[0]
+        validated[0] = first.model_copy(
+            update={
+                "warnings": (
+                    *first.warnings,
+                    SourceWarning(
+                        code="COLLECTOR_CONTRACT_VIOLATION",
+                        message="collector returned unadmitted extra results",
+                        retryable=False,
+                    ),
+                )
+            }
+        )
+    return tuple(validated)
+
+
 class CollectionBudgetExhaustedError(RuntimeError):
     """Storage refused a collection stage without committing partial effects."""
+
+
+class ExternalAttemptIndeterminateError(RuntimeError):
+    """A durable external reservation has no corresponding committed result."""

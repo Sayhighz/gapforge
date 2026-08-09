@@ -18,6 +18,7 @@ from gapforge.domain.contracts import (
     CollectRequest,
     CollectResult,
     FetchResult,
+    FetchSnapshot,
     MissionRevision,
     RunMode,
     SearchResponse,
@@ -52,11 +53,20 @@ from gapforge.runtime.evidence_pipeline import (
     PipelineStageCommit,
     _bounded_evidence_input,
     _bounded_stage_input,
+    _competitor_snapshot_evidence_id,
     _examined_volume,
+    _gap_evidence_present,
+    _validate_collection_contract,
 )
-from gapforge.runtime.evidence_stages import PainExtractionBatch
+from gapforge.runtime.evidence_stages import GapResearchBatch, PainExtractionBatch
 from gapforge.storage.database import Database
-from gapforge.storage.models import AgentCall, RawSignalRevision, ResearchRun, ResearchTask
+from gapforge.storage.models import (
+    AgentCall,
+    RawSignal,
+    RawSignalRevision,
+    ResearchRun,
+    ResearchTask,
+)
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
 from gapforge.worker import TaskHandlerError, TaskHandlerRegistry, Worker
 
@@ -94,6 +104,9 @@ class RecordingStore:
         self.completed: dict[str, dict[str, object]] = {}
         self.crash_after_stage: str | None = None
         self.remaining_calls = context.budget_limits["max_agent_calls_per_run"]
+        self.external_reservations: dict[str, tuple[int, int]] = {}
+        self.collector_requests_used = 0
+        self.search_calls_used = 0
 
     async def load_context(self, task: ResearchTask) -> PipelineContext:
         assert task.run_id == self.context.run_id
@@ -118,6 +131,7 @@ class RecordingStore:
         context: PipelineContext,
         commit: PipelineStageCommit,
     ) -> None:
+        self._reconcile_test_reservation(commit)
         self.events.append(f"commit:{commit.stage}")
         self.commits.append(commit)
         self.completed[commit.stage] = commit.payload
@@ -125,14 +139,53 @@ class RecordingStore:
             self.crash_after_stage = None
             raise RuntimeError("simulated process crash after durable commit")
 
+    def _reconcile_test_reservation(self, commit: PipelineStageCommit) -> None:
+        reservation = self.external_reservations.get(commit.stage)
+        if reservation is not None:
+            reserved_collectors, reserved_search = reservation
+            actual_collectors = (
+                sum(item.get("request_count", 0) for item in commit.payload.get("results", []))
+                if commit.stage in {"COLLECT", "COLLECT_R2"}
+                else reserved_collectors
+            )
+            actual_search = (
+                sum(item.get("request_count", 0) for item in commit.payload.get("searches", []))
+                if commit.stage == "COMPETITOR_RESEARCH"
+                else reserved_search
+            )
+            self.collector_requests_used += actual_collectors - reserved_collectors
+            self.search_calls_used += actual_search - reserved_search
+
     async def remaining_agent_calls(self, context: PipelineContext) -> int:
         return self.remaining_calls
 
     async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]:
         return (
-            context.budget_limits["max_collector_requests_per_run"],
+            context.budget_limits["max_collector_requests_per_run"] - self.collector_requests_used,
             context.budget_limits["max_raw_signals_per_run"],
         )
+
+    async def reserve_external_budget(
+        self,
+        context: PipelineContext,
+        *,
+        stage: str,
+        collector_requests: int = 0,
+        search_calls: int = 0,
+    ) -> bool:
+        if stage in self.external_reservations:
+            return False
+        if (
+            self.collector_requests_used + collector_requests
+            > self.context.budget_limits["max_collector_requests_per_run"]
+            or self.search_calls_used + search_calls
+            > self.context.budget_limits["max_search_calls_per_run"]
+        ):
+            raise CollectionBudgetExhaustedError("test external request budget")
+        self.external_reservations[stage] = (collector_requests, search_calls)
+        self.collector_requests_used += collector_requests
+        self.search_calls_used += search_calls
+        return True
 
 
 class RecordingReasoner:
@@ -217,12 +270,57 @@ class UnavailableGithubCollector:
         )
 
 
+class InvalidContractCollector(FullCollector):
+    def __init__(
+        self,
+        *,
+        result_source: Source | None = None,
+        item_source: Source | None = None,
+        checkpoint_source: Source | None = None,
+        extra_requests: int = 0,
+        extra_items: int = 0,
+    ) -> None:
+        super().__init__()
+        self.result_source = result_source
+        self.item_source = item_source
+        self.checkpoint_source = checkpoint_source
+        self.extra_requests = extra_requests
+        self.extra_items = extra_items
+
+    async def collect(self, request: CollectRequest) -> CollectResult:
+        result = await super().collect(request)
+        item = result.items[0]
+        items = (
+            item.model_copy(update={"source": self.item_source or item.source}),
+            *(
+                item.model_copy(update={"external_id": f"extra-{index}"})
+                for index in range(self.extra_items)
+            ),
+        )
+        checkpoint = None
+        if self.checkpoint_source is not None:
+            checkpoint = {
+                "source": self.checkpoint_source.value,
+                "watermark": NOW.isoformat(),
+            }
+        return CollectResult.model_validate(
+            {
+                **result.model_dump(mode="json"),
+                "source": self.result_source or result.source,
+                "items": items,
+                "checkpoint": checkpoint,
+                "request_count": request.max_requests + self.extra_requests,
+            }
+        )
+
+
 class RepeatEvidenceCollector(FullCollector):
     async def collect(self, request: CollectRequest) -> CollectResult:
-        repeated_intent = request.intent.model_copy(
-            update={"id": "intent-1", "sources": (Source.HACKER_NEWS,)}
+        return CollectResult(
+            source=request.intent.sources[0],
+            availability=Availability.AVAILABLE,
+            request_count=1,
         )
-        return await super().collect(request.model_copy(update={"intent": repeated_intent}))
 
 
 class FullSearch:
@@ -278,6 +376,7 @@ class FullStore(RecordingStore):
         context: PipelineContext,
         commit: PipelineStageCommit,
     ) -> None:
+        self._reconcile_test_reservation(commit)
         self.events.append(f"commit:{commit.stage}")
         self.commits.append(commit)
         if commit.stage in {"COLLECT", "COLLECT_R2"}:
@@ -313,12 +412,23 @@ class FullStore(RecordingStore):
                     "We copy every line into a spreadsheet each week."
                 ),
                 observed_at=NOW,
+                source_created_at=NOW,
                 duplicate_group=("a" if "full-1" in evidence_id else "b") * 64,
                 author_id=f"author-{evidence_id}",
                 thread_id=f"thread-{evidence_id}",
             )
             for evidence_id in evidence_ids
         )
+
+
+class HistoricalFullStore(FullStore):
+    async def load_evidence(
+        self,
+        context: PipelineContext,
+        evidence_ids: tuple[str, ...],
+    ) -> tuple[CapturedEvidence, ...]:
+        values = await super().load_evidence(context, evidence_ids)
+        return tuple(replace(item, source_created_at=NOW - timedelta(days=30)) for item in values)
 
 
 class FullReasoner:
@@ -330,6 +440,8 @@ class FullReasoner:
         recommend_more: bool = False,
         critic_verdict: str = "RESEARCH_MORE",
         preserve_extra_opportunity: bool = False,
+        rephrase_round_two: bool = False,
+        only_first_research_more: bool = False,
     ) -> None:
         self.operations: list[SemanticOperation] = []
         self.reverse_outputs = reverse_outputs
@@ -337,6 +449,8 @@ class FullReasoner:
         self.recommend_more = recommend_more
         self.critic_verdict = critic_verdict
         self.preserve_extra_opportunity = preserve_extra_opportunity
+        self.rephrase_round_two = rephrase_round_two
+        self.only_first_research_more = only_first_research_more
         self.input_sizes: list[int] = []
         self.inputs: list[dict[str, object]] = []
 
@@ -521,13 +635,77 @@ class FullReasoner:
             output["memberships"][0]["pain_signal_id"] = call.request.input_json["pain_signals"][0][
                 "id"
             ]
+            target_problems = call.request.input_json.get("target_problems", [])
+            if target_problems:
+                output["problems"] = [dict(item) for item in target_problems]
+                output["clusters"] = [
+                    {
+                        "id": f"target-cluster-{index}",
+                        "canonical_problem_id": item["id"],
+                        "state": "PROVISIONAL",
+                        "last_growth_at": NOW.isoformat(),
+                    }
+                    for index, item in enumerate(target_problems)
+                ]
+                output["memberships"][0]["cluster_id"] = output["clusters"][0]["id"]
+                if self.rephrase_round_two:
+                    output["problems"] = [
+                        {**item, "summary": f"Rephrased semantic summary {index}"}
+                        for index, item in enumerate(output["problems"])
+                    ]
         elif operation is SemanticOperation.GAP:
             problem_id = call.request.input_json["problems"][0]["id"]
             output["gaps"][0]["canonical_problem_id"] = problem_id
             selected_evidence_id = call.request.input_json["evidence"][0]["id"]
+            competitor_evidence_id = call.request.input_json["competitor_snapshots"][0][
+                "evidence_id"
+            ]
             output["gaps"][0]["user_evidence_ids"] = [selected_evidence_id]
+            output["gaps"][0]["competitor_evidence_ids"] = [competitor_evidence_id]
             user_claim = next(claim for claim in output["claims"] if claim["kind"] == "USER_PAIN")
             user_claim["evidence_ids"] = [selected_evidence_id]
+            competitor_claim = next(
+                claim for claim in output["claims"] if claim["kind"] == "FEATURE"
+            )
+            competitor_claim["evidence_ids"] = [competitor_evidence_id]
+            competitor_claim["citations"][0]["evidence_id"] = competitor_evidence_id
+            output["competitor_evidence"][0]["id"] = competitor_evidence_id
+            target_contexts = call.request.input_json.get("target_opportunities", [])
+            if target_contexts:
+                gap_template = output["gaps"][0]
+                fit_template = output["opportunity_fit"][0]
+                output["gaps"] = []
+                output["opportunities"] = []
+                output["opportunity_fit"] = []
+                for index, target in enumerate(target_contexts):
+                    target_opportunity = target["opportunity"]
+                    target_problem = target["canonical_problem"]
+                    gap_id = f"target-gap-{index}"
+                    output["gaps"].append(
+                        {
+                            **gap_template,
+                            "id": gap_id,
+                            "canonical_problem_id": target_problem["id"],
+                            "statement": f"Targeted follow-up gap {index}",
+                        }
+                    )
+                    output["opportunities"].append(
+                        {
+                            "id": target_opportunity["id"],
+                            "gap_hypothesis_id": gap_id,
+                            "title": (
+                                f"Rephrased opportunity title {index}"
+                                if self.rephrase_round_two
+                                else target_opportunity["title"]
+                            ),
+                        }
+                    )
+                    output["opportunity_fit"].append(
+                        {
+                            **fit_template,
+                            "opportunity_id": target_opportunity["id"],
+                        }
+                    )
             if self.preserve_extra_opportunity and not selected_evidence_id.startswith("REDDIT:"):
                 output["gaps"].append(
                     {
@@ -576,8 +754,13 @@ class FullReasoner:
                 {**template, "opportunity_id": case["opportunity_id"]}
                 for case in call.request.input_json["cases"]
             ]
+            if self.only_first_research_more:
+                for item in output["results"][1:]:
+                    item["verdict"] = "REJECT"
             if self.recommend_more:
                 for item in output["results"]:
+                    if item["verdict"] != "RESEARCH_MORE":
+                        continue
                     item["recommended_intents"] = [
                         {
                             "id": "follow-up-1",
@@ -630,6 +813,18 @@ class PartialSourceReasoner(FullReasoner):
         output = dict(result.output_json)
         intents = [dict(item) for item in output["intents"]]
         intents[0]["sources"] = ["HACKER_NEWS", "GITHUB"]
+        return result.model_copy(update={"output_json": {**output, "intents": intents}})
+
+
+class UnsupportedSourceReasoner(FullReasoner):
+    async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
+        result = await super().run(context, call)
+        if call.request.task is not SemanticOperation.QUERY_PLAN:
+            return result
+        assert result.output_json is not None
+        output = dict(result.output_json)
+        intents = [dict(item) for item in output["intents"]]
+        intents[0]["sources"] = ["STATIC_WEB"]
         return result.model_copy(update={"output_json": {**output, "intents": intents}})
 
 
@@ -718,6 +913,50 @@ class BudgetStore(RecordingStore):
 class NoCollectionBudgetStore(FullStore):
     async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]:
         return (0, 0)
+
+
+class CrashAtExternalBoundaryStore(FullStore):
+    def __init__(
+        self,
+        pipeline_context: PipelineContext,
+        events: list[str],
+        *,
+        stage: str,
+        after_reservation: bool,
+    ) -> None:
+        super().__init__(pipeline_context, events)
+        self.boundary_stage = stage
+        self.after_reservation = after_reservation
+        self.crashed = False
+
+    async def reserve_external_budget(
+        self,
+        context: PipelineContext,
+        *,
+        stage: str,
+        collector_requests: int = 0,
+        search_calls: int = 0,
+    ) -> bool:
+        admitted = await super().reserve_external_budget(
+            context,
+            stage=stage,
+            collector_requests=collector_requests,
+            search_calls=search_calls,
+        )
+        if self.after_reservation and stage == self.boundary_stage and not self.crashed:
+            self.crashed = True
+            raise RuntimeError("simulated crash after durable external reservation")
+        return admitted
+
+    async def commit_stage(
+        self,
+        context: PipelineContext,
+        commit: PipelineStageCommit,
+    ) -> None:
+        if not self.after_reservation and commit.stage == self.boundary_stage and not self.crashed:
+            self.crashed = True
+            raise RuntimeError("simulated crash after external response before stage commit")
+        await super().commit_stage(context, commit)
 
 
 class RecordingArtifactWriter:
@@ -883,6 +1122,65 @@ async def test_resume_skips_durably_completed_semantic_and_collection_stages() -
         "QUERY_PLAN",
         "COLLECT",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["COLLECT", "COMPETITOR_RESEARCH"])
+@pytest.mark.parametrize("after_reservation", [True, False])
+async def test_external_request_reservation_blocks_replay_after_reclaim(
+    stage: str,
+    after_reservation: bool,
+) -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline_context = context(run_id, task_id)
+    store = CrashAtExternalBoundaryStore(
+        pipeline_context,
+        [],
+        stage=stage,
+        after_reservation=after_reservation,
+    )
+    collector = FullCollector()
+    search = FullSearch()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=FullReasoner(),
+        collectors={Source.HACKER_NEWS: collector},
+        competitor_search=search,
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+    task = research_task(run_id, task_id)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await pipeline(task)
+    calls_after_crash = len(collector.requests) if stage == "COLLECT" else len(search.calls)
+    expected_calls = 0 if after_reservation else (4 if stage == "COLLECT" else 1)
+    assert calls_after_crash == expected_calls
+
+    store.context = replace(
+        pipeline_context,
+        task_attempt=2,
+        worker_id="replacement-worker",
+    )
+    task.attempt_count = 2
+    task.lease_owner = "replacement-worker"
+    reclaimed = task
+    with pytest.raises(TaskHandlerError) as failure:
+        await pipeline(reclaimed)
+
+    assert failure.value.kind is ErrorKind.INTEGRITY
+    assert failure.value.error_class == "ExternalAttemptIndeterminate"
+    assert (len(collector.requests) if stage == "COLLECT" else len(search.calls)) == (
+        calls_after_crash
+    )
+    if stage == "COLLECT":
+        assert (
+            store.collector_requests_used
+            <= pipeline_context.budget_limits["max_collector_requests_per_run"]
+        )
+    else:
+        assert store.search_calls_used <= pipeline_context.budget_limits["max_search_calls_per_run"]
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1447,36 @@ async def test_exact_eleven_call_budget_executes_coherent_second_round() -> None
 
 
 @pytest.mark.asyncio
+async def test_round_two_rephrasing_keeps_the_target_problem_and_opportunity_identity() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = FullReasoner(recommend_more=True, rephrase_round_two=True)
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector(), Source.REDDIT: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    await pipeline(research_task(run_id, task_id))
+
+    first_problem = store.completed["CLUSTER"]["problems"][0]
+    second_problem = store.completed["CLUSTER_R2"]["problems"][0]
+    first_opportunity = store.completed["GAP"]["opportunities"][0]
+    second_opportunity = store.completed["GAP_R2"]["opportunities"][0]
+    targets = store.completed["RESEARCH_MORE_CONTROL"]["intent_targets"]
+    assert second_problem == first_problem
+    assert second_opportunity["id"] == first_opportunity["id"]
+    assert second_opportunity["title"] == first_opportunity["title"]
+    assert targets[0]["opportunity"]["id"] == first_opportunity["id"]
+    assert targets[0]["canonical_problem"]["id"] == first_problem["id"]
+
+
+@pytest.mark.asyncio
 async def test_exact_ten_call_budget_stops_before_second_round() -> None:
     run_id = uuid4()
     task_id = uuid4()
@@ -1310,7 +1638,11 @@ async def test_focused_second_round_preserves_untargeted_first_round_opportunity
     task_id = uuid4()
     store = FullStore(context(run_id, task_id), [])
     store.remaining_calls = 5
-    reasoner = FullReasoner(recommend_more=True, preserve_extra_opportunity=True)
+    reasoner = FullReasoner(
+        recommend_more=True,
+        preserve_extra_opportunity=True,
+        only_first_research_more=True,
+    )
     pipeline = EvidencePipeline(
         store=store,
         reasoner=reasoner,
@@ -1472,6 +1804,7 @@ def test_large_evidence_batch_is_deterministically_bounded_with_omission_count()
             url=f"https://example.test/large/{index}",
             text="Repeated bounded pain text " * 500,
             observed_at=NOW,
+            source_created_at=NOW,
             duplicate_group=f"{index:064x}",
             author_id=f"author-{index}",
             thread_id=f"thread-{index}",
@@ -1715,6 +2048,27 @@ def test_pipeline_trend_volume_is_windowed_and_duplicate_groups_block_viral_grow
 
 
 @pytest.mark.asyncio
+async def test_evidence_cards_use_source_creation_time_not_collection_observation_time() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = HistoricalFullStore(context(run_id, task_id), [])
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=FullReasoner(),
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    await pipeline(research_task(run_id, task_id))
+
+    assert store.completed["CARD_SCORE"]["cards"][0]["observed_days"] == [
+        (NOW - timedelta(days=30)).replace(hour=0).isoformat().replace("+00:00", "Z")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_unknown_cluster_membership_is_rejected_instead_of_dropped() -> None:
     run_id = uuid4()
     task_id = uuid4()
@@ -1729,6 +2083,199 @@ async def test_unknown_cluster_membership_is_rejected_instead_of_dropped() -> No
 
     with pytest.raises(ValueError, match="unknown cluster"):
         await pipeline(research_task(run_id, task_id))
+
+
+@pytest.mark.asyncio
+async def test_query_plan_rejects_sources_not_declared_available_to_the_reasoner() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=UnsupportedSourceReasoner(),
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ValueError, match="unavailable collection sources: STATIC_WEB"):
+        await pipeline(research_task(run_id, task_id))
+
+    query_input = store.completed.get("QUERY_PLAN")
+    assert query_input is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("collector", "message"),
+    [
+        (InvalidContractCollector(result_source=Source.REDDIT), "result source"),
+        (InvalidContractCollector(item_source=Source.REDDIT), "item source"),
+        (InvalidContractCollector(checkpoint_source=Source.REDDIT), "checkpoint source"),
+        (InvalidContractCollector(extra_requests=1), "request budget"),
+        (InvalidContractCollector(extra_items=1), "signal budget"),
+    ],
+)
+async def test_collector_results_must_match_the_scheduled_source_and_job_budget(
+    collector: InvalidContractCollector,
+    message: str,
+) -> None:
+    request = CollectRequest.model_validate(
+        {
+            "mission_revision_id": uuid4(),
+            "intent": {
+                "id": "bounded-collector",
+                "kind": "BROAD",
+                "concept": "invoice pain",
+                "sources": ["HACKER_NEWS"],
+                "rationale": "bounded test",
+            },
+            "since": NOW - timedelta(days=1),
+            "until": NOW,
+            "max_requests": 1,
+            "max_signals": 1,
+        }
+    )
+    result = await collector.collect(request)
+
+    (validated,) = _validate_collection_contract(
+        ((Source.HACKER_NEWS, collector, request),),
+        (result,),
+    )
+
+    assert validated.source is Source.HACKER_NEWS
+    assert validated.availability is Availability.SOURCE_UNAVAILABLE
+    assert validated.items == ()
+    assert validated.request_count == request.max_requests
+    assert validated.warnings[0].code == "COLLECTOR_CONTRACT_VIOLATION"
+    assert message in validated.warnings[0].message
+
+
+@pytest.mark.asyncio
+async def test_contract_violating_collector_does_not_erase_a_valid_peer_source() -> None:
+    intent = {
+        "id": "peer-source",
+        "kind": "BROAD",
+        "concept": "invoice pain",
+        "sources": ["HACKER_NEWS", "REDDIT"],
+        "rationale": "partial source isolation",
+    }
+    requests = tuple(
+        CollectRequest.model_validate(
+            {
+                "mission_revision_id": uuid4(),
+                "intent": intent,
+                "since": NOW - timedelta(days=1),
+                "until": NOW,
+                "max_requests": 1,
+                "max_signals": 1,
+            }
+        )
+        for _ in range(2)
+    )
+    invalid = InvalidContractCollector(result_source=Source.REDDIT)
+    valid = FullCollector()
+    invalid_result = await invalid.collect(requests[0])
+    valid_result = (await valid.collect(requests[1])).model_copy(
+        update={
+            "source": Source.REDDIT,
+            "items": tuple(
+                item.model_copy(update={"source": Source.REDDIT})
+                for item in (await valid.collect(requests[1])).items
+            ),
+        }
+    )
+
+    results = _validate_collection_contract(
+        (
+            (Source.HACKER_NEWS, invalid, requests[0]),
+            (Source.REDDIT, valid, requests[1]),
+        ),
+        (invalid_result, valid_result),
+    )
+
+    assert results[0].availability is Availability.SOURCE_UNAVAILABLE
+    assert results[1].availability is Availability.AVAILABLE
+    assert results[1].items[0].source is Source.REDDIT
+
+    results_with_extra = _validate_collection_contract(
+        ((Source.REDDIT, valid, requests[1]),),
+        (valid_result, invalid_result),
+    )
+    assert results_with_extra[0].availability is Availability.AVAILABLE
+    assert results_with_extra[0].warnings[-1].code == "COLLECTOR_CONTRACT_VIOLATION"
+    assert "extra results" in results_with_extra[0].warnings[-1].message
+
+
+def test_gap_evidence_gate_is_scoped_to_the_exact_opportunity_gap() -> None:
+    batch = GapResearchBatch.model_validate(
+        {
+            "claims": [],
+            "competitors": [],
+            "competitor_evidence": [
+                {
+                    "id": "competitor-1",
+                    "competitor_id": "manual-1",
+                    "source_url": "https://competitor.test/manual",
+                    "captured_excerpt": "Manual invoice work",
+                    "observed_at": NOW,
+                    "content_hash": "c" * 64,
+                    "evidence_kind": "WORKAROUND",
+                    "claim_ids": ["claim-1"],
+                }
+            ],
+            "gaps": [
+                {
+                    "id": "gap-complete",
+                    "canonical_problem_id": "problem-1",
+                    "gap_type": "WORKFLOW",
+                    "statement": "A complete gap",
+                    "user_evidence_ids": ["user-1"],
+                    "competitor_evidence_ids": ["competitor-1"],
+                },
+                {
+                    "id": "gap-user-only",
+                    "canonical_problem_id": "problem-2",
+                    "gap_type": "WORKFLOW",
+                    "statement": "A gap without competitor evidence",
+                    "user_evidence_ids": ["user-2"],
+                    "competitor_evidence_ids": ["competitor-missing"],
+                },
+            ],
+            "opportunities": [
+                {
+                    "id": "opportunity-complete",
+                    "gap_hypothesis_id": "gap-complete",
+                    "title": "Complete opportunity",
+                },
+                {
+                    "id": "opportunity-user-only",
+                    "gap_hypothesis_id": "gap-user-only",
+                    "title": "Incomplete opportunity",
+                },
+            ],
+            "opportunity_fit": [],
+        }
+    )
+
+    assert _gap_evidence_present(batch, "opportunity-complete") is True
+    assert _gap_evidence_present(batch, "opportunity-user-only") is False
+
+
+def test_competitor_capture_identity_preserves_observation_lineage() -> None:
+    snapshot = FetchSnapshot.model_validate(
+        {
+            "url": "https://competitor.test/manual",
+            "final_url": "https://competitor.test/manual",
+            "text": "Manual invoice work",
+            "content_type": "text/plain",
+            "sha256": "c" * 64,
+            "observed_at": NOW,
+        }
+    )
+
+    assert _competitor_snapshot_evidence_id(snapshot) != _competitor_snapshot_evidence_id(
+        snapshot.model_copy(update={"observed_at": NOW + timedelta(days=1)})
+    )
 
 
 @pytest.mark.asyncio
@@ -1821,7 +2368,7 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
             "author_identity": "alice",
             "title": "Invoice reconciliation takes hours",
             "body": "We copy every line into a spreadsheet each week.",
-            "source_created_at": NOW.isoformat(),
+            "source_created_at": (NOW - timedelta(days=30)).isoformat(),
         }
         payload = {
             "results": [
@@ -1882,12 +2429,52 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
         assert any(
             candidate.identifier == "HACKER_NEWS:hn-42:r1" for candidate in existing.candidates
         )
+        (captured,) = await store.load_evidence(
+            pipeline_context,
+            ("HACKER_NEWS:hn-42:r1",),
+        )
+        assert captured.observed_at == NOW
+        assert captured.source_created_at == NOW - timedelta(days=30)
+        with pytest.raises(ValueError, match="source_created_at changed"):
+            await store.commit_stage(
+                pipeline_context,
+                PipelineStageCommit(
+                    stage="COLLECT_R2",
+                    idempotency_key=str(uuid5(scheduled.run.id, "pipeline:COLLECT_R2:v1")),
+                    payload={
+                        "results": [
+                            {
+                                "source": "HACKER_NEWS",
+                                "availability": "AVAILABLE",
+                                "items": [
+                                    {
+                                        **item,
+                                        "source_created_at": NOW.isoformat(),
+                                    }
+                                ],
+                                "request_count": 1,
+                            }
+                        ],
+                        "item_count": 1,
+                    },
+                ),
+            )
 
         async with database.session() as session:
             first_run = await session.get(ResearchRun, scheduled.run.id)
             first_task = await session.get(ResearchTask, scheduled.task.id)
+            raw_signal = await session.scalar(
+                select(RawSignal).where(
+                    RawSignal.source == "HACKER_NEWS",
+                    RawSignal.external_id == "hn-42",
+                )
+            )
             assert first_run is not None
             assert first_task is not None
+            assert raw_signal is not None
+            assert raw_signal.source_created_at == NOW - timedelta(days=30)
+            assert first_run.budget_used["collector_requests"] == 2
+            assert "COLLECT_R2" not in first_task.checkpoint["pipeline"]["stages"]
             first_run.status = "COMPLETED"
             first_run.completed_at = NOW
             first_task.status = "SUCCEEDED"
@@ -2114,6 +2701,8 @@ async def test_coherent_second_round_uses_exact_durable_agent_call_budget(
 ) -> None:
     database = Database.from_url(migrated_postgres_url)
     now = datetime.now(UTC)
+    cleanup_run_id: UUID | None = None
+    cleanup_task_id: UUID | None = None
     try:
         async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
             _, revision = await uow.missions.create_with_revision(
@@ -2146,6 +2735,8 @@ async def test_coherent_second_round_uses_exact_durable_agent_call_budget(
             scheduled.task.attempt_count = 1
             scheduled.task.lease_owner = "test-worker"
             scheduled.task.lease_expires_at = now + timedelta(minutes=5)
+            cleanup_run_id = scheduled.run.id
+            cleanup_task_id = scheduled.task.id
             await uow.commit()
 
         provider = FullProvider()
@@ -2200,6 +2791,19 @@ async def test_coherent_second_round_uses_exact_durable_agent_call_budget(
             SemanticOperation.CRITIC,
         ]
     finally:
+        if cleanup_run_id is not None and cleanup_task_id is not None:
+            async with database.session() as session:
+                cleanup_run = await session.get(ResearchRun, cleanup_run_id)
+                cleanup_task = await session.get(ResearchTask, cleanup_task_id)
+                if cleanup_run is not None and cleanup_run.status in {"QUEUED", "RUNNING"}:
+                    cleanup_run.status = "CANCELLED"
+                    cleanup_run.completed_at = now
+                if cleanup_task is not None and cleanup_task.status in {"PENDING", "LEASED"}:
+                    cleanup_task.status = "CANCELLED"
+                    cleanup_task.completed_at = now
+                    cleanup_task.lease_owner = None
+                    cleanup_task.lease_expires_at = None
+                await session.commit()
         await database.dispose()
 
 

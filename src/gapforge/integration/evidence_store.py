@@ -220,6 +220,7 @@ class SqlAlchemyEvidencePipelineStore:
                 url=raw.canonical_url,
                 text="\n".join(value for value in (revision.title, revision.body) if value),
                 observed_at=revision.observed_at,
+                source_created_at=raw.source_created_at or revision.observed_at,
                 duplicate_group=revision.duplicate_group_key,
                 author_id=raw.author_pseudonym,
                 thread_id=raw.parent_external_id or raw.external_id,
@@ -268,6 +269,18 @@ class SqlAlchemyEvidencePipelineStore:
             durable_payload = commit.payload
             if commit.stage in {"COLLECT", "COLLECT_R2"}:
                 try:
+                    results = tuple(
+                        CollectResult.model_validate(value) for value in commit.payload["results"]
+                    )
+                    await self._reconcile_external_budget(
+                        session,
+                        task,
+                        run,
+                        stage=commit.stage,
+                        actual={
+                            "collector_requests": sum(result.request_count for result in results)
+                        },
+                    )
                     durable_payload = await self._persist_collection(
                         session,
                         context,
@@ -279,14 +292,13 @@ class SqlAlchemyEvidencePipelineStore:
             elif commit.stage == "COMPETITOR_RESEARCH":
                 try:
                     checkpoint = CompetitorResearchCheckpoint.model_validate(commit.payload)
-                    await self._admit_budget(
+                    await self._reconcile_external_budget(
                         session,
-                        context.run_id,
-                        {
-                            "search_calls": (
-                                sum(item.request_count for item in checkpoint.searches),
-                                "max_search_calls_per_run",
-                            )
+                        task,
+                        run,
+                        stage=commit.stage,
+                        actual={
+                            "search_calls": sum(item.request_count for item in checkpoint.searches)
                         },
                     )
                 except CollectionBudgetExhaustedError:
@@ -365,6 +377,68 @@ class SqlAlchemyEvidencePipelineStore:
                 ),
             )
 
+    async def reserve_external_budget(
+        self,
+        context: PipelineContext,
+        *,
+        stage: str,
+        collector_requests: int = 0,
+        search_calls: int = 0,
+    ) -> bool:
+        requested = {
+            counter: amount
+            for counter, amount in {
+                "collector_requests": collector_requests,
+                "search_calls": search_calls,
+            }.items()
+            if amount
+        }
+        if not requested:
+            return True
+        async with self.session_factory() as session:
+            task = await session.scalar(
+                select(models.ResearchTask)
+                .where(models.ResearchTask.id == context.task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(models.ResearchRun)
+                .where(models.ResearchRun.id == context.run_id)
+                .with_for_update()
+            )
+            if task is None or run is None:
+                raise LookupError("research task or run no longer exists")
+            _assert_stage_lease(task, run, context, self.clock())
+            reservations = _pipeline_reservations(task.checkpoint)
+            if stage in reservations:
+                await session.rollback()
+                return False
+            await self._admit_budget(
+                session,
+                context.run_id,
+                {
+                    counter: (
+                        amount,
+                        (
+                            "max_collector_requests_per_run"
+                            if counter == "collector_requests"
+                            else "max_search_calls_per_run"
+                        ),
+                    )
+                    for counter, amount in requested.items()
+                },
+            )
+            reservations[stage] = {
+                "reserved": requested,
+                "task_attempt": context.task_attempt,
+                "worker_id": context.worker_id,
+            }
+            pipeline = dict(cast(dict[str, Any], task.checkpoint.get("pipeline", {})))
+            pipeline["external_reservations"] = reservations
+            task.checkpoint = {**task.checkpoint, "pipeline": pipeline}
+            await session.commit()
+            return True
+
     async def _persist_collection(
         self,
         session: AsyncSession,
@@ -372,24 +446,21 @@ class SqlAlchemyEvidencePipelineStore:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         results = tuple(CollectResult.model_validate(value) for value in payload["results"])
-        request_count = sum(result.request_count for result in results)
         items = tuple(item for result in results for item in result.items)
         await self._admit_budget(
             session,
             context.run_id,
             {
-                "collector_requests": (
-                    request_count,
-                    "max_collector_requests_per_run",
-                ),
                 "raw_signals": (len(items), "max_raw_signals_per_run"),
             },
         )
 
         evidence_ids: list[str] = []
+        examined_items: dict[tuple[str, str], datetime] = {}
         for item in items:
-            evidence_id = await self._persist_item(session, item)
+            evidence_id, source_created_at = await self._persist_item(session, item)
             evidence_ids.append(evidence_id)
+            examined_items[(item.source.value, item.external_id)] = source_created_at
         for result in results:
             if result.checkpoint is None:
                 continue
@@ -422,16 +493,63 @@ class SqlAlchemyEvidencePipelineStore:
             "examined_volume": payload.get("examined_volume", {}),
             "examined_items": [
                 {
-                    "source": item.source.value,
-                    "external_id": item.external_id,
-                    "source_created_at": item.source_created_at.isoformat(),
+                    "source": source,
+                    "external_id": external_id,
+                    "source_created_at": source_created_at.isoformat(),
                 }
-                for item in sorted(
-                    {(item.source.value, item.external_id): item for item in items}.values(),
-                    key=lambda value: (value.source.value, value.external_id),
-                )
+                for (source, external_id), source_created_at in sorted(examined_items.items())
             ],
         }
+
+    async def _reconcile_external_budget(
+        self,
+        session: AsyncSession,
+        task: models.ResearchTask,
+        run: models.ResearchRun,
+        *,
+        stage: str,
+        actual: dict[str, int],
+    ) -> None:
+        reservations = _pipeline_reservations(task.checkpoint)
+        reservation = reservations.get(stage)
+        if reservation is None:
+            await self._admit_budget(
+                session,
+                run.id,
+                {
+                    counter: (
+                        amount,
+                        (
+                            "max_collector_requests_per_run"
+                            if counter == "collector_requests"
+                            else "max_search_calls_per_run"
+                        ),
+                    )
+                    for counter, amount in actual.items()
+                },
+            )
+            return
+        reserved = reservation.get("reserved")
+        if not isinstance(reserved, dict):
+            raise StageConflictError("external request reservation is invalid")
+        if any(
+            not isinstance(reserved.get(counter), int) or amount > reserved[counter]
+            for counter, amount in actual.items()
+        ):
+            raise StageConflictError("external request usage exceeded its reservation")
+        run.budget_used = {
+            **run.budget_used,
+            **{
+                counter: int(run.budget_used.get(counter, 0))
+                - (int(reserved.get(counter, 0)) - amount)
+                for counter, amount in actual.items()
+            },
+        }
+        reservations[stage] = {**reservation, "actual": actual}
+        pipeline = dict(cast(dict[str, Any], task.checkpoint.get("pipeline", {})))
+        pipeline["external_reservations"] = reservations
+        task.checkpoint = {**task.checkpoint, "pipeline": pipeline}
+        await session.flush()
 
     async def _admit_budget(
         self,
@@ -471,7 +589,7 @@ class SqlAlchemyEvidencePipelineStore:
         self,
         session: AsyncSession,
         item: CollectedItem,
-    ) -> str:
+    ) -> tuple[str, datetime]:
         raw_identifier = f"{item.source.value}:{item.external_id}"
         raw = await session.scalar(
             select(models.RawSignal).where(
@@ -511,6 +629,10 @@ class SqlAlchemyEvidencePipelineStore:
             session.add(raw)
             await session.flush()
         else:
+            if raw.source_created_at is None:
+                raw.source_created_at = item.source_created_at
+            if raw.source_created_at != item.source_created_at:
+                raise ValueError("source_created_at changed for an existing raw signal")
             raw.canonical_url = normalize_url(str(item.canonical_url))
             raw.parent_external_id = item.parent_thread_id
             raw.author_pseudonym = author.pseudonym if author else None
@@ -527,7 +649,7 @@ class SqlAlchemyEvidencePipelineStore:
         )
         latest = latest_before
         if latest is not None and latest.content_hash.hex() == digest:
-            return latest.domain_revision_id
+            return latest.domain_revision_id, raw.source_created_at or item.source_created_at
         duplicate_group = await self._resolve_duplicate_group(
             session,
             item,
@@ -556,7 +678,7 @@ class SqlAlchemyEvidencePipelineStore:
             )
         )
         await session.flush()
-        return domain_revision_id
+        return domain_revision_id, raw.source_created_at or item.source_created_at
 
     async def _resolve_duplicate_group(
         self,
@@ -632,6 +754,16 @@ def _pipeline_stages(checkpoint: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(stages, dict):
         raise StageConflictError("pipeline stage checkpoint must be an object")
     return dict(stages)
+
+
+def _pipeline_reservations(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    pipeline = checkpoint.get("pipeline", {})
+    if not isinstance(pipeline, dict):
+        raise StageConflictError("pipeline checkpoint must be an object")
+    reservations = pipeline.get("external_reservations", {})
+    if not isinstance(reservations, dict):
+        raise StageConflictError("external request reservations must be an object")
+    return dict(reservations)
 
 
 def _payload_sha256(payload: dict[str, Any]) -> str:
