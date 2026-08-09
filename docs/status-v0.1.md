@@ -16,7 +16,7 @@ This is the first file to read after interruption. It records only reviewed/push
 - [x] Lane A developer dispatched.
 - [x] Lane B developer dispatched.
 - [ ] Lane A PR reviewed and merged to integration.
-- [ ] Lane B PR reviewed and merged to integration.
+- [x] Lane B PR reviewed and merged to integration.
 - [ ] Cross-lane integration complete.
 - [ ] Full CI and Docker validation complete.
 - [ ] Final integration PR reviewed and merged to `main`.
@@ -26,9 +26,9 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `d68ce49` |
-| Lane A | `agent/platform-foundation` | pending | implementing | `889ac37` |
-| Lane B | `agent/research-engine` | pending | implementing | `889ac37` |
+| Integration | `integration/v0.1` | #4 | active draft | `0a21190` |
+| Lane A | `agent/platform-foundation` | #5 | implementing/reviewed through A5 | `cfc7533` |
+| Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 
 GitHub issues:
 
@@ -46,16 +46,18 @@ Completed:
 - Two isolated worktrees created and both developer agents dispatched.
 - Draft integration PR #4 opened against `main`.
 - Reference repository architecture/license review recorded in `docs/reference-review-v0.1.md`.
+- Lane B B1-B9 reviewed with 74 tests, Ruff, format, strict mypy, skill validation,
+  diff hygiene, and bytecode hygiene passing; PR #6 squash-merged as `0a21190`.
 
 In progress:
 
-- Monitor lane checkpoints and prepare independent reviews when draft PRs open.
+- Lane A is implementing A6-A8 after reviewed A1-A5 checkpoints and requested fixes.
 
 Exact next action:
 
-1. Monitor both agents without editing their owned paths.
-2. Record branch, PR, tests, and last pushed commit after each checkpoint.
-3. Review each draft PR against its lane checklist and canonical spec.
+1. Review Lane A A6-A8 and merge PR #5 only after all platform checks pass.
+2. Implement cross-lane adapters and end-to-end orchestration on `integration/v0.1`.
+3. Run bare repo checks, PostgreSQL, Docker/Compose, fake E2E, and live smoke gates.
 
 ## Recovery rules
 
