@@ -29,20 +29,31 @@ def _config(url: str) -> Config:
     return config
 
 
-async def _clear_guarded_rows(url: str) -> None:
+async def _clear_application_rows(url: str) -> None:
     database = Database.from_url(url)
     try:
         async with database.session() as session:
-            exists = await session.scalar(
-                text("SELECT to_regclass('product_hypotheses') IS NOT NULL")
+            existing = set(
+                await session.scalars(
+                    text(
+                        "SELECT tablename FROM pg_tables "
+                        "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                    )
+                )
             )
-            if exists:
-                await session.execute(text("ALTER TABLE product_hypotheses DISABLE TRIGGER USER"))
-                await session.execute(text("DELETE FROM product_hypotheses"))
-                await session.execute(text("ALTER TABLE product_hypotheses ENABLE TRIGGER USER"))
+            tables = sorted(existing & set(models.Base.metadata.tables))
+            if tables:
+                quoted = ", ".join(f'"{table}"' for table in tables)
+                await session.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
                 await session.commit()
     finally:
         await database.dispose()
+
+
+def _restore_clean_head(config: Config, url: str) -> None:
+    asyncio.run(_clear_application_rows(url))
+    command.downgrade(config, "base")
+    command.upgrade(config, "head")
 
 
 async def _seed_validated(
@@ -100,109 +111,120 @@ async def _product_hypothesis_triggers(url: str) -> set[str]:
 @pytest.mark.postgres
 def test_empty_product_hypothesis_guard_upgrade_has_exact_catalog(postgres_url: str) -> None:
     config = _config(postgres_url)
-    asyncio.run(_clear_guarded_rows(postgres_url))
-    command.downgrade(config, "base")
-    command.upgrade(config, PRE_GUARD_REVISION)
-    command.upgrade(config, "head")
+    asyncio.run(_clear_application_rows(postgres_url))
 
-    async def inspect_catalog() -> tuple[set[str], set[str]]:
-        database = Database.from_url(postgres_url)
-        try:
-            async with database.session() as session:
-                constraints = set(
-                    await session.scalars(
-                        text(
-                            "SELECT conname FROM pg_constraint "
-                            "WHERE conrelid = 'product_hypotheses'::regclass"
+    try:
+        command.downgrade(config, "base")
+        command.upgrade(config, PRE_GUARD_REVISION)
+        command.upgrade(config, "head")
+
+        async def inspect_catalog() -> tuple[set[str], set[str]]:
+            database = Database.from_url(postgres_url)
+            try:
+                async with database.session() as session:
+                    constraints = set(
+                        await session.scalars(
+                            text(
+                                "SELECT conname FROM pg_constraint "
+                                "WHERE conrelid = 'product_hypotheses'::regclass"
+                            )
                         )
                     )
-                )
-                triggers = set(
-                    await session.scalars(
-                        text(
-                            "SELECT tgname FROM pg_trigger "
-                            "WHERE tgrelid = 'product_hypotheses'::regclass "
-                            "AND NOT tgisinternal"
+                    triggers = set(
+                        await session.scalars(
+                            text(
+                                "SELECT tgname FROM pg_trigger "
+                                "WHERE tgrelid = 'product_hypotheses'::regclass "
+                                "AND NOT tgisinternal"
+                            )
                         )
                     )
-                )
-                return constraints, triggers
-        finally:
-            await database.dispose()
+                    return constraints, triggers
+            finally:
+                await database.dispose()
 
-    constraints, triggers = asyncio.run(inspect_catalog())
-    assert {
-        "ck_product_hypotheses_bounded_requested_by",
-        "ck_product_hypotheses_bounded_content",
-        "uq_product_hypotheses_assessment_request",
-    } <= constraints
-    assert triggers == {
-        "trg_product_hypotheses_validate_insert",
-        "trg_product_hypotheses_append_only",
-    }
+        constraints, triggers = asyncio.run(inspect_catalog())
+        assert {
+            "ck_product_hypotheses_bounded_requested_by",
+            "ck_product_hypotheses_bounded_content",
+            "uq_product_hypotheses_assessment_request",
+        } <= constraints
+        assert triggers == {
+            "trg_product_hypotheses_validate_insert",
+            "trg_product_hypotheses_append_only",
+        }
+    finally:
+        _restore_clean_head(config, postgres_url)
 
 
 @pytest.mark.postgres
 def test_guard_upgrade_refuses_legacy_rows_without_data_loss(postgres_url: str) -> None:
     config = _config(postgres_url)
-    asyncio.run(_clear_guarded_rows(postgres_url))
-    command.downgrade(config, "base")
-    command.upgrade(config, PRE_GUARD_REVISION)
-    assessment, card = asyncio.run(_seed_validated(postgres_url))
+    asyncio.run(_clear_application_rows(postgres_url))
 
-    async def insert_legacy() -> None:
-        database = Database.from_url(postgres_url)
-        try:
-            async with database.session() as session:
-                await session.execute(
-                    insert(models.ProductHypothesis).values(
-                        id=uuid4(),
-                        assessment_id=assessment.id,
-                        requested_by="legacy-request",
-                        content={"proposition": "Legacy content without canonical schema"},
-                        evidence_card_id=card.id,
+    try:
+        command.downgrade(config, "base")
+        command.upgrade(config, PRE_GUARD_REVISION)
+        assessment, card = asyncio.run(_seed_validated(postgres_url))
+
+        async def insert_legacy() -> None:
+            database = Database.from_url(postgres_url)
+            try:
+                async with database.session() as session:
+                    await session.execute(
+                        insert(models.ProductHypothesis).values(
+                            id=uuid4(),
+                            assessment_id=assessment.id,
+                            requested_by="legacy-request",
+                            content={"proposition": "Legacy content without canonical schema"},
+                            evidence_card_id=card.id,
+                        )
                     )
-                )
-                await session.commit()
-        finally:
-            await database.dispose()
+                    await session.commit()
+            finally:
+                await database.dispose()
 
-    asyncio.run(insert_legacy())
-    with pytest.raises(DBAPIError, match="legacy Product Hypotheses"):
-        command.upgrade(config, "head")
-    assert asyncio.run(_revision_and_product_count(postgres_url)) == (PRE_GUARD_REVISION, 1)
-
-    asyncio.run(_clear_guarded_rows(postgres_url))
-    command.upgrade(config, "head")
+        asyncio.run(insert_legacy())
+        with pytest.raises(DBAPIError, match="legacy Product Hypotheses"):
+            command.upgrade(config, "head")
+        assert asyncio.run(_revision_and_product_count(postgres_url)) == (
+            PRE_GUARD_REVISION,
+            1,
+        )
+    finally:
+        _restore_clean_head(config, postgres_url)
 
 
 @pytest.mark.postgres
 def test_guard_downgrade_refuses_rows_without_data_loss(postgres_url: str) -> None:
     config = _config(postgres_url)
-    asyncio.run(_clear_guarded_rows(postgres_url))
-    command.downgrade(config, "base")
-    command.upgrade(config, "head")
-    assessment, _ = asyncio.run(_seed_validated(postgres_url))
+    asyncio.run(_clear_application_rows(postgres_url))
 
-    async def create() -> None:
-        database = Database.from_url(postgres_url)
-        try:
-            await ProductHypothesisService(database.session_factory).create(
-                assessment.id,
-                request_id="downgrade-guard",
-                proposition="Preserve this append-only hypothesis",
-            )
-        finally:
-            await database.dispose()
+    try:
+        command.downgrade(config, "base")
+        command.upgrade(config, "head")
+        assessment, _ = asyncio.run(_seed_validated(postgres_url))
 
-    asyncio.run(create())
-    with pytest.raises(DBAPIError, match="cannot downgrade"):
+        async def create() -> None:
+            database = Database.from_url(postgres_url)
+            try:
+                await ProductHypothesisService(database.session_factory).create(
+                    assessment.id,
+                    request_id="downgrade-guard",
+                    proposition="Preserve this append-only hypothesis",
+                )
+            finally:
+                await database.dispose()
+
+        asyncio.run(create())
+        with pytest.raises(DBAPIError, match="cannot downgrade"):
+            command.downgrade(config, PRE_GUARD_REVISION)
+        assert asyncio.run(_revision_and_product_count(postgres_url)) == (GUARD_REVISION, 1)
+
+        asyncio.run(_clear_application_rows(postgres_url))
         command.downgrade(config, PRE_GUARD_REVISION)
-    assert asyncio.run(_revision_and_product_count(postgres_url)) == (GUARD_REVISION, 1)
-
-    asyncio.run(_clear_guarded_rows(postgres_url))
-    command.downgrade(config, PRE_GUARD_REVISION)
-    assert asyncio.run(_product_hypothesis_triggers(postgres_url)) == {
-        "trg_product_hypotheses_append_only"
-    }
-    command.upgrade(config, "head")
+        assert asyncio.run(_product_hypothesis_triggers(postgres_url)) == {
+            "trg_product_hypotheses_append_only"
+        }
+    finally:
+        _restore_clean_head(config, postgres_url)
