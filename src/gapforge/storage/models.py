@@ -743,7 +743,7 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
         ),
         CheckConstraint(
             "output_json IS NULL OR (jsonb_typeof(output_json) = 'object' "
-            "AND octet_length(output_json::text) <= 20000)",
+            "AND octet_length(output_json::text) <= 32768)",
             name="bounded_object_output",
         ),
         CheckConstraint(

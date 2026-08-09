@@ -119,7 +119,7 @@ def upgrade() -> None:
         op.f("ck_agent_calls_bounded_object_output"),
         "agent_calls",
         "output_json IS NULL OR (jsonb_typeof(output_json) = 'object' "
-        "AND octet_length(output_json::text) <= 20000)",
+        "AND octet_length(output_json::text) <= 32768)",
     )
     op.create_check_constraint(
         op.f("ck_agent_calls_completed_output_sha256_length"),

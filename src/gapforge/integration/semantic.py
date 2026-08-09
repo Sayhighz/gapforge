@@ -75,8 +75,9 @@ class SemanticAdmissionError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _Admission:
-    lease_id: UUID
+    lease_id: UUID | None
     remaining_seconds: float
+    replay_result: provider_contracts.AgentResult | None = None
 
 
 class AuditedSemanticReasoner:
@@ -188,6 +189,11 @@ class AuditedSemanticReasoner:
             request_hash=request_hash,
             repair_attempt=repair_attempt,
         )
+        if admission.replay_result is not None:
+            return admission.replay_result
+        if admission.lease_id is None:  # pragma: no cover - exhaustive admission state
+            raise RuntimeError("provider admission omitted both lease and replay")
+        lease_id = admission.lease_id
         provider_request = provider_request.model_copy(
             update={
                 "timeout_seconds": max(
@@ -199,7 +205,7 @@ class AuditedSemanticReasoner:
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(
             self._heartbeat_provider_lease(
-                admission.lease_id,
+                lease_id,
                 run_id=context.run_id,
                 call_id=call_id,
                 stop=stop_heartbeat,
@@ -275,7 +281,7 @@ class AuditedSemanticReasoner:
             call_id=call_id,
             schema_hash=schema_hash,
             request_hash=request_hash,
-            lease_id=admission.lease_id,
+            lease_id=lease_id,
             result=provider_result,
         )
         return provider_result
@@ -372,12 +378,31 @@ class AuditedSemanticReasoner:
                         SemanticAdmissionKind.REPLAY_UNAVAILABLE,
                         "stale in-flight call was terminally audited and cannot be re-invoked",
                     )
-                elif run.status != "RUNNING" or run.deadline_at <= now:
+                else:
+                    existing = await session.get(AgentCall, call_id)
+                    if existing is not None:
+                        self._replay(
+                            existing,
+                            context=context,
+                            call=call,
+                            schema_hash=schema_hash,
+                            request_hash=request_hash,
+                        )
+                        admitted = _Admission(
+                            lease_id=None,
+                            remaining_seconds=0,
+                            replay_result=self._provider_result_from_audit(existing),
+                        )
+                if (
+                    denied is None
+                    and admitted is None
+                    and (run.status != "RUNNING" or run.deadline_at <= now)
+                ):
                     denied = SemanticAdmissionError(
                         SemanticAdmissionKind.DEADLINE_EXCEEDED,
                         "research run has no remaining execution time",
                     )
-                else:
+                elif denied is None and admitted is None:
                     same_call = await session.scalar(
                         select(ProviderCallLease).where(
                             ProviderCallLease.run_id == context.run_id,

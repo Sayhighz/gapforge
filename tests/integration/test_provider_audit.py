@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -89,6 +90,18 @@ class CancellationRecordingProvider(BlockingProvider):
         except asyncio.CancelledError:
             self.cancelled.set()
             raise
+
+
+class PausingAdmissionReasoner(AuditedSemanticReasoner):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.admission_reached = asyncio.Event()
+        self.continue_admission = asyncio.Event()
+
+    async def _admit(self, *args: Any, **kwargs: Any) -> Any:
+        self.admission_reached.set()
+        await self.continue_admission.wait()
+        return await super()._admit(*args, **kwargs)
 
 
 def test_factory_owns_configured_provider_selection_and_secret_boundary() -> None:
@@ -301,6 +314,48 @@ async def test_success_is_audited_once_and_replayed_without_provider_invocation(
         assert call_count == 1
         assert lease_count == 0
         assert run.budget_used == {"agent_calls": 1}
+    finally:
+        await _finish_context(database, context)
+        await database.dispose()
+
+
+async def test_canonical_20kb_output_round_trips_despite_jsonb_display_spacing(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context = await _running_context(database)
+    output = {f"k{index:02d}": "x" * 390 for index in range(50)}
+    compact_size = len(
+        json.dumps(
+            output,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    display_size = len(json.dumps(output, ensure_ascii=False, sort_keys=True).encode())
+    assert compact_size <= 20_000 < display_size
+    boundary = RecordingProvider([_provider_result(output)])
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="worker-i4",
+        provider_name="fake",
+    )
+    call = SemanticCall(
+        request=_domain_request(),
+        output_schema={"type": "object"},
+    )
+
+    try:
+        result = await reasoner.run(context, call)
+
+        assert result.status is domain.AgentStatus.COMPLETED
+        assert result.output_json == output
+        async with database.session() as session:
+            row = await session.get(AgentCall, UUID(call.request.call_id))
+        assert row is not None
+        assert row.output_json == output
     finally:
         await _finish_context(database, context)
         await database.dispose()
@@ -583,6 +638,57 @@ async def test_concurrent_same_call_id_is_denied_without_budget_or_duplicate_sub
         boundary.release.set()
         if not first.done():
             first.cancel()
+        await _finish_context(database, context)
+        await database.dispose()
+
+
+async def test_same_id_rechecks_audit_after_optimistic_lookup_before_admission(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context = await _running_context(database)
+    boundary = RecordingProvider([_provider_result({"pain": "one durable result"})])
+    delayed = PausingAdmissionReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="worker-i4",
+        provider_name="fake",
+    )
+    immediate = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="worker-i4",
+        provider_name="fake",
+    )
+    call = SemanticCall(
+        _domain_request(),
+        {
+            "type": "object",
+            "properties": {"pain": {"type": "string"}},
+            "required": ["pain"],
+            "additionalProperties": False,
+        },
+    )
+    delayed_call = asyncio.create_task(delayed.run(context, call))
+
+    try:
+        await asyncio.wait_for(delayed.admission_reached.wait(), timeout=2)
+        first = await immediate.run(context, call)
+        delayed.continue_admission.set()
+        replay = await asyncio.wait_for(delayed_call, timeout=2)
+
+        assert replay == first
+        assert len(boundary.requests) == 1
+        call_count, lease_count, run = await _counts(database, context.run_id)
+        assert call_count == 1
+        assert lease_count == 0
+        assert run.budget_used == {"agent_calls": 1}
+    finally:
+        delayed.continue_admission.set()
+        if not delayed_call.done():
+            delayed_call.cancel()
+            with suppress(asyncio.CancelledError):
+                await delayed_call
         await _finish_context(database, context)
         await database.dispose()
 

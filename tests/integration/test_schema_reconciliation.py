@@ -170,6 +170,8 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
         ]
         assert "(output_json IS NULL) = (output_sha256 IS NULL)" in output_hash_constraint
         assert "octet_length(output_sha256) = 32" in output_hash_constraint
+        bounded_output_constraint = constraint_definitions["ck_agent_calls_bounded_object_output"]
+        assert "octet_length((output_json)::text) <= 32768" in bounded_output_constraint
         assert columns["pain_signals"]["severity"]["nullable"] is False
         assert columns["pain_signals"]["frequency"]["nullable"] is False
         assert columns["raw_signal_revisions"]["domain_revision_id"]["nullable"] is False
