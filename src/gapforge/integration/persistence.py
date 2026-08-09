@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from gapforge.analysis.lifecycle import ReopenEvidence, can_reopen_rejected, transition_lifecycle
-from gapforge.analysis.normalization import normalize_text
+from gapforge.analysis.normalization import normalize_text, normalize_url
 from gapforge.domain import contracts as domain
 from gapforge.integration.mappers import (
     evidence_card_from_storage,
@@ -22,6 +22,7 @@ from gapforge.integration.mappers import (
     score_snapshot_to_storage_values,
     storage_uuid_for_identifier,
 )
+from gapforge.runtime.evidence_pipeline import PipelineContext, PipelineStageCommit
 from gapforge.scoring.engine import ValidationDecision, validation_decision
 from gapforge.storage import models
 
@@ -109,15 +110,25 @@ class MergeDecisionService:
 
 
 class ArtifactMissionRevision(Protocol):
-    id: UUID
+    @property
+    def id(self) -> UUID: ...
 
 
 class ArtifactContext(Protocol):
-    run_id: UUID
-    task_id: UUID
-    task_attempt: int
-    mission_revision: ArtifactMissionRevision
-    collection_until: datetime
+    @property
+    def run_id(self) -> UUID: ...
+
+    @property
+    def task_id(self) -> UUID: ...
+
+    @property
+    def task_attempt(self) -> int: ...
+
+    @property
+    def mission_revision(self) -> ArtifactMissionRevision: ...
+
+    @property
+    def collection_until(self) -> datetime: ...
 
 
 class ArtifactStageCommit(Protocol):
@@ -131,8 +142,8 @@ class ResearchArtifactWriter:
     async def persist_stage(
         self,
         session: AsyncSession,
-        context: ArtifactContext,
-        commit: ArtifactStageCommit,
+        context: PipelineContext,
+        commit: PipelineStageCommit,
     ) -> None:
         handlers = {
             "EXTRACT": self._persist_extract,
@@ -457,6 +468,25 @@ class ResearchArtifactWriter:
             )
         for evidence in competitor_evidence:
             identifier = _uuid_text(evidence.id, "competitor evidence")
+            canonical_observed_at = (
+                evidence.observed_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            )
+            evidence_identity = json.dumps(
+                [
+                    "competitor-evidence",
+                    normalize_url(str(evidence.source_url)),
+                    evidence.content_hash,
+                    canonical_observed_at,
+                ],
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if identifier != uuid5(_ARTIFACT_NAMESPACE, evidence_identity):
+                raise ValueError(
+                    "competitor evidence ID does not bind URL, content hash, and observed_at"
+                )
             await _add_or_verify(
                 session,
                 models.CompetitorEvidence,

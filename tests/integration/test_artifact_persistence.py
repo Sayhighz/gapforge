@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gapforge.analysis.normalization import normalize_text
+from gapforge.analysis.normalization import normalize_text, normalize_url
 from gapforge.domain.contracts import MissionRevision as DomainMissionRevision
 from gapforge.integration.mappers import storage_uuid_for_identifier
 from gapforge.integration.persistence import ResearchArtifactWriter
@@ -1075,14 +1075,20 @@ async def _seed_pipeline_context(
         collection_until=NOW,
     )
     opportunity_id = uuid4()
+    competitor_id = uuid4()
+    competitor_evidence_id = _competitor_evidence_id(
+        f"https://vendor-{competitor_id}.example/pricing",
+        hashlib.sha256(b"$99 per month").hexdigest(),
+        NOW,
+    )
     return context, {
         "raw_revision": raw_revision_id,
         "pain": uuid4(),
         "problem": uuid4(),
         "cluster": uuid4(),
         "user_claim": uuid4(),
-        "competitor": uuid4(),
-        "competitor_evidence": uuid4(),
+        "competitor": competitor_id,
+        "competitor_evidence": competitor_evidence_id,
         "competitor_claim": uuid4(),
         "gap": uuid4(),
         "opportunity": opportunity_id,
@@ -1527,6 +1533,24 @@ def _hypothesis_id(
         normalize_text(falsification_test),
         sorted(supporting_claim_ids),
         sorted(contradicting_claim_ids),
+    ]
+    canonical = json.dumps(
+        identity,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return uuid5(namespace, canonical)
+
+
+def _competitor_evidence_id(url: str, content_hash: str, observed_at: datetime) -> UUID:
+    namespace = uuid5(NAMESPACE_URL, "https://gapforge.dev/v0.1/artifacts")
+    identity = [
+        "competitor-evidence",
+        normalize_url(url),
+        content_hash,
+        observed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
     ]
     canonical = json.dumps(
         identity,

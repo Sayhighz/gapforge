@@ -70,10 +70,12 @@ async def test_production_handler_owns_http_lifecycle_and_configures_all_ports(
         *,
         author_hmac_secret: bytes | None,
         clock: object,
+        artifact_writer: object,
     ) -> object:
         captured["session_factory"] = session_factory
         captured["author_hmac_secret"] = author_hmac_secret
         captured["store_clock"] = clock
+        captured["artifact_writer"] = artifact_writer
         return object()
 
     monkeypatch.setattr(research_handler.httpx, "AsyncClient", lambda **_kwargs: client)
@@ -123,6 +125,7 @@ async def test_production_handler_owns_http_lifecycle_and_configures_all_ports(
     assert client.closed is True
     assert captured["reasoner"] is reasoner
     assert captured["author_hmac_secret"] == b"author-secret"
+    assert isinstance(captured["artifact_writer"], research_handler.ResearchArtifactWriter)
     collectors = captured["collectors"]
     assert isinstance(collectors, dict)
     assert {source.value for source in collectors} == {
