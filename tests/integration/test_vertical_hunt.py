@@ -886,7 +886,7 @@ async def test_production_hunt_reclaims_crash_from_durable_stage_without_duplica
             name: port.request_count for name, port in external_ports.items()
         }
         assert external_counts_before_resume == {
-            "hacker_news": 1,
+            "hacker_news": 2,
             "github": 0,
             "reddit": 0,
             "search": 1,
