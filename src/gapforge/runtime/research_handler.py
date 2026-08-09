@@ -10,6 +10,7 @@ from gapforge.collectors import GitHubCollector, HackerNewsCollector, RedditColl
 from gapforge.config import Settings
 from gapforge.domain.contracts import FetchResult, Source
 from gapforge.integration.evidence_store import SqlAlchemyEvidencePipelineStore
+from gapforge.integration.persistence import ResearchArtifactWriter
 from gapforge.integration.semantic import SemanticReasoner
 from gapforge.search.brave import ApprovedUrlRegistry, BraveSearchProvider
 from gapforge.security.static_fetch import StaticFetcher
@@ -63,6 +64,7 @@ class ResearchRunHandler:
                         else None
                     ),
                     clock=_utc_now,
+                    artifact_writer=ResearchArtifactWriter(),
                 ),
                 reasoner=self.reasoner,
                 collectors={
