@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -32,12 +33,15 @@ from gapforge.runtime.evidence_pipeline import (
     CapturedEvidence,
     CollectionBudgetExhaustedError,
     EvidencePipeline,
+    ExistingCandidate,
     ExistingIntelligence,
     PipelineContext,
+    PipelineExecution,
     PipelineStageCommit,
     _bounded_evidence_input,
     _bounded_stage_input,
 )
+from gapforge.runtime.evidence_stages import PainExtractionBatch
 from gapforge.storage.database import Database
 from gapforge.storage.models import RawSignalRevision, ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
@@ -106,6 +110,9 @@ class RecordingStore:
         if self.crash_after_stage == commit.stage:
             self.crash_after_stage = None
             raise RuntimeError("simulated process crash after durable commit")
+
+    async def remaining_agent_calls(self, context: PipelineContext) -> int:
+        return context.budget_limits["max_agent_calls_per_run"]
 
 
 class RecordingReasoner:
@@ -270,10 +277,12 @@ class FullReasoner:
         self.reverse_outputs = reverse_outputs
         self.alias_suffix = alias_suffix
         self.input_sizes: list[int] = []
+        self.inputs: list[dict[str, object]] = []
 
     async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
         operation = call.request.task
         self.operations.append(operation)
+        self.inputs.append(call.request.input_json)
         self.input_sizes.append(
             len(
                 json.dumps(
@@ -907,6 +916,100 @@ def test_large_evidence_batch_is_deterministically_bounded_with_omission_count()
         len(evidence) - len(payload["evidence"])
     )
     assert len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()) < 20_000
+
+
+@pytest.mark.asyncio
+async def test_query_plan_bounds_oversized_mission_and_existing_candidates() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline_context = context(run_id, task_id)
+    pipeline_context = replace(
+        pipeline_context,
+        mission_revision=pipeline_context.mission_revision.model_copy(
+            update={"prompt": "บัญชีซ้ำซ้อน " * 4_000}
+        ),
+    )
+    store = RecordingStore(pipeline_context, [])
+
+    async def query_existing(_: PipelineContext) -> ExistingIntelligence:
+        return ExistingIntelligence(
+            candidates=tuple(
+                ExistingCandidate(
+                    kind="EVIDENCE",
+                    identifier=f"evidence-{index:04d}",
+                    summary=("large existing summary " * 200) + str(index),
+                )
+                for index in range(200)
+            )
+        )
+
+    store.query_existing = query_existing  # type: ignore[assignment,method-assign]
+    reasoner = RecordingReasoner([])
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: EmptyCollector([])},
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    assert result.payload["completed_stage"] == "COLLECT"
+    input_json = reasoner.calls[0][1].request.input_json
+    assert len(json.dumps(input_json, ensure_ascii=False, separators=(",", ":")).encode()) < 20_000
+    omitted = input_json["input_bounds"]["omitted_counts"]
+    assert omitted["mission_characters"] > 0
+    assert omitted["existing_candidates"] > 0
+    checkpoint_bounds = store.completed["QUERY_PLAN"]["_input_bounds"]
+    assert checkpoint_bounds == {"omitted_counts": omitted}
+
+
+@pytest.mark.asyncio
+async def test_cluster_bounds_oversized_extraction_and_uses_selected_lineage() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline_context = context(run_id, task_id)
+    store = RecordingStore(pipeline_context, [])
+    reasoner = FullReasoner()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={},
+        clock=lambda: NOW,
+    )
+    extraction = PainExtractionBatch.model_validate(
+        {
+            "pain_signals": [
+                {
+                    "id": f"pain-{index:04d}",
+                    "raw_signal_revision_id": f"evidence-{index:04d}",
+                    "pain": ("manual reconciliation takes hours " * 10) + str(index),
+                    "severity": 0.8,
+                    "frequency": 0.7,
+                    "confidence": 0.9,
+                    "excerpt": "manual reconciliation takes hours",
+                }
+                for index in range(200)
+            ]
+        }
+    )
+
+    await pipeline._cluster(pipeline_context, extraction, PipelineExecution())
+
+    assert reasoner.input_sizes[0] < 20_000
+    cluster_input = store.completed["CLUSTER"]
+    omitted = cluster_input["_input_bounds"]["omitted_counts"]
+    assert omitted["pain_signals"] > 0
+    selected_values = reasoner.inputs[0]["pain_signals"]
+    assert isinstance(selected_values, list)
+    selected_value = selected_values[0]
+    assert isinstance(selected_value, dict)
+    selected_id = selected_value["id"]
+    memberships = cluster_input["memberships"]
+    assert isinstance(memberships, list)
+    membership = memberships[0]
+    assert isinstance(membership, dict)
+    assert membership["pain_signal_id"] == selected_id
 
 
 @pytest.mark.asyncio

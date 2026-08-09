@@ -258,9 +258,11 @@ class EvidencePipeline:
         plan_payload = await self.store.load_stage(context, "QUERY_PLAN")
         if plan_payload is None:
             plan = await self._query_plan(context, existing, execution)
-            plan_payload = plan.model_dump(mode="json")
+            plan_payload = execution.checkpoint_payload("QUERY_PLAN", plan.model_dump(mode="json"))
             await self._commit(context, "QUERY_PLAN", plan_payload)
-        plan = QueryPlan.model_validate(plan_payload)
+        else:
+            execution.record_checkpoint("QUERY_PLAN", plan_payload)
+        plan = QueryPlan.model_validate(_artifact_payload(plan_payload))
 
         collect_payload = await self.store.load_stage(context, "COLLECT")
         if collect_payload is None:
@@ -496,22 +498,43 @@ class EvidencePipeline:
         extraction: PainExtractionBatch,
         execution: PipelineExecution,
     ) -> ClusterBatch:
+        input_json = _bounded_stage_input(
+            (
+                (
+                    "pain_signals",
+                    [signal.model_dump(mode="json") for signal in extraction.pain_signals],
+                ),
+            ),
+            total_counts={"pain_signals": len(extraction.pain_signals)},
+        )
+        selected_pain_ids = frozenset(_selected_ids(input_json, "pain_signals"))
+        selected_extraction = PainExtractionBatch(
+            pain_signals=tuple(
+                signal for signal in extraction.pain_signals if signal.id in selected_pain_ids
+            )
+        )
         payload, is_new = await self._load_or_reason(
             context,
             stage="CLUSTER",
             operation=SemanticOperation.CLUSTER,
             effort=AgentEffort.MEDIUM,
             schema_type=ClusterBatch,
-            input_json=extraction.model_dump(mode="json"),
+            input_json=input_json,
             permitted_evidence_ids=tuple(
-                signal.raw_signal_revision_id for signal in extraction.pain_signals
+                sorted(
+                    {signal.raw_signal_revision_id for signal in selected_extraction.pain_signals}
+                )
             ),
             execution=execution,
         )
-        batch = _normalize_clusters(context, ClusterBatch.model_validate(payload), extraction)
+        batch = _normalize_clusters(
+            context,
+            ClusterBatch.model_validate(payload),
+            selected_extraction,
+        )
         problem_ids = {problem.id for problem in batch.problems}
         cluster_problem = {cluster.id: cluster.canonical_problem_id for cluster in batch.clusters}
-        pain_ids = {signal.id for signal in extraction.pain_signals}
+        pain_ids = {signal.id for signal in selected_extraction.pain_signals}
         if not set(cluster_problem.values()) <= problem_ids:
             raise ValueError("cluster references unknown canonical problem")
         if any(
@@ -962,28 +985,45 @@ class EvidencePipeline:
         existing: ExistingIntelligence,
         execution: PipelineExecution,
     ) -> QueryPlan:
+        mission, omitted_mission_characters = _truncate_utf8(
+            context.mission_revision.prompt,
+            max_bytes=6_000,
+        )
+        input_json = _bounded_stage_input(
+            (
+                (
+                    "existing_candidates",
+                    [
+                        {
+                            "id": candidate.identifier,
+                            "kind": candidate.kind,
+                            "summary": candidate.summary[:1_000],
+                        }
+                        for candidate in existing.candidates
+                    ],
+                ),
+            ),
+            total_counts={"existing_candidates": len(existing.candidates)},
+            fixed={
+                "mission": mission,
+                "existing_counts": {
+                    "opportunities": existing.opportunity_count,
+                    "evidence": existing.evidence_count,
+                },
+                "round": 1,
+            },
+        )
+        omitted_counts = input_json["input_bounds"]["omitted_counts"]
+        if omitted_mission_characters:
+            omitted_counts["mission_characters"] = omitted_mission_characters
+        execution.record_input("QUERY_PLAN", input_json)
         schema = QueryPlan.model_json_schema()
         schema["title"] = "GapForge QueryPlan v0.1"
         request = AgentRequest(
             call_id=self._call_id(context, SemanticOperation.QUERY_PLAN, 1),
             task=SemanticOperation.QUERY_PLAN,
             effort=AgentEffort.MEDIUM,
-            input_json={
-                "mission": context.mission_revision.prompt,
-                "existing": {
-                    "opportunities": existing.opportunity_count,
-                    "evidence": existing.evidence_count,
-                    "candidates": [
-                        {
-                            "kind": candidate.kind,
-                            "id": candidate.identifier,
-                            "summary": candidate.summary,
-                        }
-                        for candidate in existing.candidates
-                    ],
-                },
-                "round": 1,
-            },
+            input_json=input_json,
             permitted_evidence_ids=(),
             output_schema_name="query-plan-v1",
             timeout_seconds=300,
@@ -1473,9 +1513,10 @@ def _bounded_stage_input(
     sections: tuple[tuple[str, list[dict[str, Any]]], ...],
     *,
     total_counts: dict[str, int],
+    fixed: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select deterministic partial semantic batches and disclose omissions."""
-    payload: dict[str, Any] = {}
+    payload: dict[str, Any] = dict(fixed or {})
     omitted: dict[str, int] = {}
     for name, raw_values in sections:
         values = sorted(
@@ -1513,6 +1554,20 @@ def _bounded_stage_input(
         omitted[name] = max(0, total_counts.get(name, len(values)) - len(selected))
     payload["input_bounds"] = {"omitted_counts": omitted}
     return payload
+
+
+def _truncate_utf8(value: str, *, max_bytes: int) -> tuple[str, int]:
+    """Truncate text at a UTF-8 boundary and report omitted characters."""
+    encoded = value.encode()
+    if len(encoded) <= max_bytes:
+        return value, 0
+    truncated = encoded[:max_bytes]
+    while True:
+        try:
+            selected = truncated.decode()
+            return selected, len(value) - len(selected)
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
 
 
 def _selected_ids(payload: Mapping[str, Any], section: str) -> tuple[str, ...]:

@@ -200,7 +200,14 @@ def test_invalid_identifier_uses_json_error_envelope(cli_database_url: str) -> N
     }
 
 
-def test_worker_registers_production_research_handler(cli_database_url: str) -> None:
+def test_worker_registers_production_research_handler(
+    cli_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_work_available(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr("gapforge.cli.Worker.run_once", no_work_available)
     envelope, exit_code, stderr = _invoke_json(["worker", "--once"])
 
     assert exit_code == 0

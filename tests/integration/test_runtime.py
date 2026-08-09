@@ -956,7 +956,7 @@ async def test_success_warnings_drive_terminal_run_semantics_without_duplicates(
         assert run.status == expected_status
         expected_warnings = [warning.model_dump(mode="json")] if useful_artifact else []
         assert run.warnings == expected_warnings
-        assert task.checkpoint["runtime"]["warnings"] == (
+        assert task.checkpoint["runtime"].get("warnings", []) == (
             [warning.model_dump(mode="json")] if warning else []
         )
         if warning and not useful_artifact:

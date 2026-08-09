@@ -244,12 +244,14 @@ class DurableQueue:
         task.result = result
         existing_runtime = task.checkpoint.get("runtime")
         runtime_checkpoint = existing_runtime if isinstance(existing_runtime, dict) else {}
+        success_metadata: dict[str, object] = {"useful_artifact": useful_artifact}
+        if warnings:
+            success_metadata["warnings"] = list(warnings)
         task.checkpoint = {
             **task.checkpoint,
             "runtime": {
                 **runtime_checkpoint,
-                "useful_artifact": useful_artifact,
-                "warnings": list(warnings or ()),
+                **success_metadata,
             },
         }
         task.completed_at = completion_time
