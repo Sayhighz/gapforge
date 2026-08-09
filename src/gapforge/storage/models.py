@@ -747,8 +747,8 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
             name="bounded_object_output",
         ),
         CheckConstraint(
-            "output_json IS NULL OR (output_sha256 IS NOT NULL "
-            "AND octet_length(output_sha256) = 32)",
+            "(output_json IS NULL) = (output_sha256 IS NULL) "
+            "AND (output_sha256 IS NULL OR octet_length(output_sha256) = 32)",
             name="completed_output_sha256_length",
         ),
         Index("ix_agent_calls_run_created", "run_id", "created_at"),

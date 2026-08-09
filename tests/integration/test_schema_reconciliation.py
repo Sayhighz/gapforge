@@ -165,6 +165,11 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
             "REFERENCES opportunities(id, canonical_problem_id) ON DELETE RESTRICT"
             in constraint_definitions["fk_evidence_cards_opportunity_id_opportunities"]
         )
+        output_hash_constraint = constraint_definitions[
+            "ck_agent_calls_completed_output_sha256_length"
+        ]
+        assert "(output_json IS NULL) = (output_sha256 IS NULL)" in output_hash_constraint
+        assert "octet_length(output_sha256) = 32" in output_hash_constraint
         assert columns["pain_signals"]["severity"]["nullable"] is False
         assert columns["pain_signals"]["frequency"]["nullable"] is False
         assert columns["raw_signal_revisions"]["domain_revision_id"]["nullable"] is False
@@ -424,6 +429,33 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
                                 usage={},
                                 output_json={"ok": True},
                                 output_sha256=b"o" * 32,
+                            )
+                        )
+                        await session.flush()
+
+            for status, output_json, output_sha256 in (
+                ("FAILED", None, b"x" * 32),
+                ("COMPLETED", {"ok": True}, None),
+                ("COMPLETED", {"ok": True}, b"short"),
+            ):
+                with pytest.raises(IntegrityError):
+                    async with session.begin_nested():
+                        session.add(
+                            AgentCall(
+                                run_id=run.id,
+                                provider="fake",
+                                operation="extract",
+                                output_schema_name="schema-v1",
+                                output_schema_sha256=b"s" * 32,
+                                request_sha256=b"r" * 32,
+                                requested_model="",
+                                effort="medium",
+                                status=status,
+                                duration_ms=1,
+                                repair_attempts=0,
+                                usage={},
+                                output_json=output_json,
+                                output_sha256=output_sha256,
                             )
                         )
                         await session.flush()

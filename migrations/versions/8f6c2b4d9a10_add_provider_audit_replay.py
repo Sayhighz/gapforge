@@ -124,8 +124,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         op.f("ck_agent_calls_completed_output_sha256_length"),
         "agent_calls",
-        "output_json IS NULL OR (output_sha256 IS NOT NULL "
-        "AND octet_length(output_sha256) = 32)",
+        "(output_json IS NULL) = (output_sha256 IS NULL) "
+        "AND (output_sha256 IS NULL OR octet_length(output_sha256) = 32)",
     )
 
 
@@ -140,9 +140,7 @@ def downgrade() -> None:
         op.f("ck_agent_calls_completed_output_presence"), "agent_calls", type_="check"
     )
     op.drop_constraint(op.f("ck_agent_calls_valid_status"), "agent_calls", type_="check")
-    op.drop_constraint(
-        op.f("ck_agent_calls_request_sha256_length"), "agent_calls", type_="check"
-    )
+    op.drop_constraint(op.f("ck_agent_calls_request_sha256_length"), "agent_calls", type_="check")
     op.drop_column("agent_calls", "request_sha256")
     op.drop_column("agent_calls", "output_json")
     op.drop_constraint(

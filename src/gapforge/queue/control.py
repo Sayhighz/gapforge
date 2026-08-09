@@ -38,6 +38,26 @@ class ProviderCallJournal:
     effort: str
     repair_attempt: int = 0
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, UUID) or not isinstance(self.call_id, UUID):
+            raise ValueError("provider journal task_id and call_id must be UUIDs")
+        for name, value, maximum in (
+            ("operation", self.operation, 80),
+            ("output_schema_name", self.output_schema_name, 200),
+            ("provider", self.provider, 32),
+            ("effort", self.effort, 16),
+        ):
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                raise ValueError(f"provider journal {name} must contain 1-{maximum} characters")
+        if not isinstance(self.requested_model, str) or len(self.requested_model) > 160:
+            raise ValueError("provider journal requested_model must contain at most 160 characters")
+        if not isinstance(self.output_schema_sha256, bytes) or len(self.output_schema_sha256) != 32:
+            raise ValueError("provider journal output schema hash must contain 32 bytes")
+        if not isinstance(self.request_sha256, bytes) or len(self.request_sha256) != 32:
+            raise ValueError("provider journal request hash must contain 32 bytes")
+        if self.repair_attempt not in {0, 1}:
+            raise ValueError("provider journal repair_attempt must be 0 or 1")
+
 
 class RunController:
     def __init__(self, session: AsyncSession) -> None:
@@ -272,6 +292,10 @@ class DurableAgentCallAdmission:
         lease_duration: timedelta,
         now: datetime | None = None,
     ) -> ProviderCallLease | None:
+        if not lease_owner.strip() or len(lease_owner) > 160:
+            raise ValueError("lease_owner must contain 1-160 characters")
+        if lease_duration.total_seconds() <= 0:
+            raise ValueError("lease_duration must be positive")
         current_time = now or datetime.now(UTC)
         run = await self.session.scalar(
             select(ResearchRun).where(ResearchRun.id == run_id).with_for_update()
@@ -280,6 +304,18 @@ class DurableAgentCallAdmission:
             raise LookupError(f"run {run_id} does not exist")
         if run.status != "RUNNING" or run.deadline_at <= current_time:
             return None
+        task = await self.session.scalar(
+            select(ResearchTask).where(ResearchTask.id == journal.task_id).with_for_update()
+        )
+        if (
+            task is None
+            or task.run_id != run_id
+            or task.status != "LEASED"
+            or task.lease_owner != lease_owner
+        ):
+            raise PermissionError(
+                "provider-call journal requires a worker-owned leased task in the same run"
+            )
         active_count = await self.session.scalar(
             select(func.count())
             .select_from(ProviderCallLease)
