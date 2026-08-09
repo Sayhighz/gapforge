@@ -451,8 +451,22 @@ class Competitor(Contract):
 
 
 class CompetitorEvidence(Contract):
+    id: Identifier
     competitor_id: Identifier
+    source_url: HttpUrl
+    captured_excerpt: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000)
+    ]
+    observed_at: datetime
+    content_hash: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
+    evidence_kind: Identifier
+    metadata: dict[str, Any] = Field(default_factory=dict)
     claim_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=50)
+
+    @field_validator("metadata")
+    @classmethod
+    def bound_competitor_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
 
 
 class GapHypothesis(Contract):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
@@ -11,6 +12,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -18,13 +20,14 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -217,6 +220,12 @@ class RawSignal(IdMixin, UpdatedAtMixin, Base):
     __table_args__ = (
         UniqueConstraint("source", "external_id"),
         Index("ix_raw_signals_canonical_url", "canonical_url"),
+        Index(
+            "ix_raw_signals_canonical_url_trgm",
+            "canonical_url",
+            postgresql_using="gin",
+            postgresql_ops={"canonical_url": "gin_trgm_ops"},
+        ),
         Index("ix_raw_signals_source_collected", "source", "collected_at"),
         Index("ix_raw_signals_author_pseudonym", "author_pseudonym"),
     )
@@ -243,12 +252,29 @@ class RawSignalRevision(IdMixin, CreatedAtMixin, Base):
         CheckConstraint("revision_number >= 1", name="positive_revision_number"),
         UniqueConstraint("raw_signal_id", "content_hash", name="uq_raw_signal_revisions_content"),
         Index("ix_raw_signal_revisions_hash", "content_hash"),
+        Index("ix_raw_signal_revisions_duplicate_group", "duplicate_group_key"),
+        Index(
+            "ix_raw_signal_revisions_search_document",
+            "search_document",
+            postgresql_using="gin",
+        ),
+        Index(
+            "ix_raw_signal_revisions_search_text_trgm",
+            "search_text",
+            postgresql_using="gin",
+            postgresql_ops={"search_text": "gin_trgm_ops"},
+        ),
+        CheckConstraint(
+            "duplicate_group_key ~ '^[0-9a-f]{64}$'",
+            name="duplicate_group_key_format",
+        ),
     )
 
     raw_signal_id: Mapped[UUID] = mapped_column(
         ForeignKey("raw_signals.id", ondelete="RESTRICT"), nullable=False
     )
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    domain_revision_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     title: Mapped[str | None] = mapped_column(Text)
     body: Mapped[str | None] = mapped_column(Text)
     original_language: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -258,6 +284,18 @@ class RawSignalRevision(IdMixin, CreatedAtMixin, Base):
     normalization_version: Mapped[str] = mapped_column(String(32), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_tombstone: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    duplicate_group_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    search_text: Mapped[str] = mapped_column(
+        Text,
+        Computed("coalesce(title, '') || ' ' || coalesce(body, '')", persisted=True),
+    )
+    search_document: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(body, ''))",
+            persisted=True,
+        ),
+    )
 
 
 class PainSignal(IdMixin, CreatedAtMixin, Base):
@@ -265,6 +303,8 @@ class PainSignal(IdMixin, CreatedAtMixin, Base):
     __table_args__ = (
         UniqueConstraint("raw_signal_revision_id", "extraction_version"),
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence_range"),
+        CheckConstraint("severity >= 0 AND severity <= 1", name="severity_range"),
+        CheckConstraint("frequency >= 0 AND frequency <= 1", name="frequency_range"),
         Index("ix_pain_signals_status_created", "cluster_status", "created_at"),
     )
 
@@ -276,12 +316,12 @@ class PainSignal(IdMixin, CreatedAtMixin, Base):
     pain: Mapped[str] = mapped_column(Text, nullable=False)
     user_context: Mapped[str | None] = mapped_column(Text)
     jtbd: Mapped[str | None] = mapped_column(Text)
-    severity: Mapped[float | None] = mapped_column(Float)
-    frequency: Mapped[str | None] = mapped_column(String(64))
+    severity: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
+    frequency: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
     workaround: Mapped[str | None] = mapped_column(Text)
     existing_solution: Mapped[str | None] = mapped_column(Text)
     signals: Mapped[JSONValue] = mapped_column(JSONB, nullable=False, default=dict)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
     excerpt: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -359,10 +399,14 @@ class EvidenceCard(IdMixin, CreatedAtMixin, Base):
     __table_args__ = (
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence_range"),
         Index("ix_evidence_cards_problem_created", "canonical_problem_id", "created_at"),
+        Index("ix_evidence_cards_opportunity_created", "opportunity_id", "created_at"),
     )
 
     canonical_problem_id: Mapped[UUID] = mapped_column(
         ForeignKey("canonical_problems.id", ondelete="RESTRICT"), nullable=False
+    )
+    opportunity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("opportunities.id", ondelete="RESTRICT"), nullable=False
     )
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("research_runs.id", ondelete="RESTRICT"), nullable=False
@@ -381,7 +425,7 @@ class EvidenceCard(IdMixin, CreatedAtMixin, Base):
     representative_signal_ids: Mapped[list[UUID]] = mapped_column(
         ARRAY(PG_UUID(as_uuid=True)), nullable=False
     )
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
     missing_evidence: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
 
@@ -405,6 +449,10 @@ class AtomicClaim(IdMixin, CreatedAtMixin, Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     evidence_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PG_UUID(as_uuid=True)), nullable=False)
+    citations: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    contradicts_claim_ids: Mapped[list[UUID]] = mapped_column(
+        ARRAY(PG_UUID(as_uuid=True)), nullable=False, default=list
+    )
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -458,6 +506,7 @@ class CompetitorEvidence(IdMixin, CreatedAtMixin, Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     content_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     evidence_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PG_UUID(as_uuid=True)), nullable=False)
     metadata_json: Mapped[JSONValue] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
     )
@@ -510,6 +559,14 @@ class MissionOpportunityAssessment(IdMixin, UpdatedAtMixin, Base):
             "'REJECTED')",
             name="valid_lifecycle_status",
         ),
+        CheckConstraint(
+            "verdict IS NULL OR verdict IN ('REJECT', 'RESEARCH_MORE', 'VALIDATE')",
+            name="valid_verdict",
+        ),
+        CheckConstraint(
+            "competitor_research_status IN ('COMPLETE', 'INCOMPLETE', 'RESEARCH_UNAVAILABLE')",
+            name="valid_competitor_research_status",
+        ),
         Index(
             "ix_assessments_revision_status",
             "mission_revision_id",
@@ -525,8 +582,11 @@ class MissionOpportunityAssessment(IdMixin, UpdatedAtMixin, Base):
         ForeignKey("opportunities.id", ondelete="RESTRICT"), nullable=False
     )
     lifecycle_status: Mapped[str] = mapped_column(String(24), nullable=False, default="DISCOVERED")
-    relevance: Mapped[float] = mapped_column(Float, nullable=False)
+    relevance: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
     verdict: Mapped[str | None] = mapped_column(String(24))
+    competitor_research_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="INCOMPLETE"
+    )
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -534,6 +594,10 @@ class OpportunityScoreSnapshot(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "opportunity_score_snapshots"
     __table_args__ = (
         CheckConstraint("final_score >= 0 AND final_score <= 100", name="final_score_range"),
+        CheckConstraint(
+            "pre_penalty_score >= 0 AND pre_penalty_score <= 100",
+            name="pre_penalty_score_range",
+        ),
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence_range"),
         Index("ix_score_snapshots_assessment_created", "assessment_id", "created_at"),
     )
@@ -546,12 +610,15 @@ class OpportunityScoreSnapshot(IdMixin, CreatedAtMixin, Base):
     )
     algorithm_version: Mapped[str] = mapped_column(String(32), nullable=False)
     raw_metrics: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
-    evidence_strength: Mapped[float] = mapped_column(Float, nullable=False)
-    opportunity_fit: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence_strength: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    opportunity_fit: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    evidence_components: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
+    opportunity_fit_components: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
     weights: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
     penalties: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
-    final_score: Mapped[float] = mapped_column(Float, nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    pre_penalty_score: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    final_score: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
     explanation: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
 
 
@@ -619,6 +686,10 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
         CheckConstraint(
             "repair_attempts >= 0 AND repair_attempts <= 1", name="repair_attempt_range"
         ),
+        CheckConstraint(
+            "octet_length(output_schema_sha256) = 32",
+            name="output_schema_sha256_length",
+        ),
         Index("ix_agent_calls_run_created", "run_id", "created_at"),
     )
 
@@ -629,6 +700,9 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
         ForeignKey("research_tasks.id", ondelete="SET NULL")
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    output_schema_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    output_schema_sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     requested_model: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     resolved_model: Mapped[str | None] = mapped_column(String(160))
     effort: Mapped[str] = mapped_column(String(16), nullable=False)

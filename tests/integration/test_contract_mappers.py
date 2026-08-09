@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -9,23 +11,61 @@ from pydantic import ValidationError
 from gapforge.domain.contracts import (
     AgentEffort,
     AgentRequest,
+    AgentStatus,
+    AtomicClaim,
+    Citation,
+    ClaimKind,
+    CompetitorEvidence,
+    EpistemicStatus,
+    EvidenceCard,
+    OpportunityScoreSnapshot,
+    ScoreComponents,
     SemanticOperation,
     Source,
     SourceCheckpoint,
     TaskStatus,
 )
 from gapforge.integration.mappers import (
+    PERSISTED_ENTITY_MAPPINGS,
     MappingError,
     agent_operation,
     agent_schema_identity,
+    agent_status_from_provider,
+    agent_status_to_provider,
+    atomic_claim_from_storage,
+    atomic_claim_to_storage_values,
     checkpoint_from_storage,
     checkpoint_to_storage,
+    competitor_evidence_from_storage,
+    competitor_evidence_to_storage_values,
     domain_identifier_from_storage,
+    evidence_card_from_storage,
+    evidence_card_to_storage_values,
+    mission_revision_from_storage,
     normalize_output_locale,
+    research_run_from_storage,
+    research_task_from_storage,
+    score_snapshot_from_storage,
+    score_snapshot_to_storage_values,
     storage_uuid_for_identifier,
     task_status_from_storage,
     task_status_to_storage,
+    validate_entity_mapping,
 )
+from gapforge.providers.contracts import AgentStatus as ProviderAgentStatus
+from gapforge.storage.models import (
+    AtomicClaim as StoredAtomicClaim,
+)
+from gapforge.storage.models import CompetitorEvidence as StoredCompetitorEvidence
+from gapforge.storage.models import (
+    EvidenceCard as StoredEvidenceCard,
+)
+from gapforge.storage.models import MissionRevision as StoredMissionRevision
+from gapforge.storage.models import (
+    OpportunityScoreSnapshot as StoredOpportunityScoreSnapshot,
+)
+from gapforge.storage.models import ResearchRun as StoredResearchRun
+from gapforge.storage.models import ResearchTask as StoredResearchTask
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
@@ -63,6 +103,71 @@ def test_query_plan_is_a_bounded_medium_effort_operation() -> None:
         request.model_copy(update={"effort": AgentEffort.HIGH}).model_validate(
             {**request.model_dump(), "effort": AgentEffort.HIGH}
         )
+
+
+def test_provider_status_mapping_is_explicit_and_bijective() -> None:
+    expected = {
+        AgentStatus.COMPLETED: ProviderAgentStatus.SUCCESS,
+        AgentStatus.INVALID_OUTPUT: ProviderAgentStatus.INVALID_OUTPUT,
+        AgentStatus.AUTH_REQUIRED: ProviderAgentStatus.AUTH_REQUIRED,
+        AgentStatus.TIMEOUT: ProviderAgentStatus.TIMEOUT,
+        AgentStatus.FAILED: ProviderAgentStatus.ERROR,
+    }
+
+    assert {status: agent_status_to_provider(status) for status in AgentStatus} == expected
+    assert {status: agent_status_from_provider(status) for status in ProviderAgentStatus} == {
+        value: key for key, value in expected.items()
+    }
+
+
+def test_mission_run_and_task_storage_names_map_to_domain_contracts() -> None:
+    mission_id = uuid4()
+    revision_id = uuid4()
+    run_id = uuid4()
+    mission = StoredMissionRevision(
+        id=revision_id,
+        mission_id=mission_id,
+        revision_number=1,
+        change_reason="initial",
+        mission_text="Research recurring pain",
+        original_language="en",
+        output_locale="EN-us",
+        interpretation={},
+        created_at=NOW,
+    )
+    run = StoredResearchRun(
+        id=run_id,
+        mission_revision_id=revision_id,
+        mode="HUNT",
+        status="COMPLETED_WITH_WARNINGS",
+        priority=1,
+        deadline_at=NOW,
+        started_at=NOW,
+        completed_at=NOW,
+        budget_limits={},
+        budget_used={},
+        warnings=["SOURCE_UNAVAILABLE"],
+        last_checkpoint={},
+        created_at=NOW,
+    )
+    task = StoredResearchTask(
+        id=uuid4(),
+        run_id=run_id,
+        task_type="collect",
+        status="SUCCEEDED",
+        priority=1,
+        idempotency_key="collect:1",
+        payload={},
+        checkpoint={"page": 2},
+        attempt_count=1,
+        max_attempts=3,
+        available_at=NOW,
+        completed_at=NOW,
+    )
+
+    assert mission_revision_from_storage(mission).output_locale == "en-US"
+    assert research_run_from_storage(run).finished_at == NOW
+    assert research_task_from_storage(task).status is TaskStatus.COMPLETED
 
 
 def test_checkpoint_mapping_preserves_none_cursor_and_watermark() -> None:
@@ -133,3 +238,182 @@ def test_agent_schema_identity_rejects_noncanonical_numbers(invalid: float) -> N
             schema_name="query-plan-v1",
             output_schema={"const": invalid},
         )
+
+
+def test_every_persisted_research_entity_has_an_explicit_complete_mapping() -> None:
+    expected = {
+        "ResearchMission",
+        "MissionRevision",
+        "ResearchRun",
+        "ResearchTask",
+        "SourceCheckpoint",
+        "RawSignal",
+        "RawSignalRevision",
+        "PainSignal",
+        "CanonicalProblem",
+        "ProblemCluster",
+        "ProblemClusterMembership",
+        "MergeCandidate",
+        "EvidenceCard",
+        "AtomicClaim",
+        "ProblemHypothesis",
+        "Competitor",
+        "CompetitorEvidence",
+        "GapHypothesis",
+        "Opportunity",
+        "MissionOpportunityAssessment",
+        "OpportunityScoreSnapshot",
+        "CriticResult",
+        "ProductHypothesis",
+        "LifecycleEvent",
+        "AgentCall",
+    }
+
+    assert set(PERSISTED_ENTITY_MAPPINGS) == expected
+    for name, mapping in PERSISTED_ENTITY_MAPPINGS.items():
+        assert mapping.domain_type.__name__ == name
+        assert mapping.storage_type.__name__ == name
+        assert mapping.mapped_domain_fields == frozenset(mapping.domain_type.model_fields) - {
+            "schema_version"
+        }
+        assert all(route.rationale for route in mapping.field_routes.values())
+        assert all(route.rationale for route in mapping.storage_only_routes.values())
+        for field, route in mapping.field_routes.items():
+            if field == "id" or field.endswith("_id") or field.endswith("_ids"):
+                assert route.transform != "direct"
+
+    task_mapping = PERSISTED_ENTITY_MAPPINGS["ResearchTask"]
+    assert task_mapping.field_routes["status"].transform == "task_status"
+    mission_mapping = PERSISTED_ENTITY_MAPPINGS["ResearchMission"]
+    with pytest.raises(RuntimeError, match="required storage columns"):
+        validate_entity_mapping(replace(mission_mapping, storage_only_routes={}))
+
+
+def test_evidence_card_typed_mapping_round_trips_all_metrics() -> None:
+    opportunity_id = uuid4()
+    canonical_problem_id = uuid4()
+    run_id = uuid4()
+    revision_storage_id = storage_uuid_for_identifier("raw-signal-revision", "raw-1:r1")
+    card = EvidenceCard(
+        id=str(uuid4()),
+        opportunity_id=str(opportunity_id),
+        known_author_ids=("author-1", "author-2"),
+        thread_ids=("thread-1", "thread-2"),
+        user_sources=(Source.HACKER_NEWS, Source.REDDIT),
+        observed_days=(NOW,),
+        severity=0.81234,
+        behavioral_workarounds=2,
+        paid_or_wtp_signals=1,
+        supporting_claim_ids=(str(uuid4()),),
+        contradicting_claim_ids=(str(uuid4()),),
+        representative_evidence_ids=("raw-1:r1",),
+        confidence=0.76543,
+        missing_evidence=("more recent evidence",),
+    )
+
+    stored = StoredEvidenceCard(
+        **evidence_card_to_storage_values(
+            card,
+            canonical_problem_id=canonical_problem_id,
+            run_id=run_id,
+            algorithm_version="evidence-v1",
+        )
+    )
+
+    assert stored.metrics["severity"] == "0.81234"
+    assert (
+        evidence_card_from_storage(stored, revision_identifiers={revision_storage_id: "raw-1:r1"})
+        == card
+    )
+
+
+def test_score_snapshot_typed_mapping_round_trips_components_without_float_storage() -> None:
+    opportunity_id = uuid4()
+    mission_revision_id = uuid4()
+    score = OpportunityScoreSnapshot(
+        id=str(uuid4()),
+        opportunity_id=str(opportunity_id),
+        mission_revision_id=mission_revision_id,
+        evidence_strength=ScoreComponents(values={"severity": 83.125}, weights={"severity": 1.0}),
+        opportunity_fit=ScoreComponents(
+            values={"gap_strength": 71.875}, weights={"gap_strength": 1.0}
+        ),
+        raw_metrics={"authors": 5.0},
+        penalties={"concentration": 2.125},
+        pre_penalty_score=77.28125,
+        final_score=75.15625,
+        evidence_confidence=0.8125,
+        explanation=("independent evidence",),
+        created_at=NOW,
+    )
+
+    stored = StoredOpportunityScoreSnapshot(
+        **score_snapshot_to_storage_values(score, assessment_id=uuid4(), run_id=uuid4())
+    )
+
+    assert stored.pre_penalty_score == Decimal("77.28125")
+    assert stored.evidence_components["values"]["severity"] == "83.125"
+    assert (
+        score_snapshot_from_storage(
+            stored,
+            opportunity_id=opportunity_id,
+            mission_revision_id=mission_revision_id,
+        )
+        == score
+    )
+
+
+def test_atomic_claim_typed_mapping_round_trips_and_rejects_bad_lineage() -> None:
+    evidence_id = storage_uuid_for_identifier("raw-signal-revision", "raw-1:r1")
+    claim = AtomicClaim(
+        id=str(uuid4()),
+        text="Captured page lists $20 per month",
+        kind=ClaimKind.PRICE,
+        status=EpistemicStatus.SUPPORTED,
+        evidence_ids=("raw-1:r1",),
+        citations=(
+            Citation(
+                evidence_id="raw-1:r1",
+                source_url="https://example.com/pricing",
+                excerpt="$20 per month",
+                observed_at=NOW,
+            ),
+        ),
+        contradicts_claim_ids=(str(uuid4()),),
+    )
+    stored = StoredAtomicClaim(
+        **atomic_claim_to_storage_values(
+            claim,
+            subject_type="OPPORTUNITY",
+            subject_id=uuid4(),
+            revision_ids={"raw-1:r1": evidence_id},
+        )
+    )
+
+    assert (
+        atomic_claim_from_storage(stored, revision_identifiers={evidence_id: "raw-1:r1"}) == claim
+    )
+    with pytest.raises(MappingError, match="revision ID"):
+        atomic_claim_from_storage(stored, revision_identifiers={})
+
+
+def test_competitor_evidence_mapping_preserves_capture_and_claim_semantics() -> None:
+    evidence = CompetitorEvidence(
+        id=str(uuid4()),
+        competitor_id=str(uuid4()),
+        source_url="https://example.com/pricing",
+        captured_excerpt="$20 per month",
+        observed_at=NOW,
+        content_hash="a" * 64,
+        evidence_kind="PRICE_PAGE",
+        metadata={"currency": "USD"},
+        claim_ids=(str(uuid4()),),
+    )
+
+    stored = StoredCompetitorEvidence(**competitor_evidence_to_storage_values(evidence))
+
+    assert stored.content_hash == b"\xaa" * 32
+    assert competitor_evidence_from_storage(stored) == evidence
+    stored.content_hash = b"short"
+    with pytest.raises(MappingError, match="32 bytes"):
+        competitor_evidence_from_storage(stored)
