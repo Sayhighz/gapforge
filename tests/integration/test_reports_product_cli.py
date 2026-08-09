@@ -51,7 +51,7 @@ async def _seed_validated_run(
 ) -> tuple[FakeContext, dict[str, UUID | str], UUID, UUID]:
     database = Database.from_url(database_url)
     try:
-        context, identifiers = await _seed_pipeline_context(database)
+        context, identifiers = await _seed_pipeline_context(database, output_locale="th")
         writer = ResearchArtifactWriter()
         for stage, payload in _stage_payloads(context, identifiers):
             await _commit_stage(database, writer, context, stage, payload)
@@ -100,13 +100,13 @@ def test_report_cli_persists_terminal_run_and_renders_opportunity_on_demand(
     report = data["report"]
     artifact = data["artifact"]
     assert report["run_id"] == str(context.run_id)
-    assert report["output_locale"] == "en"
+    assert report["output_locale"] == "th"
     expected_path = reports_dir / "2026-08-09" / f"run-{context.run_id}.md"
     assert artifact["run_path"] == str(expected_path)
     assert artifact["latest_path"] == str(reports_dir / "latest.md")
     assert artifact["is_latest"] is True
     content = expected_path.read_text(encoding="utf-8")
-    assert content.startswith("# GapForge Run Report\n")
+    assert content.startswith("# รายงานการวิจัย GapForge\n")
     assert hashlib.sha256(content.encode()).hexdigest() == artifact["content_sha256"]
     latest_before = (reports_dir / "latest.md").read_bytes()
     latest_mtime = (reports_dir / "latest.md").stat().st_mtime_ns
@@ -120,7 +120,7 @@ def test_report_cli_persists_terminal_run_and_renders_opportunity_on_demand(
     detail_data = detail["data"]
     assert isinstance(detail_data, dict)
     assert detail_data["report"]["opportunity"]["opportunity_id"] == str(identifiers["opportunity"])
-    assert "## Validation gates" in detail_data["markdown"]
+    assert "## เกณฑ์การตรวจสอบ" in detail_data["markdown"]
     assert (reports_dir / "latest.md").read_bytes() == latest_before
     assert (reports_dir / "latest.md").stat().st_mtime_ns == latest_mtime
 
