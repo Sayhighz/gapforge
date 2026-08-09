@@ -8,8 +8,8 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A, Lane B, and I1-I5 integration are reviewed and merged. I6 reports and
-repository skill are active in draft PR #13.
+Last checkpoint: Lane A, Lane B, and I1-I6 integration are reviewed and merged. I7 integrated
+verification is active in draft PR #14.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -119,7 +119,7 @@ without direct SQL, and every supported claim resolves to stored evidence.
 - [ ] Verify the canonical repository skill invokes only implemented CLI surfaces and follows up using persisted IDs/history.
 - [x] Keep Product Hypothesis creation explicit and available only after `VALIDATE`.
 
-Progress: draft PR #13 code checkpoint `6a32890` wires terminal Thai/English run reports and
+Progress: PR #13 code checkpoint `6a32890` wires terminal Thai/English run reports and
 on-demand opportunity reports to I5 query projections, atomically persists immutable dated run
 artifacts plus a chronology-safe `latest.md`, and adds the explicit no-agent Product Hypothesis CLI.
 Product Hypotheses use deterministic request identity, replay immutable content even after a later
@@ -127,12 +127,13 @@ MONITOR snapshot, and require a current `VALIDATE` assessment with its exact lat
 Evidence Card for every new request. Migration `e5b1a6c02f9d` adds authoritative bounds, lineage,
 locking, uniqueness, and downgrade/refusal tests; upgrading a pre-release database containing legacy
 Product Hypotheses deliberately requires export/reset because request lineage cannot be invented.
-GitHub Quality run `31301156270` passed whole-repository Ruff/format, strict mypy across 65 source
+GitHub Quality run `31301260341` passed whole-repository Ruff/format, strict mypy across 65 source
 files, 377 PostgreSQL-backed tests with 1 skipped, whitespace checks, and the 53-second Compose
 migration/health/backup/restore job. The canonical skill command guide is parser-valid against the
 implemented CLI and documents persisted-ID/history follow-up, but the acceptance-level fake-provider
 HUNT inspected through a fresh skill/CLI process is intentionally left unchecked for I7 rather than
-replaced with synthetic seeding.
+replaced with synthetic seeding. The implementation was independently reviewed and PR #13 was
+squash-merged as `55d546d`.
 
 Acceptance: the fake-provider HUNT reaches a deterministic persisted report and the repository skill
 can inspect it after a fresh process starts.
@@ -159,10 +160,11 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1-I5 are reviewed and merged. I3 closed the I2 real-handler item. I6 report
-artifacts, report CLI, and explicit Product Hypothesis gates are green in draft PR #13; the
+Current state: I1-I6 are reviewed and merged. I3 closed the I2 real-handler item. I6 report
+artifacts, report CLI, and explicit Product Hypothesis gates are on the integration branch; the
 fresh-process repository-skill acceptance remains open for I7, and I8 remains pending.
 
-Exact next action: independently review PR #13, then exercise a credential-free fake-provider HUNT
-through the production queue/Worker and inspect its persisted report from a fresh CLI/skill process
-as part of I7 before checking the remaining I6 repository-skill item.
+Exact next action: merge the latest integration branch into draft PR #14 without rebasing, then
+exercise a credential-free fake-provider HUNT through the production queue/Worker and inspect its
+persisted report from a fresh CLI/skill process before checking the remaining I6 repository-skill
+item.

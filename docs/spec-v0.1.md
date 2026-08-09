@@ -27,7 +27,7 @@ It is not a startup-idea generator. A successful run may return zero `VALIDATE` 
 - [ ] ASK helpers inspect evidence, comparisons, changes, and rejections without SQL.
 - [ ] Every supported factual conclusion resolves to stored evidence.
 - [ ] No Evidence Card or failed hard gate can produce `VALIDATE`.
-- [ ] Product Hypotheses are explicit, post-`VALIDATE` requests only.
+- [x] Product Hypotheses are explicit, post-`VALIDATE` requests only.
 
 ## 2. Scope boundaries
 
@@ -337,7 +337,7 @@ Run summaries render deterministically to `reports/YYYY-MM-DD/run-<id>.md` and `
 - [ ] CLI families have stable JSON envelopes and exit codes.
 - [ ] Skills use CLI helpers and query existing research first.
 - [ ] Thai presentation preserves original evidence and English schema keys.
-- [ ] Reports are atomic, reproducible, ignored by Git, and validated.
+- [x] Reports are atomic, reproducible, ignored by Git, and validated.
 
 ## 20. Backups and observability
 
