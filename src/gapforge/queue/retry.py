@@ -51,3 +51,19 @@ def classify_error(kind: ErrorKind, *, attempt: int, seed: str) -> RetryDecision
         retryable=retryable,
         delay_seconds=retry_delay_seconds(attempt, seed) if retryable else 0.0,
     )
+
+
+def classify_exception(error: Exception, *, attempt: int, seed: str) -> RetryDecision:
+    """Map handler exceptions without using error strings or mutable state."""
+
+    if isinstance(error, TimeoutError):
+        kind = ErrorKind.TIMEOUT
+    elif isinstance(error, ConnectionError):
+        kind = ErrorKind.TRANSIENT_NETWORK
+    elif isinstance(error, PermissionError):
+        kind = ErrorKind.AUTH_REQUIRED
+    elif isinstance(error, ValueError):
+        kind = ErrorKind.INVALID_OUTPUT
+    else:
+        kind = ErrorKind.PERMANENT
+    return classify_error(kind, attempt=attempt, seed=seed)

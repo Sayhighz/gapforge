@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, true
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,9 +83,17 @@ class DurableQueue:
         worker_id: str,
         lease_duration: timedelta,
         now: datetime | None = None,
+        allowed_task_types: frozenset[str] | None = None,
     ) -> ResearchTask | None:
         claim_time = now or datetime.now(UTC)
         await self._expire_overdue_runs(claim_time)
+        if allowed_task_types == frozenset():
+            return None
+        task_type_filter = (
+            ResearchTask.task_type.in_(allowed_task_types)
+            if allowed_task_types is not None
+            else true()
+        )
         statement = (
             select(ResearchTask)
             .join(ResearchRun, ResearchRun.id == ResearchTask.run_id)
@@ -93,6 +101,7 @@ class DurableQueue:
                 ResearchRun.status == "RUNNING",
                 ResearchRun.deadline_at > claim_time,
                 ResearchTask.available_at <= claim_time,
+                task_type_filter,
                 or_(
                     ResearchTask.status == "PENDING",
                     and_(
@@ -148,6 +157,19 @@ class DurableQueue:
         checkpoint_time = now or datetime.now(UTC)
         task.checkpoint = checkpoint
         task.lease_expires_at = checkpoint_time + lease_duration
+        await self.session.flush()
+        return task
+
+    async def renew_lease(
+        self,
+        task_id: UUID,
+        *,
+        worker_id: str,
+        lease_duration: timedelta,
+        now: datetime | None = None,
+    ) -> ResearchTask:
+        task = await self._leased_by(task_id, worker_id)
+        task.lease_expires_at = (now or datetime.now(UTC)) + lease_duration
         await self.session.flush()
         return task
 

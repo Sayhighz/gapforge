@@ -7,7 +7,7 @@ from gapforge.queue.control import (
     RunController,
 )
 from gapforge.queue.repository import DurableQueue
-from gapforge.queue.retry import ErrorKind, RetryDecision, classify_error
+from gapforge.queue.retry import ErrorKind, RetryDecision, classify_error, classify_exception
 
 __all__ = [
     "AgentCallLimiter",
@@ -18,4 +18,5 @@ __all__ = [
     "RetryDecision",
     "RunController",
     "classify_error",
+    "classify_exception",
 ]

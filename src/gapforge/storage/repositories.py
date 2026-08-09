@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gapforge.storage.contracts import MissionRevisionInput
 from gapforge.storage.models import MissionRevision, ResearchMission, ResearchRun
 
 ModelT = TypeVar("ModelT")
@@ -63,18 +64,27 @@ class MissionRepository(SqlAlchemyRepository[ResearchMission]):
         output_locale: str,
         interpretation: dict[str, object] | None = None,
     ) -> tuple[ResearchMission, MissionRevision]:
-        mission = ResearchMission(title=title, status="DRAFT")
+        validated = MissionRevisionInput(
+            title=title,
+            mission_text=mission_text,
+            original_language=original_language,
+            output_locale=output_locale,
+            change_reason="initial creation",
+            interpretation=interpretation or {},
+        )
+        assert validated.title is not None
+        mission = ResearchMission(title=validated.title, status="DRAFT")
         self.session.add(mission)
         await self.session.flush()
         revision = MissionRevision(
             mission_id=mission.id,
             revision_number=1,
             parent_revision_id=None,
-            change_reason="initial creation",
-            mission_text=mission_text,
-            original_language=original_language,
-            output_locale=output_locale,
-            interpretation=interpretation or {},
+            change_reason=validated.change_reason,
+            mission_text=validated.mission_text,
+            original_language=validated.original_language,
+            output_locale=validated.output_locale,
+            interpretation=validated.interpretation,
         )
         self.session.add(revision)
         await self.session.flush()
@@ -90,6 +100,13 @@ class MissionRepository(SqlAlchemyRepository[ResearchMission]):
         output_locale: str,
         interpretation: dict[str, object] | None = None,
     ) -> MissionRevision:
+        validated = MissionRevisionInput(
+            mission_text=mission_text,
+            original_language=original_language,
+            output_locale=output_locale,
+            change_reason=change_reason,
+            interpretation=interpretation or {},
+        )
         mission_statement: Select[tuple[ResearchMission]] = (
             select(ResearchMission).where(ResearchMission.id == mission_id).with_for_update()
         )
@@ -106,11 +123,11 @@ class MissionRepository(SqlAlchemyRepository[ResearchMission]):
             mission_id=mission_id,
             revision_number=(latest_number or 0) + 1,
             parent_revision_id=parent.id if parent else None,
-            change_reason=change_reason,
-            mission_text=mission_text,
-            original_language=original_language,
-            output_locale=output_locale,
-            interpretation=interpretation or {},
+            change_reason=validated.change_reason,
+            mission_text=validated.mission_text,
+            original_language=validated.original_language,
+            output_locale=validated.output_locale,
+            interpretation=validated.interpretation,
         )
         self.session.add(revision)
         await self.session.flush()
@@ -122,6 +139,14 @@ class MissionRepository(SqlAlchemyRepository[ResearchMission]):
         mission = await self.get(mission_id)
         if mission is None:
             raise LookupError(f"mission {mission_id} does not exist")
+        allowed_transitions = {
+            "DRAFT": {"ACTIVE", "ARCHIVED"},
+            "ACTIVE": {"PAUSED", "ARCHIVED"},
+            "PAUSED": {"ACTIVE", "ARCHIVED"},
+            "ARCHIVED": set(),
+        }
+        if status not in allowed_transitions[mission.status]:
+            raise ValueError(f"cannot transition mission from {mission.status} to {status}")
         now = datetime.now(UTC)
         mission.status = status
         if status == "ACTIVE":
@@ -131,6 +156,7 @@ class MissionRepository(SqlAlchemyRepository[ResearchMission]):
         else:
             mission.archived_at = now
         await self.session.flush()
+        await self.session.refresh(mission)
         return mission
 
 
