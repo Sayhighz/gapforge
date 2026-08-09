@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -39,6 +39,7 @@ from gapforge.domain.contracts import (
     FetchSnapshot,
     MissionRevision,
     OpportunityScoreSnapshot,
+    QueryIntent,
     QueryPlan,
     RunMode,
     RunWarning,
@@ -69,6 +70,7 @@ from gapforge.runtime.evidence_stages import (
     CriticBatch,
     GapResearchBatch,
     HypothesisBatch,
+    HypothesisCardLink,
     PainExtractionBatch,
 )
 from gapforge.scoring.engine import ScoringInputs, score_opportunity, validation_decision
@@ -188,6 +190,8 @@ class EvidencePipelineStore(Protocol):
 
     async def remaining_agent_calls(self, context: PipelineContext) -> int: ...
 
+    async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]: ...
+
 
 class CompetitorSearchPort(Protocol):
     async def search(
@@ -273,6 +277,7 @@ class EvidencePipeline:
                 "results": [result.model_dump(mode="json") for result in results],
                 "item_count": sum(len(result.items) for result in results),
                 "examined_volume": _examined_volume(results, as_of=context.collection_until),
+                "examined_items": _examined_items(results),
             }
             try:
                 await self._commit(context, "COLLECT", collect_payload)
@@ -363,13 +368,36 @@ class EvidencePipeline:
         )
         hypotheses = await self._hypotheses(context, gap, cards, clusters, execution)
         critics = await self._critic(context, gap, cards, hypotheses, execution)
-        research_more_warning = await self._checkpoint_research_more(context, critics)
+        gap, cards, scores, hypotheses, critics, research_more_warning = await self._round_two(
+            context,
+            evidence,
+            extraction,
+            clusters,
+            competitor_research,
+            gap,
+            cards,
+            scores,
+            hypotheses,
+            critics,
+            execution,
+            examined_volume=_examined_volume_field(collect_payload),
+            examined_items=_examined_items_field(collect_payload),
+        )
         if research_more_warning is not None:
             warning_codes.append(research_more_warning)
         _append_omission_warning(warning_codes, execution)
+        round_two_result = await self.store.load_stage(context, "RESEARCH_MORE_RESULT")
+        final_round = (
+            2
+            if round_two_result is not None and round_two_result.get("status") == "COMPLETE"
+            else 1
+        )
         decisions = []
         score_by_opportunity = {score.opportunity_id: score for score in scores}
         card_by_opportunity = {card.opportunity_id: card for card in cards}
+        gap_id_by_opportunity = {
+            opportunity.id: opportunity.gap_hypothesis_id for opportunity in gap.opportunities
+        }
         for result in critics.results:
             decision = validation_decision(
                 card=card_by_opportunity.get(result.opportunity_id),
@@ -383,6 +411,16 @@ class EvidencePipeline:
                     "opportunity_id": result.opportunity_id,
                     "verdict": decision.verdict.value,
                     "gates": [asdict(gate) for gate in decision.gates],
+                    "round_number": final_round,
+                    "evidence_card_id": card_by_opportunity[result.opportunity_id].id,
+                    "score_snapshot_id": score_by_opportunity[result.opportunity_id].id,
+                    "gap_hypothesis_id": gap_id_by_opportunity[result.opportunity_id],
+                    "critic_result_id": str(
+                        uuid5(
+                            context.run_id,
+                            f"critic:{final_round}:{result.opportunity_id}",
+                        )
+                    ),
                 }
             )
         await self._commit(context, "FINAL", {"decisions": decisions})
@@ -401,14 +439,34 @@ class EvidencePipeline:
             ),
         )
 
-    async def _checkpoint_research_more(
+    async def _round_two(
         self,
         context: PipelineContext,
+        evidence: tuple[CapturedEvidence, ...],
+        extraction: PainExtractionBatch,
+        clusters: ClusterBatch,
+        competitor_research: CompetitorResearchCheckpoint,
+        gap: GapResearchBatch,
+        cards: tuple[EvidenceCard, ...],
+        scores: tuple[OpportunityScoreSnapshot, ...],
+        hypotheses: HypothesisBatch,
         critics: CriticBatch,
-    ) -> str | None:
+        execution: PipelineExecution,
+        *,
+        examined_volume: tuple[int, int],
+        examined_items: tuple[tuple[str, str, datetime], ...],
+    ) -> tuple[
+        GapResearchBatch,
+        tuple[EvidenceCard, ...],
+        tuple[OpportunityScoreSnapshot, ...],
+        HypothesisBatch,
+        CriticBatch,
+        str | None,
+    ]:
         recommendations = tuple(
             intent
             for result in critics.results
+            if result.verdict is Verdict.RESEARCH_MORE
             for intent in research_more_intents(
                 result,
                 completed_rounds=1,
@@ -418,32 +476,193 @@ class EvidencePipeline:
         unique = {intent.id: intent for intent in recommendations}
         intents = tuple(unique[key] for key in sorted(unique))[:4]
         if not intents:
-            return None
+            return gap, cards, scores, hypotheses, critics, None
         existing = await self.store.load_stage(context, "RESEARCH_MORE_CONTROL")
-        if existing is not None:
-            status = _string_field(existing, "status")
-        else:
-            remaining = await self.store.remaining_agent_calls(context)
+        semantic_stages = ("EXTRACT_R2", "CLUSTER_R2", "GAP_R2", "HYPOTHESIS_R2", "CRITIC_R2")
+        completed_values: list[str] = []
+        for semantic_stage in semantic_stages:
+            if await self.store.load_stage(context, semantic_stage) is not None:
+                completed_values.append(semantic_stage)
+        completed = tuple(completed_values)
+        remaining = await self.store.remaining_agent_calls(context)
+        required = len(semantic_stages) - len(completed)
+        if existing is None:
             if context.budget_limits.get("max_research_rounds", 1) < 2:
                 status = "STOPPED_ROUND_LIMIT"
-            elif remaining < 5:
+            elif remaining < required:
                 status = "STOPPED_AGENT_BUDGET"
             else:
-                # Five semantic calls are required for a coherent second pass:
-                # EXTRACT, CLUSTER, GAP, HYPOTHESIS, and blind CRITIC. Persist the
-                # intent rather than partially executing a round.
-                status = "DEFERRED_COHERENT_ROUND"
+                status = "EXECUTING"
             await self._commit(
                 context,
                 "RESEARCH_MORE_CONTROL",
                 {
                     "status": status,
                     "remaining_agent_calls": remaining,
-                    "required_agent_calls": 5,
+                    "required_agent_calls": required,
                     "intents": [intent.model_dump(mode="json") for intent in intents],
                 },
             )
-        return "RESEARCH_MORE_DEFERRED_AGENT_BUDGET" if status == "STOPPED_AGENT_BUDGET" else None
+        else:
+            status = _string_field(existing, "status")
+            stored_intents = existing.get("intents")
+            if not isinstance(stored_intents, list):
+                raise ValueError("research-more checkpoint intents must be a list")
+            intents = tuple(QueryIntent.model_validate(item) for item in stored_intents)
+        if status.startswith("STOPPED_"):
+            warning = (
+                "RESEARCH_MORE_STOPPED_AGENT_BUDGET"
+                if status == "STOPPED_AGENT_BUDGET"
+                else "RESEARCH_MORE_STOPPED_ROUND_LIMIT"
+            )
+            return gap, cards, scores, hypotheses, critics, warning
+        if remaining < required:
+            raise TaskHandlerError(
+                ErrorKind.BUDGET_EXHAUSTED,
+                error_class="ResearchMoreAgentBudgetExhausted",
+            )
+        request_budget, signal_budget = await self.store.remaining_collection_budget(context)
+        if request_budget == 0 or signal_budget == 0:
+            result_payload = {
+                "status": "STOPPED_COLLECTION_BUDGET",
+                "new_evidence_ids": [],
+            }
+            if await self.store.load_stage(context, "RESEARCH_MORE_RESULT") is None:
+                await self._commit(context, "RESEARCH_MORE_RESULT", result_payload)
+            return (
+                gap,
+                cards,
+                scores,
+                hypotheses,
+                critics,
+                "RESEARCH_MORE_STOPPED_COLLECTION_BUDGET",
+            )
+        round_context = replace(
+            context,
+            budget_limits={
+                **context.budget_limits,
+                "max_collector_requests_per_run": request_budget,
+                "max_raw_signals_per_run": signal_budget,
+            },
+        )
+        collect_payload = await self.store.load_stage(context, "COLLECT_R2")
+        if collect_payload is None:
+            plan = QueryPlan(round_number=2, intents=intents)
+            results = await self._collect(round_context, plan)
+            collect_payload = {
+                "results": [item.model_dump(mode="json") for item in results],
+                "item_count": sum(len(item.items) for item in results),
+                "examined_volume": _examined_volume(results, as_of=context.collection_until),
+                "examined_items": _examined_items(results),
+            }
+            await self._commit(context, "COLLECT_R2", collect_payload)
+            collect_payload = await self.store.load_stage(context, "COLLECT_R2") or collect_payload
+        new_ids = _string_tuple_field(collect_payload, "evidence_ids")
+        prior_ids = {item.evidence_id for item in evidence}
+        genuinely_new_ids = tuple(sorted(set(new_ids) - prior_ids))
+        if not genuinely_new_ids:
+            result_payload = {
+                "status": "STOPPED_NO_NEW_EVIDENCE",
+                "new_evidence_ids": [],
+            }
+            if await self.store.load_stage(context, "RESEARCH_MORE_RESULT") is None:
+                await self._commit(context, "RESEARCH_MORE_RESULT", result_payload)
+            return (
+                gap,
+                cards,
+                scores,
+                hypotheses,
+                critics,
+                "RESEARCH_MORE_NO_NEW_EVIDENCE",
+            )
+        combined_ids = tuple(sorted(prior_ids | set(genuinely_new_ids)))
+        combined_evidence = await self.store.load_evidence(context, combined_ids)
+        new_evidence = tuple(
+            item for item in combined_evidence if item.evidence_id in genuinely_new_ids
+        )
+        records = {
+            item.evidence_id: EvidenceRecord(
+                item.evidence_id, item.source, item.url, item.text, item.observed_at
+            )
+            for item in combined_evidence
+        }
+        new_extraction = await self._extract(
+            context, new_evidence, records, execution, stage="EXTRACT_R2", round_number=2
+        )
+        merged_pains = {
+            item.id: item for item in (*extraction.pain_signals, *new_extraction.pain_signals)
+        }
+        extraction = PainExtractionBatch(
+            pain_signals=tuple(merged_pains[key] for key in sorted(merged_pains))
+        )
+        round_two_clusters = await self._cluster(
+            context,
+            extraction,
+            execution,
+            stage="CLUSTER_R2",
+            round_number=2,
+            priority_pain_ids=frozenset(item.id for item in new_extraction.pain_signals),
+        )
+        clusters = _merge_cluster_batches(clusters, round_two_clusters)
+        round_two_gap = await self._research_gap(
+            context,
+            combined_evidence,
+            records,
+            clusters,
+            competitor_research,
+            execution,
+            stage="GAP_R2",
+            round_number=2,
+            priority_evidence_ids=frozenset(genuinely_new_ids),
+        )
+        gap = _merge_gap_batches(gap, round_two_gap)
+        round_two_examined_items = _examined_items_field(collect_payload)
+        if examined_items or round_two_examined_items:
+            volumes = _examined_volume_from_items(
+                (*examined_items, *round_two_examined_items),
+                as_of=context.collection_until,
+            )
+        else:
+            round_two_volume = _examined_volume_field(collect_payload)
+            volumes = (
+                examined_volume[0] + round_two_volume[0],
+                examined_volume[1] + round_two_volume[1],
+            )
+        cards, scores = await self._cards_and_scores(
+            context,
+            combined_evidence,
+            extraction,
+            clusters,
+            gap,
+            examined_volume=(volumes[0], volumes[1]),
+            stage="CARD_SCORE_R2",
+            round_number=2,
+        )
+        hypotheses = await self._hypotheses(
+            context,
+            gap,
+            cards,
+            clusters,
+            execution,
+            stage="HYPOTHESIS_R2",
+            round_number=2,
+        )
+        critics = await self._critic(
+            context,
+            gap,
+            cards,
+            hypotheses,
+            execution,
+            stage="CRITIC_R2",
+            round_number=2,
+        )
+        result_payload = {
+            "status": "COMPLETE",
+            "new_evidence_ids": list(genuinely_new_ids),
+        }
+        if await self.store.load_stage(context, "RESEARCH_MORE_RESULT") is None:
+            await self._commit(context, "RESEARCH_MORE_RESULT", result_payload)
+        return gap, cards, scores, hypotheses, critics, None
 
     async def _extract(
         self,
@@ -451,6 +670,9 @@ class EvidencePipeline:
         evidence: tuple[CapturedEvidence, ...],
         records: dict[str, EvidenceRecord],
         execution: PipelineExecution,
+        *,
+        stage: str = "EXTRACT",
+        round_number: int = 1,
     ) -> PainExtractionBatch:
         evidence_input = _bounded_evidence_input(evidence)
         input_json = _bounded_stage_input(
@@ -460,13 +682,14 @@ class EvidencePipeline:
         permitted = _selected_ids(input_json, "evidence")
         payload, is_new = await self._load_or_reason(
             context,
-            stage="EXTRACT",
+            stage=stage,
             operation=SemanticOperation.EXTRACT,
             effort=AgentEffort.LOW,
             schema_type=PainExtractionBatch,
             input_json=input_json,
             permitted_evidence_ids=permitted,
             execution=execution,
+            round_number=round_number,
         )
         provider_batch = PainExtractionBatch.model_validate(payload)
         normalized = []
@@ -495,8 +718,8 @@ class EvidencePipeline:
         if is_new:
             await self._commit(
                 context,
-                "EXTRACT",
-                execution.checkpoint_payload("EXTRACT", batch.model_dump(mode="json")),
+                stage,
+                execution.checkpoint_payload(stage, batch.model_dump(mode="json")),
             )
         return batch
 
@@ -558,6 +781,10 @@ class EvidencePipeline:
         context: PipelineContext,
         extraction: PainExtractionBatch,
         execution: PipelineExecution,
+        *,
+        stage: str = "CLUSTER",
+        round_number: int = 1,
+        priority_pain_ids: frozenset[str] = frozenset(),
     ) -> ClusterBatch:
         input_json = _bounded_stage_input(
             (
@@ -567,6 +794,7 @@ class EvidencePipeline:
                 ),
             ),
             total_counts={"pain_signals": len(extraction.pain_signals)},
+            priority_ids={"pain_signals": priority_pain_ids},
         )
         selected_pain_ids = frozenset(_selected_ids(input_json, "pain_signals"))
         selected_extraction = PainExtractionBatch(
@@ -576,7 +804,7 @@ class EvidencePipeline:
         )
         payload, is_new = await self._load_or_reason(
             context,
-            stage="CLUSTER",
+            stage=stage,
             operation=SemanticOperation.CLUSTER,
             effort=AgentEffort.MEDIUM,
             schema_type=ClusterBatch,
@@ -587,6 +815,7 @@ class EvidencePipeline:
                 )
             ),
             execution=execution,
+            round_number=round_number,
         )
         batch = _normalize_clusters(
             context,
@@ -607,8 +836,8 @@ class EvidencePipeline:
         if is_new:
             await self._commit(
                 context,
-                "CLUSTER",
-                execution.checkpoint_payload("CLUSTER", batch.model_dump(mode="json")),
+                stage,
+                execution.checkpoint_payload(stage, batch.model_dump(mode="json")),
             )
         return batch
 
@@ -620,10 +849,14 @@ class EvidencePipeline:
         clusters: ClusterBatch,
         competitor_research: CompetitorResearchCheckpoint,
         execution: PipelineExecution,
+        *,
+        stage: str = "GAP",
+        round_number: int = 1,
+        priority_evidence_ids: frozenset[str] = frozenset(),
     ) -> GapResearchBatch:
-        existing = await self.store.load_stage(context, "GAP")
+        existing = await self.store.load_stage(context, stage)
         if existing is not None:
-            execution.record_checkpoint("GAP", existing)
+            execution.record_checkpoint(stage, existing)
             return GapResearchBatch.model_validate(_artifact_payload(existing))
         if competitor_research.status is not CompetitorResearchStatus.COMPLETE:
             batch = GapResearchBatch(
@@ -634,9 +867,12 @@ class EvidencePipeline:
                 opportunities=(),
                 opportunity_fit=(),
             )
-            await self._commit(context, "GAP", batch.model_dump(mode="json"))
+            await self._commit(context, stage, batch.model_dump(mode="json"))
             return batch
-        evidence_input = _bounded_evidence_input(evidence)
+        evidence_input = _bounded_evidence_input(
+            evidence,
+            priority_ids=priority_evidence_ids,
+        )
         snapshot_input = [
             {
                 **item.model_dump(mode="json"),
@@ -658,6 +894,7 @@ class EvidencePipeline:
                 "competitor_snapshots": len(competitor_research.snapshots),
                 "evidence": len(evidence),
             },
+            priority_ids={"evidence": priority_evidence_ids},
         )
         selected_evidence_ids = _selected_ids(input_json, "evidence")
         selected_problem_ids = _selected_ids(input_json, "problems")
@@ -667,7 +904,7 @@ class EvidencePipeline:
         )
         payload, is_new = await self._load_or_reason(
             context,
-            stage="GAP",
+            stage=stage,
             operation=SemanticOperation.GAP,
             effort=AgentEffort.MEDIUM,
             schema_type=GapResearchBatch,
@@ -675,6 +912,7 @@ class EvidencePipeline:
             permitted_evidence_ids=selected_evidence_ids,
             permitted_urls=selected_snapshot_urls,
             execution=execution,
+            round_number=round_number,
         )
         batch = _normalize_gap(context, GapResearchBatch.model_validate(payload))
         _require_unique_ids("claims", batch.claims)
@@ -742,8 +980,8 @@ class EvidencePipeline:
         if is_new:
             await self._commit(
                 context,
-                "GAP",
-                execution.checkpoint_payload("GAP", batch.model_dump(mode="json")),
+                stage,
+                execution.checkpoint_payload(stage, batch.model_dump(mode="json")),
             )
         return batch
 
@@ -756,8 +994,10 @@ class EvidencePipeline:
         gap: GapResearchBatch,
         *,
         examined_volume: tuple[int, int],
+        stage: str = "CARD_SCORE",
+        round_number: int = 1,
     ) -> tuple[tuple[EvidenceCard, ...], tuple[OpportunityScoreSnapshot, ...]]:
-        existing = await self.store.load_stage(context, "CARD_SCORE")
+        existing = await self.store.load_stage(context, stage)
         if existing is not None:
             card_values = existing.get("cards")
             score_values = existing.get("scores")
@@ -786,6 +1026,7 @@ class EvidencePipeline:
         cards = []
         scores = []
         inputs_by_opportunity = {item.opportunity_id: item for item in gap.opportunity_fit}
+        snapshot_round = f":{round_number}" if round_number > 1 else ""
         for opportunity in gap.opportunities:
             problem_id = gap_by_id[opportunity.gap_hypothesis_id].canonical_problem_id
             observations = []
@@ -811,7 +1052,7 @@ class EvidencePipeline:
                     )
                 )
             card = build_evidence_card(
-                str(uuid5(context.run_id, f"card:{opportunity.id}")),
+                str(uuid5(context.run_id, f"card{snapshot_round}:{opportunity.id}")),
                 opportunity.id,
                 tuple(observations),
             )
@@ -871,7 +1112,7 @@ class EvidencePipeline:
                 ),
             )
             score = score_opportunity(
-                snapshot_id=str(uuid5(context.run_id, f"score:{opportunity.id}")),
+                snapshot_id=str(uuid5(context.run_id, f"score{snapshot_round}:{opportunity.id}")),
                 opportunity_id=opportunity.id,
                 mission_revision_id=context.mission_revision.id,
                 inputs=scoring,
@@ -883,7 +1124,7 @@ class EvidencePipeline:
         result = (tuple(cards), tuple(scores))
         await self._commit(
             context,
-            "CARD_SCORE",
+            stage,
             {
                 "cards": [item.model_dump(mode="json") for item in result[0]],
                 "scores": [item.model_dump(mode="json") for item in result[1]],
@@ -898,52 +1139,78 @@ class EvidencePipeline:
         cards: tuple[EvidenceCard, ...],
         clusters: ClusterBatch,
         execution: PipelineExecution,
+        *,
+        stage: str = "HYPOTHESIS",
+        round_number: int = 1,
     ) -> HypothesisBatch:
-        existing = await self.store.load_stage(context, "HYPOTHESIS")
+        existing = await self.store.load_stage(context, stage)
         if existing is not None:
-            execution.record_checkpoint("HYPOTHESIS", existing)
+            execution.record_checkpoint(stage, existing)
             return HypothesisBatch.model_validate(_artifact_payload(existing))
         if not gap.opportunities:
-            batch = HypothesisBatch(hypotheses=())
-            await self._commit(context, "HYPOTHESIS", batch.model_dump(mode="json"))
+            batch = HypothesisBatch(hypotheses=(), hypothesis_card_links=())
+            await self._commit(context, stage, batch.model_dump(mode="json"))
             return batch
+        gap_by_id = {item.id: item for item in gap.gaps}
+        problem_by_id = {item.id: item for item in clusters.problems}
+        card_by_opportunity = {item.opportunity_id: item for item in cards}
+        claims = [item.model_dump(mode="json") for item in gap.claims]
+        claim_ids = [item.id for item in gap.claims]
+        cases = []
+        for opportunity in sorted(gap.opportunities, key=lambda item: item.id):
+            hypothesis_gap = gap_by_id[opportunity.gap_hypothesis_id]
+            problem = problem_by_id.get(hypothesis_gap.canonical_problem_id)
+            card = card_by_opportunity.get(opportunity.id)
+            if problem is None or card is None:
+                continue
+            cases.append(
+                {
+                    "opportunity_id": opportunity.id,
+                    "problem": problem.model_dump(mode="json"),
+                    "evidence_card": _compact_card(card),
+                    "competitor_claims": claims,
+                    "permitted_claim_ids": claim_ids,
+                }
+            )
         input_json = _bounded_stage_input(
-            (
-                (
-                    "problems",
-                    [item.model_dump(mode="json") for item in clusters.problems],
-                ),
-                ("cards", [_compact_card(item) for item in cards]),
-                ("claims", [item.model_dump(mode="json") for item in gap.claims]),
-            ),
-            total_counts={
-                "problems": len(clusters.problems),
-                "cards": len(cards),
-                "claims": len(gap.claims),
-            },
+            (("cases", cases),),
+            total_counts={"cases": len(cases)},
         )
-        permitted_claims = frozenset(_selected_ids(input_json, "claims"))
-        permitted_problem_ids = frozenset(_selected_ids(input_json, "problems"))
+        selected_cases = input_json.get("cases")
+        if not isinstance(selected_cases, list):
+            raise ValueError("hypothesis cases must be a list")
+        permitted_claims = frozenset(_selected_case_claim_ids(input_json))
         payload, is_new = await self._load_or_reason(
             context,
-            stage="HYPOTHESIS",
+            stage=stage,
             operation=SemanticOperation.HYPOTHESIS,
             effort=AgentEffort.MEDIUM,
             schema_type=HypothesisBatch,
             input_json=input_json,
-            permitted_evidence_ids=_selected_claim_evidence_ids(input_json),
+            permitted_evidence_ids=_selected_case_evidence_ids(input_json),
             execution=execution,
+            round_number=round_number,
         )
-        batch = _normalize_hypotheses(context, HypothesisBatch.model_validate(payload))
+        batch = _normalize_hypotheses(
+            HypothesisBatch.model_validate(payload),
+            selected_cases=selected_cases,
+        )
+        selected_problem_ids = {
+            problem_id
+            for case in selected_cases
+            if isinstance(case, dict)
+            and isinstance(case.get("problem"), dict)
+            and isinstance((problem_id := case["problem"].get("id")), str)
+        }
         for hypothesis in batch.hypotheses:
             validate_problem_hypothesis(hypothesis, permitted_claims)
-            if hypothesis.canonical_problem_id not in permitted_problem_ids:
+            if hypothesis.canonical_problem_id not in selected_problem_ids:
                 raise ValueError("hypothesis references unknown canonical problem")
         if is_new:
             await self._commit(
                 context,
-                "HYPOTHESIS",
-                execution.checkpoint_payload("HYPOTHESIS", batch.model_dump(mode="json")),
+                stage,
+                execution.checkpoint_payload(stage, batch.model_dump(mode="json")),
             )
         return batch
 
@@ -954,14 +1221,17 @@ class EvidencePipeline:
         cards: tuple[EvidenceCard, ...],
         hypotheses: HypothesisBatch,
         execution: PipelineExecution,
+        *,
+        stage: str = "CRITIC",
+        round_number: int = 1,
     ) -> CriticBatch:
-        existing = await self.store.load_stage(context, "CRITIC")
+        existing = await self.store.load_stage(context, stage)
         if existing is not None:
-            execution.record_checkpoint("CRITIC", existing)
+            execution.record_checkpoint(stage, existing)
             return CriticBatch.model_validate(_artifact_payload(existing))
         if not gap.opportunities:
             batch = CriticBatch(results=())
-            await self._commit(context, "CRITIC", batch.model_dump(mode="json"))
+            await self._commit(context, stage, batch.model_dump(mode="json"))
             return batch
         critic_cases = _critic_cases(gap, cards, hypotheses)
         input_json = _bounded_stage_input(
@@ -972,17 +1242,18 @@ class EvidencePipeline:
         if opportunity_ids:
             payload, is_new = await self._load_or_reason(
                 context,
-                stage="CRITIC",
+                stage=stage,
                 operation=SemanticOperation.CRITIC,
                 effort=AgentEffort.MEDIUM,
                 schema_type=CriticBatch,
                 input_json=input_json,
                 permitted_evidence_ids=_selected_case_evidence_ids(input_json),
                 execution=execution,
+                round_number=round_number,
             )
             provider_batch = CriticBatch.model_validate(payload)
         else:
-            execution.record_input("CRITIC", input_json)
+            execution.record_input(stage, input_json)
             provider_batch = CriticBatch(results=())
             is_new = True
         result_ids = [item.opportunity_id for item in provider_batch.results]
@@ -1008,8 +1279,8 @@ class EvidencePipeline:
         if is_new:
             await self._commit(
                 context,
-                "CRITIC",
-                execution.checkpoint_payload("CRITIC", batch.model_dump(mode="json")),
+                stage,
+                execution.checkpoint_payload(stage, batch.model_dump(mode="json")),
             )
         return batch
 
@@ -1025,6 +1296,7 @@ class EvidencePipeline:
         permitted_evidence_ids: tuple[str, ...],
         execution: PipelineExecution,
         permitted_urls: tuple[str, ...] = (),
+        round_number: int = 1,
     ) -> tuple[dict[str, object], bool]:
         existing = await self.store.load_stage(context, stage)
         if existing is not None:
@@ -1043,7 +1315,7 @@ class EvidencePipeline:
         schema = schema_type.model_json_schema()
         schema["title"] = f"GapForge {stage} v0.1"
         request = AgentRequest(
-            call_id=self._call_id(context, operation, 1),
+            call_id=self._call_id(context, operation, round_number),
             task=operation,
             effort=effort,
             input_json=input_json,
@@ -1115,7 +1387,10 @@ class EvidencePipeline:
         )
         if result.status is not AgentStatus.COMPLETED or result.output_json is None:
             raise _agent_result_error(result.status, "QUERY_PLAN")
-        return QueryPlan.model_validate(result.output_json)
+        plan = QueryPlan.model_validate(result.output_json)
+        if plan.round_number != 1:
+            raise ValueError("initial query plan must have round_number=1")
+        return plan
 
     async def _collect(
         self, context: PipelineContext, plan: QueryPlan
@@ -1241,13 +1516,67 @@ def _examined_volume(
     *,
     as_of: datetime,
 ) -> dict[str, int]:
+    current, previous = _examined_volume_from_items(
+        tuple(
+            (result.source.value, item.external_id, item.source_created_at)
+            for result in results
+            for item in result.items
+        ),
+        as_of=as_of,
+    )
+    return {"current_7d": current, "previous_28d": previous}
+
+
+def _examined_items(results: tuple[CollectResult, ...]) -> list[dict[str, str]]:
+    unique = {
+        (result.source.value, item.external_id): {
+            "source": result.source.value,
+            "external_id": item.external_id,
+            "source_created_at": item.source_created_at.isoformat(),
+        }
+        for result in results
+        for item in result.items
+    }
+    return [unique[key] for key in sorted(unique)]
+
+
+def _examined_volume_from_items(
+    items: tuple[tuple[str, str, datetime], ...],
+    *,
+    as_of: datetime,
+) -> tuple[int, int]:
     current_start = as_of - timedelta(days=7)
     previous_start = as_of - timedelta(days=35)
-    timestamps = tuple(item.source_created_at for result in results for item in result.items)
-    return {
-        "current_7d": sum(current_start <= value < as_of for value in timestamps),
-        "previous_28d": sum(previous_start <= value < current_start for value in timestamps),
-    }
+    unique = {(source, external_id): timestamp for source, external_id, timestamp in items}
+    return (
+        sum(current_start <= value < as_of for value in unique.values()),
+        sum(previous_start <= value < current_start for value in unique.values()),
+    )
+
+
+def _examined_items_field(
+    payload: Mapping[str, object],
+) -> tuple[tuple[str, str, datetime], ...]:
+    values = payload.get("examined_items")
+    if values is None:
+        return ()
+    if not isinstance(values, list):
+        raise ValueError("examined_items must be a list")
+    parsed: list[tuple[str, str, datetime]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("examined item must be an object")
+        source = value.get("source")
+        external_id = value.get("external_id")
+        source_created_at = value.get("source_created_at")
+        if not isinstance(source, str) or not source:
+            raise ValueError("examined item identity must be nonempty")
+        if not isinstance(external_id, str) or not external_id:
+            raise ValueError("examined item identity must be nonempty")
+        if not isinstance(source_created_at, str):
+            raise ValueError("examined item timestamp must be a string")
+        parsed.append((source, external_id, datetime.fromisoformat(source_created_at)))
+    return tuple(sorted(set(parsed)))
 
 
 def _examined_volume_field(payload: Mapping[str, object]) -> tuple[int, int]:
@@ -1341,6 +1670,36 @@ def _require_unique_ids(label: str, values: tuple[Any, ...]) -> None:
     identifiers = [item.id for item in values]
     if len(identifiers) != len(set(identifiers)):
         raise ValueError(f"{label} IDs must be unique")
+
+
+def _merge_cluster_batches(first: ClusterBatch, latest: ClusterBatch) -> ClusterBatch:
+    problems = {item.id: item for item in (*first.problems, *latest.problems)}
+    clusters = {item.id: item for item in (*first.clusters, *latest.clusters)}
+    memberships = {
+        (item.cluster_id, item.pain_signal_id): item
+        for item in (*first.memberships, *latest.memberships)
+    }
+    return ClusterBatch(
+        problems=tuple(problems[key] for key in sorted(problems)),
+        clusters=tuple(clusters[key] for key in sorted(clusters)),
+        memberships=tuple(memberships[key] for key in sorted(memberships)),
+    )
+
+
+def _merge_gap_batches(first: GapResearchBatch, latest: GapResearchBatch) -> GapResearchBatch:
+    def merged(values: tuple[Any, ...], newer: tuple[Any, ...]) -> tuple[Any, ...]:
+        by_id = {item.id: item for item in (*values, *newer)}
+        return tuple(by_id[key] for key in sorted(by_id))
+
+    fits = {item.opportunity_id: item for item in (*first.opportunity_fit, *latest.opportunity_fit)}
+    return GapResearchBatch(
+        claims=merged(first.claims, latest.claims),
+        competitors=merged(first.competitors, latest.competitors),
+        competitor_evidence=merged(first.competitor_evidence, latest.competitor_evidence),
+        gaps=merged(first.gaps, latest.gaps),
+        opportunities=merged(first.opportunities, latest.opportunities),
+        opportunity_fit=tuple(fits[key] for key in sorted(fits)),
+    )
 
 
 def _stable_id(kind: str, *parts: object) -> str:
@@ -1459,7 +1818,14 @@ def _normalize_gap(context: PipelineContext, batch: GapResearchBatch) -> GapRese
     opportunity_ids = {
         item.id: _stable_id(
             "opportunity",
-            gap_ids.get(item.gap_hypothesis_id, item.gap_hypothesis_id),
+            next(
+                (
+                    gap.canonical_problem_id
+                    for gap in batch.gaps
+                    if gap.id == item.gap_hypothesis_id
+                ),
+                item.gap_hypothesis_id,
+            ),
             normalize_text(item.title),
         )
         for item in batch.opportunities
@@ -1473,101 +1839,168 @@ def _normalize_gap(context: PipelineContext, batch: GapResearchBatch) -> GapRese
     ):
         if len(set(id_map.values())) != len(id_map):
             raise ValueError(f"{label} canonical content must be unique")
-    return GapResearchBatch(
-        claims=tuple(
+    normalized_claims = []
+    for item in batch.claims:
+        citations = tuple(
+            citation.model_copy(
+                update={
+                    "evidence_id": competitor_evidence_ids.get(
+                        citation.evidence_id, citation.evidence_id
+                    )
+                }
+            )
+            for citation in item.citations
+        )
+        normalized_claims.append(
             item.model_copy(
                 update={
                     "id": claim_ids[item.id],
                     "evidence_ids": tuple(
-                        competitor_evidence_ids.get(value, value) for value in item.evidence_ids
+                        sorted(
+                            competitor_evidence_ids.get(value, value) for value in item.evidence_ids
+                        )
                     ),
                     "citations": tuple(
-                        citation.model_copy(
-                            update={
-                                "evidence_id": competitor_evidence_ids.get(
-                                    citation.evidence_id, citation.evidence_id
-                                )
-                            }
+                        sorted(
+                            citations,
+                            key=lambda value: json.dumps(
+                                value.model_dump(mode="json"), sort_keys=True
+                            ),
                         )
-                        for citation in item.citations
                     ),
                     "contradicts_claim_ids": tuple(
-                        claim_ids.get(value, value) for value in item.contradicts_claim_ids
+                        sorted(claim_ids.get(value, value) for value in item.contradicts_claim_ids)
                     ),
                 }
             )
-            for item in batch.claims
-        ),
-        competitors=tuple(
-            item.model_copy(update={"id": competitor_ids[item.id]}) for item in batch.competitors
-        ),
-        competitor_evidence=tuple(
-            item.model_copy(
-                update={
-                    "id": competitor_evidence_ids[item.id],
-                    "competitor_id": competitor_ids.get(item.competitor_id, item.competitor_id),
-                    "claim_ids": tuple(claim_ids.get(value, value) for value in item.claim_ids),
-                }
-            )
-            for item in batch.competitor_evidence
-        ),
-        gaps=tuple(
-            item.model_copy(
-                update={
-                    "id": gap_ids[item.id],
-                    "competitor_evidence_ids": tuple(
+        )
+    normalized_competitors = tuple(
+        item.model_copy(update={"id": competitor_ids[item.id]}) for item in batch.competitors
+    )
+    normalized_competitor_evidence = tuple(
+        item.model_copy(
+            update={
+                "id": competitor_evidence_ids[item.id],
+                "competitor_id": competitor_ids.get(item.competitor_id, item.competitor_id),
+                "claim_ids": tuple(sorted(claim_ids.get(value, value) for value in item.claim_ids)),
+            }
+        )
+        for item in batch.competitor_evidence
+    )
+    normalized_gaps = tuple(
+        item.model_copy(
+            update={
+                "id": gap_ids[item.id],
+                "user_evidence_ids": tuple(sorted(item.user_evidence_ids)),
+                "competitor_evidence_ids": tuple(
+                    sorted(
                         competitor_evidence_ids.get(value, value)
                         for value in item.competitor_evidence_ids
-                    ),
-                }
-            )
-            for item in batch.gaps
+                    )
+                ),
+            }
+        )
+        for item in batch.gaps
+    )
+    normalized_opportunities = tuple(
+        item.model_copy(
+            update={
+                "id": opportunity_ids[item.id],
+                "gap_hypothesis_id": gap_ids.get(item.gap_hypothesis_id, item.gap_hypothesis_id),
+            }
+        )
+        for item in batch.opportunities
+    )
+    normalized_fits = tuple(
+        item.model_copy(
+            update={"opportunity_id": opportunity_ids.get(item.opportunity_id, item.opportunity_id)}
+        )
+        for item in batch.opportunity_fit
+    )
+    return GapResearchBatch(
+        claims=tuple(sorted(normalized_claims, key=lambda value: value.id)),
+        competitors=tuple(sorted(normalized_competitors, key=lambda value: value.id)),
+        competitor_evidence=tuple(
+            sorted(normalized_competitor_evidence, key=lambda value: value.id)
         ),
-        opportunities=tuple(
-            item.model_copy(
-                update={
-                    "id": opportunity_ids[item.id],
-                    "gap_hypothesis_id": gap_ids.get(
-                        item.gap_hypothesis_id, item.gap_hypothesis_id
-                    ),
-                }
-            )
-            for item in batch.opportunities
-        ),
-        opportunity_fit=tuple(
-            item.model_copy(
-                update={
-                    "opportunity_id": opportunity_ids.get(item.opportunity_id, item.opportunity_id)
-                }
-            )
-            for item in batch.opportunity_fit
-        ),
+        gaps=tuple(sorted(normalized_gaps, key=lambda value: value.id)),
+        opportunities=tuple(sorted(normalized_opportunities, key=lambda value: value.id)),
+        opportunity_fit=tuple(sorted(normalized_fits, key=lambda value: value.opportunity_id)),
     )
 
 
-def _normalize_hypotheses(context: PipelineContext, batch: HypothesisBatch) -> HypothesisBatch:
+def _normalize_hypotheses(
+    batch: HypothesisBatch,
+    *,
+    selected_cases: list[dict[str, Any]],
+) -> HypothesisBatch:
     _require_unique_ids("hypotheses", batch.hypotheses)
-    normalized = HypothesisBatch(
-        hypotheses=tuple(
+    hypotheses_by_id = {item.id: item for item in batch.hypotheses}
+    cases_by_opportunity = {
+        case["opportunity_id"]: case
+        for case in selected_cases
+        if isinstance(case.get("opportunity_id"), str)
+    }
+    links_by_hypothesis = {item.hypothesis_id: item for item in batch.hypothesis_card_links}
+    linked_opportunities = [item.opportunity_id for item in batch.hypothesis_card_links]
+    if len(links_by_hypothesis) != len(batch.hypothesis_card_links):
+        raise ValueError("each hypothesis requires exactly one card link")
+    if len(linked_opportunities) != len(set(linked_opportunities)):
+        raise ValueError("each opportunity requires exactly one hypothesis")
+    if set(links_by_hypothesis) != set(hypotheses_by_id):
+        raise ValueError("hypothesis links must cover every hypothesis exactly once")
+    if set(linked_opportunities) != set(cases_by_opportunity):
+        raise ValueError("hypothesis links must cover every selected opportunity")
+    normalized_values = []
+    normalized_links = []
+    for provider_id in sorted(hypotheses_by_id):
+        item = hypotheses_by_id[provider_id]
+        link = links_by_hypothesis[provider_id]
+        case = cases_by_opportunity[link.opportunity_id]
+        problem = case.get("problem")
+        card = case.get("evidence_card")
+        if not isinstance(problem, dict) or not isinstance(card, dict):
+            raise ValueError("hypothesis input case is incomplete")
+        if link.evidence_card_id != card.get("id"):
+            raise ValueError("hypothesis link references a different evidence card")
+        if item.canonical_problem_id != problem.get("id"):
+            raise ValueError("hypothesis link references a different canonical problem")
+        normalized_id = _stable_id(
+            "problem-hypothesis",
+            link.opportunity_id,
+            link.evidence_card_id,
+            item.canonical_problem_id,
+            normalize_text(item.icp),
+            normalize_text(item.job_to_be_done),
+            normalize_text(item.trigger),
+            normalize_text(item.current_behavior),
+            normalize_text(item.pain),
+            normalize_text(item.workflow_failure),
+            normalize_text(item.falsification_test),
+            sorted(item.supporting_claim_ids),
+            sorted(item.contradicting_claim_ids),
+        )
+        normalized_values.append(
             item.model_copy(
                 update={
-                    "id": _stable_id(
-                        "problem-hypothesis",
-                        item.canonical_problem_id,
-                        normalize_text(item.icp),
-                        normalize_text(item.job_to_be_done),
-                        normalize_text(item.trigger),
-                        normalize_text(item.current_behavior),
-                        normalize_text(item.pain),
-                        normalize_text(item.workflow_failure),
-                        normalize_text(item.falsification_test),
-                        sorted(item.supporting_claim_ids),
-                        sorted(item.contradicting_claim_ids),
-                    )
+                    "id": normalized_id,
+                    "supporting_claim_ids": tuple(sorted(item.supporting_claim_ids)),
+                    "contradicting_claim_ids": tuple(sorted(item.contradicting_claim_ids)),
                 }
             )
-            for item in batch.hypotheses
         )
+        normalized_links.append(
+            HypothesisCardLink(
+                hypothesis_id=normalized_id,
+                opportunity_id=link.opportunity_id,
+                evidence_card_id=link.evidence_card_id,
+            )
+        )
+    normalized = HypothesisBatch(
+        hypotheses=tuple(sorted(normalized_values, key=lambda value: value.id)),
+        hypothesis_card_links=tuple(
+            sorted(normalized_links, key=lambda value: value.opportunity_id)
+        ),
     )
     _require_unique_ids("normalized hypotheses", normalized.hypotheses)
     return normalized
@@ -1575,9 +2008,14 @@ def _normalize_hypotheses(context: PipelineContext, batch: HypothesisBatch) -> H
 
 def _bounded_evidence_input(
     evidence: tuple[CapturedEvidence, ...],
+    *,
+    priority_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
     values: list[dict[str, str]] = []
-    for item in sorted(evidence, key=lambda value: value.evidence_id):
+    for item in sorted(
+        evidence,
+        key=lambda value: (value.evidence_id not in priority_ids, value.evidence_id),
+    ):
         candidate = {
             "id": item.evidence_id,
             "url": item.url,
@@ -1621,19 +2059,24 @@ def _bounded_stage_input(
     *,
     total_counts: dict[str, int],
     fixed: Mapping[str, Any] | None = None,
+    priority_ids: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     """Select deterministic partial semantic batches and disclose omissions."""
     payload: dict[str, Any] = dict(fixed or {})
     omitted: dict[str, int] = {}
     for name, raw_values in sections:
+        section_priority = (priority_ids or {}).get(name, frozenset())
         values = sorted(
             raw_values,
-            key=lambda item: json.dumps(
-                item,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
+            key=lambda item: (
+                item.get("id") not in section_priority,
+                json.dumps(
+                    item,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
             ),
         )
         selected: list[dict[str, Any]] = []
@@ -1729,25 +2172,27 @@ def _critic_cases(
 ) -> list[dict[str, Any]]:
     gap_by_id = {item.id: item for item in gap.gaps}
     card_by_opportunity = {item.opportunity_id: item for item in cards}
-    hypotheses_by_problem: dict[str, list[Any]] = {}
-    for item in hypotheses.hypotheses:
-        hypotheses_by_problem.setdefault(item.canonical_problem_id, []).append(item)
+    hypothesis_by_id = {item.id: item for item in hypotheses.hypotheses}
+    link_by_opportunity = {item.opportunity_id: item for item in hypotheses.hypothesis_card_links}
     claims = [item.model_dump(mode="json") for item in gap.claims]
     claim_ids = [item.id for item in gap.claims]
     cases = []
     for opportunity in sorted(gap.opportunities, key=lambda item: item.id):
         hypothesis_gap = gap_by_id[opportunity.gap_hypothesis_id]
-        problem_hypotheses = hypotheses_by_problem.get(
-            hypothesis_gap.canonical_problem_id,
-            [],
-        )
+        link = link_by_opportunity.get(opportunity.id)
         card = card_by_opportunity.get(opportunity.id)
-        if card is None or not problem_hypotheses:
+        if link is None or card is None or link.evidence_card_id != card.id:
+            continue
+        problem_hypothesis = hypothesis_by_id.get(link.hypothesis_id)
+        if (
+            problem_hypothesis is None
+            or problem_hypothesis.canonical_problem_id != hypothesis_gap.canonical_problem_id
+        ):
             continue
         cases.append(
             {
                 "opportunity_id": opportunity.id,
-                "problem_hypothesis": problem_hypotheses[0].model_dump(mode="json"),
+                "problem_hypothesis": problem_hypothesis.model_dump(mode="json"),
                 "evidence_card": card.model_dump(mode="json"),
                 "gap_hypothesis": hypothesis_gap.model_dump(mode="json"),
                 "competitor_claims": claims,

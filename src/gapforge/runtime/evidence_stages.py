@@ -62,8 +62,15 @@ class GapResearchBatch(Contract):
     opportunity_fit: tuple[OpportunityFitContract, ...]
 
 
+class HypothesisCardLink(Contract):
+    hypothesis_id: str
+    opportunity_id: str
+    evidence_card_id: str
+
+
 class HypothesisBatch(Contract):
     hypotheses: tuple[ProblemHypothesis, ...]
+    hypothesis_card_links: tuple[HypothesisCardLink, ...]
 
 
 class CriticBatch(Contract):

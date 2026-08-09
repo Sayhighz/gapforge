@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4, uuid5
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from gapforge.analysis.lifecycle import TrendObservation, classify_trend
 from gapforge.domain.contracts import (
@@ -24,11 +24,22 @@ from gapforge.domain.contracts import (
     SemanticOperation,
     Source,
 )
+from gapforge.domain.contracts import (
+    AgentRequest as DomainAgentRequest,
+)
 from gapforge.integration.evidence_store import (
     SqlAlchemyEvidencePipelineStore,
     StageConflictError,
 )
-from gapforge.integration.semantic import SemanticCall, SemanticContext
+from gapforge.integration.semantic import (
+    AuditedSemanticReasoner,
+    SemanticAdmissionError,
+    SemanticAdmissionKind,
+    SemanticCall,
+    SemanticContext,
+)
+from gapforge.providers import contracts as provider_contracts
+from gapforge.queue.retry import ErrorKind
 from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.runtime.evidence_pipeline import (
     CapturedEvidence,
@@ -45,9 +56,9 @@ from gapforge.runtime.evidence_pipeline import (
 )
 from gapforge.runtime.evidence_stages import PainExtractionBatch
 from gapforge.storage.database import Database
-from gapforge.storage.models import RawSignalRevision, ResearchRun, ResearchTask
+from gapforge.storage.models import AgentCall, RawSignalRevision, ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
-from gapforge.worker import TaskHandlerRegistry, Worker
+from gapforge.worker import TaskHandlerError, TaskHandlerRegistry, Worker
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
 PROVIDER_ALIASES = {
@@ -117,6 +128,12 @@ class RecordingStore:
     async def remaining_agent_calls(self, context: PipelineContext) -> int:
         return self.remaining_calls
 
+    async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]:
+        return (
+            context.budget_limits["max_collector_requests_per_run"],
+            context.budget_limits["max_raw_signals_per_run"],
+        )
+
 
 class RecordingReasoner:
     def __init__(self, events: list[str]) -> None:
@@ -163,16 +180,22 @@ class EmptyCollector:
 
 
 class FullCollector:
+    def __init__(self) -> None:
+        self.requests: list[CollectRequest] = []
+
     async def collect(self, request: CollectRequest) -> CollectResult:
+        self.requests.append(request)
+        external_id = "full-2" if request.intent.id == "follow-up-1" else "full-1"
+        source = request.intent.sources[0]
         return CollectResult.model_validate(
             {
-                "source": "HACKER_NEWS",
+                "source": source.value,
                 "availability": "AVAILABLE",
                 "items": [
                     {
-                        "source": "HACKER_NEWS",
-                        "external_id": "full-1",
-                        "canonical_url": "https://example.test/full-1",
+                        "source": source.value,
+                        "external_id": external_id,
+                        "canonical_url": f"https://example.test/{external_id}",
                         "parent_thread_id": "thread-1",
                         "author_identity": "author-1",
                         "title": "Invoice reconciliation takes hours",
@@ -192,6 +215,14 @@ class UnavailableGithubCollector:
             availability=Availability.SOURCE_UNAVAILABLE,
             request_count=1,
         )
+
+
+class RepeatEvidenceCollector(FullCollector):
+    async def collect(self, request: CollectRequest) -> CollectResult:
+        repeated_intent = request.intent.model_copy(
+            update={"id": "intent-1", "sources": (Source.HACKER_NEWS,)}
+        )
+        return await super().collect(request.model_copy(update={"intent": repeated_intent}))
 
 
 class FullSearch:
@@ -249,10 +280,17 @@ class FullStore(RecordingStore):
     ) -> None:
         self.events.append(f"commit:{commit.stage}")
         self.commits.append(commit)
-        if commit.stage == "COLLECT":
+        if commit.stage in {"COLLECT", "COLLECT_R2"}:
+            evidence_ids = sorted(
+                {
+                    f"{item['source']}:{item['external_id']}:r1"
+                    for result in commit.payload["results"]
+                    for item in result["items"]
+                }
+            )
             self.completed[commit.stage] = {
                 **commit.payload,
-                "evidence_ids": ["HACKER_NEWS:full-1:r1"],
+                "evidence_ids": evidence_ids,
             }
         else:
             self.completed[commit.stage] = commit.payload
@@ -265,21 +303,21 @@ class FullStore(RecordingStore):
         context: PipelineContext,
         evidence_ids: tuple[str, ...],
     ) -> tuple[CapturedEvidence, ...]:
-        assert evidence_ids == ("HACKER_NEWS:full-1:r1",)
-        return (
+        return tuple(
             CapturedEvidence(
-                evidence_id=evidence_ids[0],
+                evidence_id=evidence_id,
                 source=Source.HACKER_NEWS,
-                url="https://example.test/full-1",
+                url=f"https://example.test/{evidence_id.split(':')[1]}",
                 text=(
                     "Invoice reconciliation takes hours\n"
                     "We copy every line into a spreadsheet each week."
                 ),
                 observed_at=NOW,
-                duplicate_group="a" * 64,
-                author_id="author-pseudonym-1",
-                thread_id="thread-1",
-            ),
+                duplicate_group=("a" if "full-1" in evidence_id else "b") * 64,
+                author_id=f"author-{evidence_id}",
+                thread_id=f"thread-{evidence_id}",
+            )
+            for evidence_id in evidence_ids
         )
 
 
@@ -290,11 +328,15 @@ class FullReasoner:
         reverse_outputs: bool = False,
         alias_suffix: str = "",
         recommend_more: bool = False,
+        critic_verdict: str = "RESEARCH_MORE",
+        preserve_extra_opportunity: bool = False,
     ) -> None:
         self.operations: list[SemanticOperation] = []
         self.reverse_outputs = reverse_outputs
         self.alias_suffix = alias_suffix
         self.recommend_more = recommend_more
+        self.critic_verdict = critic_verdict
+        self.preserve_extra_opportunity = preserve_extra_opportunity
         self.input_sizes: list[int] = []
         self.inputs: list[dict[str, object]] = []
 
@@ -446,7 +488,14 @@ class FullReasoner:
                         "falsification_test": "Fails if fewer than five teams report this",
                         "supporting_claim_ids": ["claim-1"],
                     }
-                ]
+                ],
+                "hypothesis_card_links": [
+                    {
+                        "hypothesis_id": "hypothesis-1",
+                        "opportunity_id": "opportunity-1",
+                        "evidence_card_id": "card-1",
+                    }
+                ],
             },
             SemanticOperation.CRITIC: {
                 "results": [
@@ -460,38 +509,108 @@ class FullReasoner:
             },
         }
         output = outputs[operation]
+        if operation is SemanticOperation.CRITIC:
+            output["results"][0]["verdict"] = self.critic_verdict
         if self.alias_suffix:
             output = _rename_provider_aliases(output, self.alias_suffix)
-        if operation is SemanticOperation.CLUSTER:
+        if operation is SemanticOperation.EXTRACT:
+            output["pain_signals"][0]["raw_signal_revision_id"] = call.request.input_json[
+                "evidence"
+            ][0]["id"]
+        elif operation is SemanticOperation.CLUSTER:
             output["memberships"][0]["pain_signal_id"] = call.request.input_json["pain_signals"][0][
                 "id"
             ]
         elif operation is SemanticOperation.GAP:
             problem_id = call.request.input_json["problems"][0]["id"]
             output["gaps"][0]["canonical_problem_id"] = problem_id
+            selected_evidence_id = call.request.input_json["evidence"][0]["id"]
+            output["gaps"][0]["user_evidence_ids"] = [selected_evidence_id]
+            user_claim = next(claim for claim in output["claims"] if claim["kind"] == "USER_PAIN")
+            user_claim["evidence_ids"] = [selected_evidence_id]
+            if self.preserve_extra_opportunity and not selected_evidence_id.startswith("REDDIT:"):
+                output["gaps"].append(
+                    {
+                        **output["gaps"][0],
+                        "id": "gap-extra",
+                        "statement": "Manual reconciliation blocks exception reviews",
+                    }
+                )
+                output["opportunities"].append(
+                    {
+                        "id": "opportunity-extra",
+                        "gap_hypothesis_id": "gap-extra",
+                        "title": "Review reconciliation exceptions",
+                    }
+                )
+                output["opportunity_fit"].append(
+                    {
+                        **output["opportunity_fit"][0],
+                        "opportunity_id": "opportunity-extra",
+                    }
+                )
         elif operation is SemanticOperation.HYPOTHESIS:
-            output["hypotheses"][0]["canonical_problem_id"] = call.request.input_json["problems"][
-                0
-            ]["id"]
-            output["hypotheses"][0]["supporting_claim_ids"] = [
-                call.request.input_json["claims"][0]["id"]
-            ]
+            template = output["hypotheses"][0]
+            output["hypotheses"] = []
+            output["hypothesis_card_links"] = []
+            for index, case in enumerate(call.request.input_json["cases"]):
+                hypothesis_id = f"{template['id']}:{index}"
+                output["hypotheses"].append(
+                    {
+                        **template,
+                        "id": hypothesis_id,
+                        "canonical_problem_id": case["problem"]["id"],
+                        "supporting_claim_ids": [case["competitor_claims"][0]["id"]],
+                    }
+                )
+                output["hypothesis_card_links"].append(
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "opportunity_id": case["opportunity_id"],
+                        "evidence_card_id": case["evidence_card"]["id"],
+                    }
+                )
         elif operation is SemanticOperation.CRITIC:
-            output["results"][0]["opportunity_id"] = call.request.input_json["cases"][0][
-                "opportunity_id"
+            template = output["results"][0]
+            output["results"] = [
+                {**template, "opportunity_id": case["opportunity_id"]}
+                for case in call.request.input_json["cases"]
             ]
             if self.recommend_more:
-                output["results"][0]["recommended_intents"] = [
-                    {
-                        "id": "follow-up-1",
-                        "kind": "TARGETED",
-                        "concept": "reconciliation payment signal",
-                        "sources": ["GITHUB"],
-                        "rationale": "close missing willingness-to-pay evidence",
-                    }
-                ]
+                for item in output["results"]:
+                    item["recommended_intents"] = [
+                        {
+                            "id": "follow-up-1",
+                            "kind": "TARGETED",
+                            "concept": "reconciliation payment signal",
+                            "sources": ["REDDIT"],
+                            "rationale": "close missing willingness-to-pay evidence",
+                        }
+                    ]
         if self.reverse_outputs and operation is SemanticOperation.GAP:
-            output["competitors"].reverse()
+            for section in (
+                "claims",
+                "competitors",
+                "competitor_evidence",
+                "gaps",
+                "opportunities",
+                "opportunity_fit",
+            ):
+                output[section].reverse()
+            for claim in output["claims"]:
+                for name in ("evidence_ids", "citations", "contradicts_claim_ids"):
+                    claim.setdefault(name, []).reverse()
+            for item in output["competitor_evidence"]:
+                item["claim_ids"].reverse()
+            for item in output["gaps"]:
+                item["user_evidence_ids"].reverse()
+                item["competitor_evidence_ids"].reverse()
+        if self.reverse_outputs and operation is SemanticOperation.HYPOTHESIS:
+            output["hypotheses"].reverse()
+            output["hypothesis_card_links"].reverse()
+            for item in output["hypotheses"]:
+                item["supporting_claim_ids"].reverse()
+                item.setdefault("contradicting_claim_ids", []).reverse()
         return AgentResult(
             call_id=call.request.call_id,
             status=AgentStatus.COMPLETED,
@@ -526,6 +645,50 @@ class InvalidClusterReasoner(FullReasoner):
         return result.model_copy(update={"output_json": {**output, "memberships": memberships}})
 
 
+class RepairExhaustingReasoner(FullReasoner):
+    async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
+        if (
+            call.request.task is SemanticOperation.CLUSTER
+            and self.operations.count(SemanticOperation.CLUSTER) >= 1
+        ):
+            raise SemanticAdmissionError(
+                SemanticAdmissionKind.BUDGET_EXHAUSTED,
+                "repair consumed the final admitted call",
+            )
+        return await super().run(context, call)
+
+
+class FullProvider:
+    def __init__(self) -> None:
+        self.reasoner = FullReasoner(recommend_more=True)
+
+    async def run(self, request: provider_contracts.AgentRequest) -> provider_contracts.AgentResult:
+        operation = SemanticOperation(request.operation.upper())
+        input_json = request.evidence["input"]
+        assert isinstance(input_json, dict)
+        call = SemanticCall(
+            request=DomainAgentRequest(
+                call_id=str(uuid4()),
+                task=operation,
+                effort=AgentEffort(request.effort.value),
+                input_json=input_json,
+                permitted_evidence_ids=tuple(request.evidence["permitted_evidence_ids"]),
+                permitted_urls=tuple(request.evidence["permitted_urls"]),
+                output_schema_name="test-provider-schema",
+                timeout_seconds=300,
+            ),
+            output_schema=request.output_schema,
+        )
+        result = await self.reasoner.run(SemanticContext(run_id=uuid4(), task_id=uuid4()), call)
+        return provider_contracts.AgentResult(
+            status=provider_contracts.AgentStatus.SUCCESS,
+            data=result.output_json,
+            provider="fake",
+            effort=request.effort,
+            duration_ms=1,
+        )
+
+
 class OverBudgetSearch(FullSearch):
     async def search(self, query: str, *, max_results: int, max_requests: int) -> SearchResponse:
         result = await super().search(
@@ -550,6 +713,11 @@ class BudgetStore(RecordingStore):
         if commit.stage == "COLLECT":
             raise CollectionBudgetExhaustedError("test budget")
         await super().commit_stage(context, commit)
+
+
+class NoCollectionBudgetStore(FullStore):
+    async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]:
+        return (0, 0)
 
 
 class RecordingArtifactWriter:
@@ -783,6 +951,15 @@ async def test_fake_hunt_runs_complete_lineage_and_valid_zero_validate() -> None
     first_decision = decisions[0]
     assert isinstance(first_decision, dict)
     assert first_decision["verdict"] == "RESEARCH_MORE"
+    assert first_decision["round_number"] == 1
+    assert first_decision["evidence_card_id"] == store.completed["CARD_SCORE"]["cards"][0]["id"]
+    assert first_decision["score_snapshot_id"] == store.completed["CARD_SCORE"]["scores"][0]["id"]
+    assert first_decision["critic_result_id"] == str(
+        uuid5(run_id, f"critic:1:{first_decision['opportunity_id']}")
+    )
+    link = store.completed["HYPOTHESIS"]["hypothesis_card_links"][0]
+    assert link["opportunity_id"] == first_decision["opportunity_id"]
+    assert link["evidence_card_id"] == first_decision["evidence_card_id"]
 
 
 @pytest.mark.asyncio
@@ -885,8 +1062,299 @@ async def test_research_more_stops_durably_at_exact_persisted_agent_budget() -> 
     assert checkpoint["remaining_agent_calls"] == 0
     assert checkpoint["required_agent_calls"] == 5
     assert reasoner.operations.count(SemanticOperation.CRITIC) == 1
-    assert first.payload["warnings"] == ["RESEARCH_MORE_DEFERRED_AGENT_BUDGET"]
+    assert first.payload["warnings"] == ["RESEARCH_MORE_STOPPED_AGENT_BUDGET"]
     assert second.payload == first.payload
+
+
+@pytest.mark.asyncio
+async def test_exact_eleven_call_budget_executes_coherent_second_round() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = FullReasoner(recommend_more=True)
+    round_one_collector = FullCollector()
+    round_two_collector = FullCollector()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={
+            Source.HACKER_NEWS: round_one_collector,
+            Source.REDDIT: round_two_collector,
+        },
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    assert result.payload["completed_stage"] == "FINAL"
+    assert len(reasoner.operations) == 11
+    assert [item.value for item in reasoner.operations[-5:]] == [
+        "EXTRACT",
+        "CLUSTER",
+        "GAP",
+        "HYPOTHESIS",
+        "CRITIC",
+    ]
+    for stage in (
+        "COLLECT_R2",
+        "EXTRACT_R2",
+        "CLUSTER_R2",
+        "GAP_R2",
+        "CARD_SCORE_R2",
+        "HYPOTHESIS_R2",
+        "CRITIC_R2",
+    ):
+        assert stage in store.completed
+    assert store.completed["RESEARCH_MORE_RESULT"]["status"] == "COMPLETE"
+    assert {request.intent.id for request in round_two_collector.requests} == {"follow-up-1"}
+    assert store.completed["COLLECT_R2"]["evidence_ids"] == ["REDDIT:full-2:r1"]
+    collected_ids = {
+        f"{item['source']}:{item['external_id']}:r1"
+        for result_item in store.completed["COLLECT_R2"]["results"]
+        for item in result_item["items"]
+    }
+    assert collected_ids == set(store.completed["COLLECT_R2"]["evidence_ids"])
+    second_extract = store.completed["EXTRACT_R2"]["pain_signals"]
+    assert {item["raw_signal_revision_id"] for item in second_extract} == {"REDDIT:full-2:r1"}
+    round_two_cluster_input = reasoner.inputs[
+        max(
+            index
+            for index, operation in enumerate(reasoner.operations)
+            if operation.value == "CLUSTER"
+        )
+    ]
+    assert round_two_cluster_input["pain_signals"][0]["raw_signal_revision_id"] == (
+        "REDDIT:full-2:r1"
+    )
+    round_two_gap_input = reasoner.inputs[
+        max(
+            index for index, operation in enumerate(reasoner.operations) if operation.value == "GAP"
+        )
+    ]
+    assert round_two_gap_input["evidence"][0]["id"] == "REDDIT:full-2:r1"
+    assert (
+        store.completed["GAP"]["opportunities"][0]["id"]
+        == (store.completed["GAP_R2"]["opportunities"][0]["id"])
+    )
+    assert store.completed["GAP"]["gaps"][0]["id"] != store.completed["GAP_R2"]["gaps"][0]["id"]
+    final = store.completed["FINAL"]["decisions"][0]
+    assert final["round_number"] == 2
+    assert final["gap_hypothesis_id"] == store.completed["GAP_R2"]["gaps"][0]["id"]
+    assert final["evidence_card_id"] == store.completed["CARD_SCORE_R2"]["cards"][0]["id"]
+    assert final["score_snapshot_id"] == store.completed["CARD_SCORE_R2"]["scores"][0]["id"]
+    assert reasoner.inputs[-1]["cases"]
+
+
+@pytest.mark.asyncio
+async def test_exact_ten_call_budget_stops_before_second_round() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 4
+    reasoner = FullReasoner(recommend_more=True)
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector(), Source.REDDIT: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    assert result.payload["warnings"] == ["RESEARCH_MORE_STOPPED_AGENT_BUDGET"]
+    assert store.completed["RESEARCH_MORE_CONTROL"]["status"] == "STOPPED_AGENT_BUDGET"
+    assert "COLLECT_R2" not in store.completed
+    assert len(reasoner.operations) == 6
+
+
+@pytest.mark.asyncio
+async def test_recommended_intents_do_not_trigger_round_two_for_reject_verdict() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = FullReasoner(recommend_more=True, critic_verdict="REJECT")
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector(), Source.REDDIT: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    await pipeline(research_task(run_id, task_id))
+
+    assert "RESEARCH_MORE_CONTROL" not in store.completed
+    assert "COLLECT_R2" not in store.completed
+    assert len(reasoner.operations) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "crash_stage",
+    [
+        "COLLECT_R2",
+        "EXTRACT_R2",
+        "CLUSTER_R2",
+        "GAP_R2",
+        "CARD_SCORE_R2",
+        "HYPOTHESIS_R2",
+        "CRITIC_R2",
+        "RESEARCH_MORE_RESULT",
+    ],
+)
+async def test_second_round_resumes_after_every_durable_boundary(crash_stage: str) -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    store.crash_after_stage = crash_stage
+    reasoner = FullReasoner(recommend_more=True)
+    round_two_collector = FullCollector()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={
+            Source.HACKER_NEWS: FullCollector(),
+            Source.REDDIT: round_two_collector,
+        },
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+    task = research_task(run_id, task_id)
+
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await pipeline(task)
+    origin_gap = store.completed["GAP"]["gaps"][0]["id"]
+    result = await pipeline(task)
+
+    assert result.payload["completed_stage"] == "FINAL"
+    assert len(reasoner.operations) == 11
+    assert len([commit for commit in store.commits if commit.stage == crash_stage]) == 1
+    assert {request.intent.id for request in round_two_collector.requests} == {"follow-up-1"}
+    final_gap = store.completed["FINAL"]["decisions"][0]["gap_hypothesis_id"]
+    assert final_gap == store.completed["GAP_R2"]["gaps"][0]["id"]
+    assert final_gap != origin_gap
+
+
+@pytest.mark.asyncio
+async def test_second_round_stops_before_reasoning_when_collection_adds_no_evidence() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = FullReasoner(recommend_more=True)
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={
+            Source.HACKER_NEWS: FullCollector(),
+            Source.REDDIT: RepeatEvidenceCollector(),
+        },
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    assert result.payload["warnings"] == ["RESEARCH_MORE_NO_NEW_EVIDENCE"]
+    assert store.completed["RESEARCH_MORE_RESULT"] == {
+        "status": "STOPPED_NO_NEW_EVIDENCE",
+        "new_evidence_ids": [],
+    }
+    assert "EXTRACT_R2" not in store.completed
+    assert len(reasoner.operations) == 6
+
+
+@pytest.mark.asyncio
+async def test_second_round_persists_collection_budget_stop_without_fetching() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = NoCollectionBudgetStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = FullReasoner(recommend_more=True)
+    round_two_collector = FullCollector()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={
+            Source.HACKER_NEWS: FullCollector(),
+            Source.REDDIT: round_two_collector,
+        },
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    assert result.payload["warnings"] == ["RESEARCH_MORE_STOPPED_COLLECTION_BUDGET"]
+    assert store.completed["RESEARCH_MORE_RESULT"] == {
+        "status": "STOPPED_COLLECTION_BUDGET",
+        "new_evidence_ids": [],
+    }
+    assert round_two_collector.requests == []
+
+
+@pytest.mark.asyncio
+async def test_focused_second_round_preserves_untargeted_first_round_opportunity() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = FullReasoner(recommend_more=True, preserve_extra_opportunity=True)
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector(), Source.REDDIT: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    first_round_ids = {item["id"] for item in store.completed["GAP"]["opportunities"]}
+    focused_round_ids = {item["id"] for item in store.completed["GAP_R2"]["opportunities"]}
+    final_ids = {item["opportunity_id"] for item in store.completed["FINAL"]["decisions"]}
+    assert len(first_round_ids) == 2
+    assert len(focused_round_ids) == 1
+    assert final_ids == first_round_ids
+    assert result.payload["opportunities"] == 2
+
+
+@pytest.mark.asyncio
+async def test_repair_budget_exhaustion_preserves_completed_second_round_checkpoint() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.remaining_calls = 5
+    reasoner = RepairExhaustingReasoner(recommend_more=True)
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector(), Source.REDDIT: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(TaskHandlerError) as failure:
+        await pipeline(research_task(run_id, task_id))
+
+    assert failure.value.kind is ErrorKind.BUDGET_EXHAUSTED
+    assert "COLLECT_R2" in store.completed
+    assert "EXTRACT_R2" in store.completed
+    assert "CLUSTER_R2" not in store.completed
+    assert "FINAL" not in store.completed
 
 
 @pytest.mark.asyncio
@@ -935,6 +1403,8 @@ async def test_zero_search_budget_skips_external_calls_and_returns_zero_opportun
 @pytest.mark.asyncio
 async def test_canonical_artifact_ids_are_stable_across_runs_and_provider_order() -> None:
     stage_ids: list[dict[str, set[str]]] = []
+    canonical_payloads: list[object] = []
+    hypothesis_claim_orders: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
     for reverse_outputs in (False, True):
         run_id = uuid4()
         task_id = uuid4()
@@ -966,6 +1436,14 @@ async def test_canonical_artifact_ids_are_stable_across_runs_and_provider_order(
             lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
         )
         await pipeline(task)
+        canonical_payloads.append(store.completed["GAP"])
+        normalized_hypothesis = store.completed["HYPOTHESIS"]["hypotheses"][0]
+        hypothesis_claim_orders.append(
+            (
+                tuple(normalized_hypothesis["supporting_claim_ids"]),
+                tuple(normalized_hypothesis["contradicting_claim_ids"]),
+            )
+        )
         stage_ids.append(
             {
                 "pains": {item["id"] for item in store.completed["EXTRACT"]["pain_signals"]},
@@ -975,11 +1453,12 @@ async def test_canonical_artifact_ids_are_stable_across_runs_and_provider_order(
                 "competitors": {item["id"] for item in store.completed["GAP"]["competitors"]},
                 "gaps": {item["id"] for item in store.completed["GAP"]["gaps"]},
                 "opportunities": {item["id"] for item in store.completed["GAP"]["opportunities"]},
-                "hypotheses": {item["id"] for item in store.completed["HYPOTHESIS"]["hypotheses"]},
             }
         )
 
     assert stage_ids[0] == stage_ids[1]
+    assert canonical_payloads[0] == canonical_payloads[1]
+    assert hypothesis_claim_orders[0] == hypothesis_claim_orders[1]
     cards = store.completed["CARD_SCORE"]["cards"]
     assert cards != []
     assert cards[0]["contradicting_claim_ids"]
@@ -1011,6 +1490,21 @@ def test_large_evidence_batch_is_deterministically_bounded_with_omission_count()
         len(evidence) - len(payload["evidence"])
     )
     assert len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()) < 20_000
+
+
+def test_bounded_stage_input_preserves_explicit_new_artifact_priority() -> None:
+    values = [{"id": f"pain-a-{index:03d}", "pain": "old pain " * 180} for index in range(30)]
+    values.append({"id": "pain-z-new", "pain": "new targeted pain " * 180})
+
+    payload = _bounded_stage_input(
+        (("pain_signals", values),),
+        total_counts={"pain_signals": len(values)},
+        priority_ids={"pain_signals": frozenset({"pain-z-new"})},
+    )
+
+    selected_ids = [item["id"] for item in payload["pain_signals"]]
+    assert selected_ids[0] == "pain-z-new"
+    assert len(selected_ids) < len(values)
 
 
 @pytest.mark.asyncio
@@ -1113,6 +1607,57 @@ async def test_cluster_bounds_oversized_extraction_and_uses_selected_lineage() -
     membership = memberships[0]
     assert isinstance(membership, dict)
     assert membership["pain_signal_id"] == selected_id
+
+
+@pytest.mark.asyncio
+async def test_round_two_cluster_keeps_new_pain_that_sorts_after_old_pains() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline_context = context(run_id, task_id)
+    store = RecordingStore(pipeline_context, [])
+    reasoner = FullReasoner()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={},
+        clock=lambda: NOW,
+    )
+    values = [
+        {
+            "id": f"pain-a-{index:03d}",
+            "raw_signal_revision_id": f"evidence-a-{index:03d}",
+            "pain": ("old pain " * 45) + str(index),
+            "severity": 0.8,
+            "frequency": 0.7,
+            "confidence": 0.9,
+            "excerpt": "old pain",
+        }
+        for index in range(30)
+    ]
+    values.append(
+        {
+            "id": "pain-z-new",
+            "raw_signal_revision_id": "evidence-z-new",
+            "pain": "new targeted pain " * 25,
+            "severity": 0.8,
+            "frequency": 0.7,
+            "confidence": 0.9,
+            "excerpt": "new targeted pain",
+        }
+    )
+    extraction = PainExtractionBatch.model_validate({"pain_signals": values})
+
+    await pipeline._cluster(
+        pipeline_context,
+        extraction,
+        PipelineExecution(),
+        stage="CLUSTER_R2",
+        round_number=2,
+        priority_pain_ids=frozenset({"pain-z-new"}),
+    )
+
+    assert reasoner.inputs[0]["pain_signals"][0]["id"] == "pain-z-new"
+    assert store.completed["CLUSTER_R2"]["memberships"][0]["pain_signal_id"] == "pain-z-new"
 
 
 def test_pipeline_trend_volume_is_windowed_and_duplicate_groups_block_viral_growth() -> None:
@@ -1559,6 +2104,101 @@ async def test_collection_budget_refusal_is_atomic_and_terminal(
             task.lease_owner = None
             task.lease_expires_at = None
             await session.commit()
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_coherent_second_round_uses_exact_durable_agent_call_budget(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    now = datetime.now(UTC)
+    try:
+        async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+            _, revision = await uow.missions.create_with_revision(
+                title="Audited coherent second round",
+                mission_text="Find recurring invoice reconciliation pain",
+                original_language="en",
+                output_locale="en",
+            )
+            assert uow.session is not None
+            scheduled = await RunScheduler(uow.session).schedule(
+                request=RunScheduleRequest(
+                    mission_revision_id=revision.id,
+                    mode="HUNT",
+                    priority=0,
+                    budget_limits={
+                        "max_run_duration_minutes": 30,
+                        "max_research_rounds": 2,
+                        "max_agent_calls_per_run": 11,
+                        "max_search_calls_per_run": 1,
+                        "max_collector_requests_per_run": 20,
+                        "max_raw_signals_per_run": 20,
+                    },
+                ),
+                now=now,
+            )
+            scheduled.run.status = "RUNNING"
+            scheduled.run.started_at = now
+            scheduled.run.deadline_at = now + timedelta(minutes=30)
+            scheduled.task.status = "LEASED"
+            scheduled.task.attempt_count = 1
+            scheduled.task.lease_owner = "test-worker"
+            scheduled.task.lease_expires_at = now + timedelta(minutes=5)
+            await uow.commit()
+
+        provider = FullProvider()
+        reasoner = AuditedSemanticReasoner(
+            database.session_factory,
+            provider,
+            lease_owner="test-worker",
+            provider_name="fake",
+        )
+        store = SqlAlchemyEvidencePipelineStore(
+            database.session_factory,
+            author_hmac_secret=b"a" * 32,
+            clock=lambda: now,
+        )
+        pipeline = EvidencePipeline(
+            store=store,
+            reasoner=reasoner,
+            collectors={Source.HACKER_NEWS: FullCollector(), Source.REDDIT: FullCollector()},
+            competitor_search=FullSearch(),
+            safe_fetch=FullFetcher(),
+            clock=lambda: now,
+        )
+
+        result = await pipeline(scheduled.task)
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            call_count = await session.scalar(
+                select(func.count())
+                .select_from(AgentCall)
+                .where(AgentCall.run_id == scheduled.run.id)
+            )
+            assert run is not None
+            assert task is not None
+            run.status = "COMPLETED"
+            run.completed_at = now
+            task.status = "SUCCEEDED"
+            task.completed_at = now
+            task.lease_owner = None
+            task.lease_expires_at = None
+            await session.commit()
+        assert result.payload["completed_stage"] == "FINAL"
+        assert result.payload["opportunities"] == 1
+        assert run.budget_used["agent_calls"] == 11
+        assert call_count == 11
+        assert provider.reasoner.operations[-5:] == [
+            SemanticOperation.EXTRACT,
+            SemanticOperation.CLUSTER,
+            SemanticOperation.GAP,
+            SemanticOperation.HYPOTHESIS,
+            SemanticOperation.CRITIC,
+        ]
     finally:
         await database.dispose()
 

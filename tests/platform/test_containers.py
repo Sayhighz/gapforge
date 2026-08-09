@@ -74,6 +74,9 @@ def test_backup_roundtrip_builds_shared_worker_image_only_once() -> None:
     assert script.count("compose run --rm --no-deps") >= 6
     assert "compose exec" not in script
     assert "compose up -d --build" not in script
+    assert "trap cleanup EXIT" in script
+    assert "trap 'exit 130' INT" in script
+    assert "trap 'exit 143' TERM" in script
 
 
 def test_manual_smoke_checks_out_only_reviewed_main_without_persisting_credentials() -> None:

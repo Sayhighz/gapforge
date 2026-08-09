@@ -31,7 +31,9 @@ cleanup() {
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
     exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 export AGENT_PROVIDER=fake
 export AUTHOR_HMAC_KEY=ci-test-only-author-hmac-key-32-bytes

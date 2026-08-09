@@ -266,7 +266,7 @@ class SqlAlchemyEvidencePipelineStore:
                 await session.rollback()
                 return
             durable_payload = commit.payload
-            if commit.stage == "COLLECT":
+            if commit.stage in {"COLLECT", "COLLECT_R2"}:
                 try:
                     durable_payload = await self._persist_collection(
                         session,
@@ -337,6 +337,34 @@ class SqlAlchemyEvidencePipelineStore:
                 - int(run.budget_used.get("agent_calls", 0)),
             )
 
+    async def remaining_collection_budget(self, context: PipelineContext) -> tuple[int, int]:
+        async with self.session_factory() as session:
+            task = await session.scalar(
+                select(models.ResearchTask)
+                .where(models.ResearchTask.id == context.task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(models.ResearchRun)
+                .where(models.ResearchRun.id == context.run_id)
+                .with_for_update()
+            )
+            if task is None or run is None:
+                raise LookupError("research task or run no longer exists")
+            _assert_stage_lease(task, run, context, self.clock())
+            return (
+                max(
+                    0,
+                    int(run.budget_limits.get("max_collector_requests_per_run", 0))
+                    - int(run.budget_used.get("collector_requests", 0)),
+                ),
+                max(
+                    0,
+                    int(run.budget_limits.get("max_raw_signals_per_run", 0))
+                    - int(run.budget_used.get("raw_signals", 0)),
+                ),
+            )
+
     async def _persist_collection(
         self,
         session: AsyncSession,
@@ -391,6 +419,18 @@ class SqlAlchemyEvidencePipelineStore:
             ],
             "item_count": len(items),
             "evidence_ids": evidence_ids,
+            "examined_volume": payload.get("examined_volume", {}),
+            "examined_items": [
+                {
+                    "source": item.source.value,
+                    "external_id": item.external_id,
+                    "source_created_at": item.source_created_at.isoformat(),
+                }
+                for item in sorted(
+                    {(item.source.value, item.external_id): item for item in items}.values(),
+                    key=lambda value: (value.source.value, value.external_id),
+                )
+            ],
         }
 
     async def _admit_budget(
