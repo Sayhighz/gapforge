@@ -205,9 +205,52 @@ def test_manual_smoke_checks_out_only_reviewed_main_without_persisting_credentia
     assert "gap-smoke credentialed-sources --json" in script
     assert "gap-smoke credentialed-codex --confirm run --json" in script
     assert script.count("compose build worker") == 1
-    assert script.count("--no-build") >= 4
+    assert "compose up -d --no-build postgres migrate worker" in script
     assert "container-volume-check.py auth-write" in script
     assert "container-volume-check.py auth-readonly" in script
+
+
+def test_manual_smoke_uses_compose_run_compatible_arguments(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    external = tmp_path / "protected.env"
+    _write_smoke_env(external)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    compose_log = tmp_path / "compose.log"
+    fake_compose = fake_bin / "docker-compose"
+    fake_compose.write_text(
+        """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$COMPOSE_LOG"
+case "$*" in
+    *run*--no-build*) exit 64 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_compose.chmod(0o755)
+
+    completed = subprocess.run(  # noqa: S603 -- fixed repository script path
+        [str(ROOT / "scripts/platform-smoke")],
+        cwd=ROOT,
+        env={
+            "COMPOSE_LOG": str(compose_log),
+            "GAPFORGE_PLATFORM_SMOKE_CONFIRM": "run",
+            "GAPFORGE_SMOKE_ENV_FILE": str(external),
+            "PATH": f"{fake_bin}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = compose_log.read_text(encoding="utf-8").splitlines()
+    assert calls[0].endswith("build worker")
+    assert sum(call.endswith("build worker") for call in calls) == 1
+    assert all(not (" run " in f" {call} " and "--no-build" in call) for call in calls)
 
 
 def test_compose_configuration_is_valid_and_auth_service_has_no_app_secrets() -> None:

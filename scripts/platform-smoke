@@ -26,14 +26,14 @@ fi
 
 # The approved runner must already own the dedicated device-auth volume.
 compose build worker
-compose run --rm --no-build --no-deps worker \
+compose run --rm --no-deps worker \
     python /app/scripts/container-volume-check.py auth-write
-compose --profile auth run --rm --no-build --no-deps --entrypoint python codex-status \
+compose --profile auth run --rm --no-deps --entrypoint python codex-status \
     /app/scripts/container-volume-check.py auth-readonly
-compose --profile auth run --rm --no-build codex-status
-compose run --rm --no-build --no-deps worker \
+compose --profile auth run --rm codex-status
+compose run --rm --no-deps worker \
     gap-smoke credentialed-codex --confirm run --json
 compose up -d --no-build postgres migrate worker
 compose exec -T worker gap health --json
-compose run --rm --no-build --no-deps worker gap-smoke hacker-news --json
-compose run --rm --no-build --no-deps worker gap-smoke credentialed-sources --json
+compose run --rm --no-deps worker gap-smoke hacker-news --json
+compose run --rm --no-deps worker gap-smoke credentialed-sources --json
