@@ -56,9 +56,23 @@ from gapforge.storage.models import (
     ResearchTask,
 )
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
-from gapforge.worker import TaskHandlerRegistry, Worker
+from gapforge.worker import ResearchTaskHandler, TaskHandlerRegistry, TaskHandlerResult, Worker
 
 OBSERVED_AT = datetime(2026, 1, 15, 12, tzinfo=UTC)
+
+
+def _record_handler_errors(
+    handler: ResearchTaskHandler,
+    errors: list[str],
+) -> ResearchTaskHandler:
+    async def recorded(task: ResearchTask) -> TaskHandlerResult | dict[str, object]:
+        try:
+            return await handler(task)
+        except Exception as error:
+            errors.append(f"{type(error).__name__}: {error}")
+            raise
+
+    return recorded
 
 
 @dataclass(frozen=True, slots=True)
@@ -581,12 +595,15 @@ async def test_production_hunt_is_durable_queryable_and_fail_closed(
         provider_name="fake",
     )
     handler = ResearchRunHandler(database=database, settings=settings, reasoner=reasoner)
+    handler_errors: list[str] = []
 
     try:
         assert await Worker(
             database,
             worker_id=worker_id,
-            handlers=TaskHandlerRegistry({"research.run": handler}),
+            handlers=TaskHandlerRegistry(
+                {"research.run": _record_handler_errors(handler, handler_errors)}
+            ),
         ).run_once()
 
         async with database.session() as session:
@@ -608,6 +625,7 @@ async def test_production_hunt_is_durable_queryable_and_fail_closed(
             assert run is not None and task is not None
             assert run.status == expected_status, {
                 "run_checkpoint": run.last_checkpoint,
+                "handler_errors": handler_errors,
                 "task_error": task.last_error,
                 "task_checkpoint": task.checkpoint,
             }
@@ -802,17 +820,31 @@ async def test_production_hunt_reclaims_crash_from_durable_stage_without_duplica
             provider_name="fake",
         ),
     )
+    first_handler_errors: list[str] = []
     first_worker = Worker(
         database,
         worker_id=first_worker_id,
-        handlers=TaskHandlerRegistry({"research.run": first_handler}),
+        handlers=TaskHandlerRegistry(
+            {"research.run": _record_handler_errors(first_handler, first_handler_errors)}
+        ),
         lease_duration=timedelta(seconds=0.3),
         heartbeat_interval_seconds=0.05,
     )
 
     try:
         interrupted = asyncio.create_task(first_worker.run_once())
-        await asyncio.wait_for(stage_committed.wait(), timeout=5)
+        try:
+            await asyncio.wait_for(stage_committed.wait(), timeout=5)
+        except TimeoutError:
+            async with database.session() as session:
+                diagnostic_task = await session.get(ResearchTask, task_id)
+            pytest.fail(
+                "CARD_SCORE checkpoint was not reached: "
+                f"handler_errors={first_handler_errors!r}, "
+                f"task_status={getattr(diagnostic_task, 'status', None)!r}, "
+                f"task_error={getattr(diagnostic_task, 'last_error', None)!r}, "
+                f"task_checkpoint={getattr(diagnostic_task, 'checkpoint', None)!r}"
+            )
         async with database.session() as session, session.begin():
             task = await session.get(ResearchTask, task_id, with_for_update=True)
             assert task is not None
