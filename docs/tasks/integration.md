@@ -8,8 +8,8 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, and the reviewed I2 runtime
-checkpoint are merged; I3 evidence orchestration and I4 provider admission/audit are next.
+Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, I2 runtime admission, and
+I4 provider admission/audit are reviewed and merged. I3 evidence orchestration is in progress.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -73,9 +73,10 @@ may correctly return zero `VALIDATE` opportunities.
 - [x] Enforce remaining run time, output schema, permitted evidence IDs, and no-retry auth failures.
 - [x] Test repair, malformed output, parallel-call cap, stale lease, and secret exclusion end to end.
 
-  Progress: I4 completed and pushed at `c71e087` in draft PR #10. Exact validation:
-  `pytest` 285 passed/1 skipped; Ruff check and format, mypy `src`, Alembic check, and
-  `git diff --check` passed. The replay migration fails closed when pre-release
+  Progress: PR #10 was independently reviewed and squash-merged as `26859dc` after exact
+  reproduction of 285 passed/1 skipped, whole-repository Ruff/format, strict mypy, Alembic
+  drift, diff-check, and green GitHub Python/container-backup jobs. The replay migration fails
+  closed when pre-release
   `agent_calls` or `provider_call_leases` exist because their missing request/output identity
   cannot be reconstructed safely; stop workers, export if needed, and reset those pre-release
   tables before upgrading.
@@ -126,8 +127,10 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1 and the I2 runtime admission/finalization checkpoint are merged. The I2 real
-handler-registration item remains open and is owned by I3; I3-I8 remain pending.
+Current state: I1, the I2 runtime admission/finalization checkpoint, and I4 are reviewed and
+merged. The I2 real handler-registration item remains open and is owned by I3; I3 and I5-I8
+remain pending.
 
-Exact next action: implement I3 evidence-pipeline orchestration and register its real
-`research.run` handler while I4 implements durable provider admission and per-subprocess audit.
+Exact next action: merge `26859dc` into the I3 branch, connect the reviewed semantic provider
+boundary, register the real `research.run` handler and adapters, then review the bounded
+follow-up, partial-source, budget, and crash-resume acceptance cases.
