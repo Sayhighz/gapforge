@@ -94,4 +94,3 @@ GapForge response: patterns are cheap candidate filters only; authors, threads, 
 - [ ] One viral thread/community cannot dominate evidence or trend.
 - [ ] Failed semantic output remains failed/unknown rather than becoming a plausible fallback fact.
 - [ ] No reference implementation or unlicensed prose is copied.
-
