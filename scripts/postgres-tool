@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+tool=${0##*/}
+case "$tool" in
+    createdb|dropdb|pg_dump|pg_restore|psql) ;;
+    *)
+        echo "unsupported PostgreSQL tool wrapper: $tool" >&2
+        exit 127
+        ;;
+esac
+
+LD_LIBRARY_PATH=/opt/postgresql-16/lib
+export LD_LIBRARY_PATH
+exec "/opt/postgresql-16/bin/$tool" "$@"

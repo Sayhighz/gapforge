@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+if [ "${GAPFORGE_PLATFORM_SMOKE_CONFIRM:-}" != "run" ]; then
+    echo "Set GAPFORGE_PLATFORM_SMOKE_CONFIRM=run on an approved credentialed runner." >&2
+    exit 2
+fi
+
+if command -v docker-compose >/dev/null 2>&1; then
+    compose() {
+        docker-compose "$@"
+    }
+else
+    compose() {
+        docker compose "$@"
+    }
+fi
+
+# The approved runner must already own the device-auth volume and deployment .env.
+compose --profile auth run --rm codex-status
+compose up -d postgres migrate worker
+compose exec -T worker gap health --json

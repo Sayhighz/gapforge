@@ -1,0 +1,25 @@
+name: Credentialed platform smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type run to use the approved runner's device auth and source credentials
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: inputs.confirm == 'run'
+    runs-on: [self-hosted, linux, gapforge-smoke]
+    environment: platform-smoke
+    timeout-minutes: 20
+    env:
+      GAPFORGE_PLATFORM_SMOKE_CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check configured device auth and platform health
+        run: scripts/platform-smoke

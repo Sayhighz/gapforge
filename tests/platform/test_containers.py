@@ -36,6 +36,11 @@ def test_worker_image_is_non_root_pins_codex_and_copies_no_environment() -> None
     assert "@openai/codex@${CODEX_CLI_VERSION}" in dockerfile
     assert "ARG CODEX_CLI_VERSION=0.144.5" in dockerfile
     assert "ARG UV_VERSION=0.11.7" in dockerfile
+    assert "postgres:16.9-bookworm@sha256:" in dockerfile
+    assert 'pg_dump --version | grep -F "pg_dump (PostgreSQL) 16.9"' in dockerfile
+    assert "ENV LD_LIBRARY_PATH" not in dockerfile
+    assert "COPY --from=postgres-client /pg-client/ /" in dockerfile
+    assert "scripts/postgres-tool /usr/local/libexec/gapforge-postgres-tool" in dockerfile
     assert "COPY pyproject.toml uv.lock README.md" in dockerfile
     assert "uv export --frozen" in dockerfile
     assert "--only-group build" in dockerfile
@@ -62,7 +67,7 @@ def test_compose_configuration_is_valid_and_auth_service_has_no_app_secrets() ->
     if command is None:
         pytest.skip("Docker Compose is not installed")
     completed = subprocess.run(  # noqa: S603 -- resolved trusted Docker executable
-        [*command, "--profile", "auth", "config"],
+        [*command, "--profile", "auth", "--profile", "backup", "config"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -78,3 +83,8 @@ def test_compose_configuration_is_valid_and_auth_service_has_no_app_secrets() ->
     assert "REDDIT_CLIENT_SECRET:" not in auth_section
     assert "AUTHOR_HMAC_KEY:" not in auth_section
     assert 'cli_auth_credentials_store="file"' in auth_section
+    backup_section = rendered.split("  backup:", 1)[1].split("  codex-auth:", 1)[0]
+    assert "backups_data" in backup_section
+    assert "codex_auth" not in backup_section
+    assert "GITHUB_TOKEN:" not in backup_section
+    assert "REDDIT_CLIENT_SECRET:" not in backup_section

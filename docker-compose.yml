@@ -110,6 +110,21 @@ services:
     volumes:
       - codex_auth:/var/lib/gapforge/codex:ro
 
+  backup:
+    <<: [*gapforge-image, *runtime-security]
+    profiles: [backup]
+    command: ["/app/scripts/backup-loop"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://gapforge:gapforge@postgres:5432/gapforge}
+      BACKUPS_DIR: /var/lib/gapforge/backups
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - backups_data:/var/lib/gapforge/backups
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
   codex_auth:

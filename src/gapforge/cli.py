@@ -18,6 +18,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 
+from gapforge.backup import BackupError, BackupService
 from gapforge.config import AgentProviderName, Settings
 from gapforge.health import HealthService
 from gapforge.providers.codex_cli import CodexCliProvider
@@ -909,15 +910,70 @@ def admin_sql(
     _execute("admin.sql", operation, json_output=json_output)
 
 
-# A7 replaces these topology placeholders with tested backup operations.
-for _backup_command in ("create", "list", "verify", "restore"):
+def _backup_service(settings: Settings) -> BackupService:
+    return BackupService(
+        database_url=settings.database_url.get_secret_value(),
+        backups_dir=settings.backups_dir,
+    )
 
-    def _register_backup(name: str) -> None:
-        @backup_app.command(name)
-        def backup_placeholder(json_output: JsonOption = False) -> None:
-            _integration_placeholder(f"backup.{name}", json_output)
 
-    _register_backup(_backup_command)
+def _backup_error(error: BackupError) -> CliError:
+    return CliError("BACKUP_ERROR", str(error), exit_code=5)
+
+
+@backup_app.command("create")
+def backup_create(json_output: JsonOption = False) -> None:
+    async def operation() -> Any:
+        try:
+            return await _backup_service(_settings()).create()
+        except BackupError as error:
+            raise _backup_error(error) from error
+
+    _execute("backup.create", operation, json_output=json_output)
+
+
+@backup_app.command("list")
+def backup_list(json_output: JsonOption = False) -> None:
+    async def operation() -> Any:
+        try:
+            return _backup_service(_settings()).list_backups()
+        except BackupError as error:
+            raise _backup_error(error) from error
+
+    _execute("backup.list", operation, json_output=json_output)
+
+
+@backup_app.command("verify")
+def backup_verify(name: str, json_output: JsonOption = False) -> None:
+    async def operation() -> Any:
+        try:
+            return await _backup_service(_settings()).verify(name)
+        except BackupError as error:
+            raise _backup_error(error) from error
+
+    _execute("backup.verify", operation, json_output=json_output)
+
+
+@backup_app.command("restore")
+def backup_restore(
+    name: str,
+    target_database: Annotated[str, typer.Option("--target")],
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Confirm creation of the restore target.")
+    ] = False,
+    json_output: JsonOption = False,
+) -> None:
+    async def operation() -> Any:
+        try:
+            return await _backup_service(_settings()).restore(
+                name,
+                target_database=target_database,
+                confirmed=yes,
+            )
+        except BackupError as error:
+            raise _backup_error(error) from error
+
+    _execute("backup.restore", operation, json_output=json_output)
 
 
 if __name__ == "__main__":

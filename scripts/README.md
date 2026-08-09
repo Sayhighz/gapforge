@@ -18,3 +18,9 @@ the volume survives container recreation.
 
 For credential-free infrastructure validation, set `AGENT_PROVIDER=fake`. This checks the
 database, migration, queue, destinations, and budgets without claiming Codex is authenticated.
+
+Start daily verified PostgreSQL backups with `docker compose --profile backup up -d backup`.
+Retention keeps the union of the newest backup in seven daily, four ISO-weekly, and six monthly
+buckets, so one archive can satisfy more than one tier. The backup service mounts only the database
+and backup destination; the `codex_auth` volume is deliberately absent. Copy verified archives
+off the VM for disaster recovery.
