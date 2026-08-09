@@ -669,6 +669,56 @@ class MissionOpportunityAssessment(IdMixin, UpdatedAtMixin, Base):
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class FinalAssessmentSnapshot(IdMixin, CreatedAtMixin, Base):
+    __tablename__ = "final_assessment_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "assessment_id",
+            "round_number",
+            name="uq_final_assessment_snapshots_run_assessment_round",
+        ),
+        CheckConstraint("round_number IN (1, 2)", name="valid_round_number"),
+        CheckConstraint(
+            "verdict IN ('REJECT', 'RESEARCH_MORE', 'VALIDATE')",
+            name="valid_verdict",
+        ),
+        CheckConstraint(
+            "competitor_research_status IN ('COMPLETE', 'INCOMPLETE', 'RESEARCH_UNAVAILABLE')",
+            name="competitor_research_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(gates) = 'array' AND jsonb_array_length(gates) = 14",
+            name="complete_gates",
+        ),
+        CheckConstraint("octet_length(gates::text) <= 16384", name="bounded_gates"),
+        Index("ix_final_snapshots_assessment_created", "assessment_id", "created_at"),
+    )
+
+    assessment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("mission_opportunity_assessments.id", ondelete="RESTRICT"), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("research_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    gap_hypothesis_id: Mapped[UUID] = mapped_column(
+        ForeignKey("gap_hypotheses.id", ondelete="RESTRICT"), nullable=False
+    )
+    evidence_card_id: Mapped[UUID] = mapped_column(
+        ForeignKey("evidence_cards.id", ondelete="RESTRICT"), nullable=False
+    )
+    score_snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("opportunity_score_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    critic_result_id: Mapped[UUID] = mapped_column(
+        ForeignKey("critic_results.id", ondelete="RESTRICT"), nullable=False
+    )
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    verdict: Mapped[str] = mapped_column(String(24), nullable=False)
+    competitor_research_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    gates: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+
+
 class OpportunityScoreSnapshot(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "opportunity_score_snapshots"
     __table_args__ = (

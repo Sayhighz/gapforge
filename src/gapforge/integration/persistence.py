@@ -584,6 +584,8 @@ class ResearchArtifactWriter:
                 )
                 await session.flush()
                 await session.refresh(assessment)
+            elif assessment.competitor_research_status != competitor_status:
+                assessment.competitor_research_status = competitor_status
         await session.flush()
 
     async def _persist_card_score(
@@ -876,6 +878,38 @@ class ResearchArtifactWriter:
             verdict = decision.verdict
             if str(raw["verdict"]) != verdict.value:
                 raise ValueError("FINAL verdict disagrees with persisted validation artifacts")
+            gates = [
+                {
+                    "name": gate.name,
+                    "passed": gate.passed,
+                    "actual": gate.actual,
+                    "required": gate.required,
+                }
+                for gate in decision.gates
+            ]
+            snapshot_id = uuid5(
+                context.run_id,
+                f"final:{round_number}:{opportunity_id}",
+            )
+            await _add_or_verify(
+                session,
+                models.FinalAssessmentSnapshot,
+                snapshot_id,
+                {
+                    "assessment_id": assessment.id,
+                    "run_id": context.run_id,
+                    "gap_hypothesis_id": gap_id,
+                    "evidence_card_id": card_id,
+                    "score_snapshot_id": score_id,
+                    "critic_result_id": critic_id,
+                    "round_number": round_number,
+                    "verdict": verdict.value,
+                    "competitor_research_status": assessment.competitor_research_status,
+                    "gates": gates,
+                },
+                "final assessment snapshot",
+            )
+            await session.flush()
             if assessment.lifecycle_status == "VALIDATE":
                 if verdict is not domain.Verdict.VALIDATE:
                     raise ValueError(
@@ -901,15 +935,6 @@ class ResearchArtifactWriter:
                 validation_passed=decision.passed,
             )
             event_number = await _next_lifecycle_number(session, assessment.id)
-            gates = [
-                {
-                    "name": gate.name,
-                    "passed": gate.passed,
-                    "actual": gate.actual,
-                    "required": gate.required,
-                }
-                for gate in decision.gates
-            ]
             session.add(
                 models.LifecycleEvent(
                     id=event_id,
@@ -1189,6 +1214,12 @@ async def _final_artifacts(
     critic = await session.get(models.CriticResult, critic_id)
     gap = await session.get(models.GapHypothesis, gap_id)
     opportunity = await session.get(models.Opportunity, assessment.opportunity_id)
+    checkpoint_gap_id = await _checkpoint_gap_id(
+        session,
+        context.task_id,
+        assessment.opportunity_id,
+        round_number=round_number,
+    )
     expected_critic_id = uuid5(
         context.run_id,
         f"critic:{round_number}:{assessment.opportunity_id}",
@@ -1205,6 +1236,7 @@ async def _final_artifacts(
         or critic.run_id != context.run_id
         or gap is None
         or opportunity is None
+        or gap.id != checkpoint_gap_id
         or gap.canonical_problem_id != opportunity.canonical_problem_id
     ):
         raise ValueError("FINAL artifact IDs do not form one run/opportunity snapshot")
@@ -1220,6 +1252,7 @@ async def validation_from_storage(
     critic: models.CriticResult,
     gap: models.GapHypothesis,
     mission_revision_id: UUID,
+    competitor_research_status: str | None = None,
 ) -> ValidationDecision:
     revisions = {
         item.id: item.domain_revision_id
@@ -1282,7 +1315,9 @@ async def validation_from_storage(
     return validation_decision(
         card=typed_card,
         score=typed_score,
-        competitor_research=domain.CompetitorResearchStatus(assessment.competitor_research_status),
+        competitor_research=domain.CompetitorResearchStatus(
+            competitor_research_status or assessment.competitor_research_status
+        ),
         gap_evidence_present=gap_evidence_present,
         critic=typed_critic,
     )
@@ -1292,6 +1327,8 @@ async def _checkpoint_gap_id(
     session: AsyncSession,
     task_id: UUID,
     opportunity_id: UUID,
+    *,
+    round_number: int = 2,
 ) -> UUID:
     task = await session.get(models.ResearchTask, task_id)
     if task is None:
@@ -1300,12 +1337,11 @@ async def _checkpoint_gap_id(
     stages = pipeline.get("stages") if isinstance(pipeline, dict) else None
     if not isinstance(stages, dict):
         raise ValueError("research task has no durable pipeline stages")
-    for stage_name in ("GAP_R2", "GAP"):
-        stage = stages.get(stage_name)
-        payload = stage.get("payload") if isinstance(stage, dict) else None
-        opportunities = payload.get("opportunities") if isinstance(payload, dict) else None
-        if not isinstance(opportunities, list):
-            continue
+    stage_name = "GAP" if round_number == 1 else "GAP_R2"
+    stage = stages.get(stage_name)
+    payload = stage.get("payload") if isinstance(stage, dict) else None
+    opportunities = payload.get("opportunities") if isinstance(payload, dict) else None
+    if isinstance(opportunities, list):
         for raw in opportunities:
             if not isinstance(raw, dict) or str(raw.get("id")) != str(opportunity_id):
                 continue

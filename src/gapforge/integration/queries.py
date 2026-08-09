@@ -89,7 +89,17 @@ class ResearchQueryService:
                     .limit(limit)
                 )
             )
-            return [
+            captures = tuple(
+                await session.scalars(
+                    select(models.CompetitorEvidence)
+                    .order_by(
+                        desc(models.CompetitorEvidence.observed_at),
+                        models.CompetitorEvidence.id,
+                    )
+                    .limit(limit)
+                )
+            )
+            items = [
                 {
                     "kind": "raw_signal_revision",
                     "id": row.domain_revision_id,
@@ -100,6 +110,16 @@ class ResearchQueryService:
                 }
                 for row in revisions
             ]
+            items.extend(_competitor_evidence_view(row) for row in captures)
+            items.sort(
+                key=lambda item: (
+                    item["observed_at"],
+                    item["kind"],
+                    str(item["id"]),
+                ),
+                reverse=True,
+            )
+            return items[:limit]
 
     async def evidence_item(self, identifier: str) -> dict[str, Any]:
         async with self._session_factory() as session:
@@ -143,6 +163,9 @@ class ResearchQueryService:
                     "representative_evidence_ids": card.representative_signal_ids,
                     "missing_evidence": card.missing_evidence,
                 }
+            competitor_evidence = await session.get(models.CompetitorEvidence, storage_id)
+            if competitor_evidence is not None:
+                return _competitor_evidence_view(competitor_evidence)
             claim = await session.get(models.AtomicClaim, storage_id)
             if claim is not None:
                 return {
@@ -234,32 +257,32 @@ class ResearchQueryService:
                 raise LookupError("run not found")
             revision = await session.get(models.MissionRevision, run.mission_revision_id)
             assert revision is not None
-            events = tuple(
+            snapshots = tuple(
                 await session.scalars(
-                    select(models.LifecycleEvent)
+                    select(models.FinalAssessmentSnapshot)
                     .join(
                         models.MissionOpportunityAssessment,
                         models.MissionOpportunityAssessment.id
-                        == models.LifecycleEvent.assessment_id,
+                        == models.FinalAssessmentSnapshot.assessment_id,
                     )
                     .where(
-                        models.LifecycleEvent.run_id == run.id,
+                        models.FinalAssessmentSnapshot.run_id == run.id,
                         models.MissionOpportunityAssessment.mission_revision_id == revision.id,
                     )
                     .order_by(
-                        models.LifecycleEvent.assessment_id,
-                        desc(models.LifecycleEvent.event_number),
+                        models.FinalAssessmentSnapshot.assessment_id,
+                        desc(models.FinalAssessmentSnapshot.round_number),
+                        models.FinalAssessmentSnapshot.id,
                     )
                 )
             )
-            latest: dict[UUID, models.LifecycleEvent] = {}
-            for event in events:
-                latest.setdefault(event.assessment_id, event)
-            report_items = []
-            for event in latest.values():
-                if not _is_final_snapshot_event(event):
-                    continue
-                report_items.append(await _report_opportunity(session, event, revision))
+            latest: dict[UUID, models.FinalAssessmentSnapshot] = {}
+            for snapshot in snapshots:
+                latest.setdefault(snapshot.assessment_id, snapshot)
+            report_items = [
+                await _report_opportunity(session, snapshot, revision)
+                for snapshot in latest.values()
+            ]
             warnings = tuple(
                 json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 for value in run.warnings
@@ -280,30 +303,35 @@ class ResearchQueryService:
             await session.execute(
                 text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             )
-            event = await session.scalar(
-                select(models.LifecycleEvent)
+            snapshot = await session.scalar(
+                select(models.FinalAssessmentSnapshot)
                 .join(
                     models.MissionOpportunityAssessment,
-                    models.MissionOpportunityAssessment.id == models.LifecycleEvent.assessment_id,
+                    models.MissionOpportunityAssessment.id
+                    == models.FinalAssessmentSnapshot.assessment_id,
                 )
                 .join(
                     models.ResearchRun,
-                    models.ResearchRun.id == models.LifecycleEvent.run_id,
+                    models.ResearchRun.id == models.FinalAssessmentSnapshot.run_id,
                 )
                 .where(models.MissionOpportunityAssessment.opportunity_id == opportunity_id)
                 .order_by(
                     desc(models.ResearchRun.started_at),
-                    desc(models.LifecycleEvent.event_number),
-                    desc(models.LifecycleEvent.created_at),
+                    desc(models.FinalAssessmentSnapshot.round_number),
+                    desc(models.FinalAssessmentSnapshot.created_at),
+                    desc(models.FinalAssessmentSnapshot.id),
                 )
             )
-            if event is None or not _is_final_snapshot_event(event):
+            if snapshot is None:
                 raise LookupError("opportunity has no persisted final report snapshot")
-            assessment = await session.get(models.MissionOpportunityAssessment, event.assessment_id)
+            assessment = await session.get(
+                models.MissionOpportunityAssessment,
+                snapshot.assessment_id,
+            )
             assert assessment is not None
             revision = await session.get(models.MissionRevision, assessment.mission_revision_id)
             assert revision is not None
-            report = await _report_opportunity(session, event, revision)
+            report = await _report_opportunity(session, snapshot, revision)
             return OpportunityReportData(report, revision.output_locale)
 
 
@@ -341,8 +369,25 @@ async def _assessment_projection(
         .order_by(desc(models.LifecycleEvent.event_number))
         .limit(1)
     )
-    score_id = event.details.get("score_snapshot_id") if event is not None else None
-    score = await session.get(models.OpportunityScoreSnapshot, UUID(score_id)) if score_id else None
+    snapshot = await session.scalar(
+        select(models.FinalAssessmentSnapshot)
+        .join(
+            models.ResearchRun,
+            models.ResearchRun.id == models.FinalAssessmentSnapshot.run_id,
+        )
+        .where(models.FinalAssessmentSnapshot.assessment_id == row.id)
+        .order_by(
+            desc(models.ResearchRun.started_at),
+            desc(models.FinalAssessmentSnapshot.round_number),
+            desc(models.FinalAssessmentSnapshot.created_at),
+            desc(models.FinalAssessmentSnapshot.id),
+        )
+    )
+    score = (
+        await session.get(models.OpportunityScoreSnapshot, snapshot.score_snapshot_id)
+        if snapshot is not None
+        else None
+    )
     return {
         "id": row.id,
         "opportunity_id": row.opportunity_id,
@@ -351,7 +396,8 @@ async def _assessment_projection(
         "verdict": row.verdict,
         "score_snapshot_id": score.id if score else None,
         "score": score.final_score if score else None,
-        "gap_hypothesis_id": event.gap_hypothesis_id if event else None,
+        "gap_hypothesis_id": snapshot.gap_hypothesis_id if snapshot else None,
+        "final_snapshot_id": snapshot.id if snapshot else None,
         "rejected_at": row.rejected_at,
         "latest_event": _lifecycle_view(event) if event else None,
     }
@@ -387,41 +433,36 @@ def _merge_candidate_view(row: models.MergeCandidate) -> dict[str, Any]:
     }
 
 
-def _is_final_snapshot_event(event: models.LifecycleEvent) -> bool:
-    return set(event.details) >= {
-        "evidence_card_id",
-        "score_snapshot_id",
-        "critic_result_id",
-        "gap_hypothesis_id",
-        "verdict",
-        "gates",
+def _competitor_evidence_view(row: models.CompetitorEvidence) -> dict[str, Any]:
+    return {
+        "kind": "competitor_evidence",
+        "id": row.id,
+        "competitor_id": row.competitor_id,
+        "source_url": row.source_url,
+        "captured_excerpt": row.captured_excerpt,
+        "observed_at": row.observed_at,
+        "content_hash": row.content_hash.hex(),
+        "evidence_kind": row.evidence_kind,
+        "claim_ids": row.claim_ids,
+        "metadata": row.metadata_json,
     }
 
 
 async def _report_opportunity(
     session: AsyncSession,
-    event: models.LifecycleEvent,
+    snapshot: models.FinalAssessmentSnapshot,
     revision: models.MissionRevision,
 ) -> ReportOpportunity:
-    assessment = await session.get(models.MissionOpportunityAssessment, event.assessment_id)
+    assessment = await session.get(models.MissionOpportunityAssessment, snapshot.assessment_id)
     if assessment is None:
-        raise ValueError("report event references unknown assessment")
+        raise ValueError("report snapshot references unknown assessment")
     opportunity = await session.get(models.Opportunity, assessment.opportunity_id)
     if opportunity is None:
         raise ValueError("report assessment references unknown opportunity")
-    try:
-        card_id = UUID(str(event.details["evidence_card_id"]))
-        score_id = UUID(str(event.details["score_snapshot_id"]))
-        critic_id = UUID(str(event.details["critic_result_id"]))
-        gap_id = UUID(str(event.details["gap_hypothesis_id"]))
-    except (KeyError, ValueError) as exc:
-        raise ValueError("report lifecycle event has invalid snapshot identity") from exc
-    if gap_id != event.gap_hypothesis_id:
-        raise ValueError("report lifecycle gap detail disagrees with normalized FK")
-    card = await session.get(models.EvidenceCard, card_id)
-    score = await session.get(models.OpportunityScoreSnapshot, score_id)
-    critic = await session.get(models.CriticResult, critic_id)
-    gap = await session.get(models.GapHypothesis, gap_id)
+    card = await session.get(models.EvidenceCard, snapshot.evidence_card_id)
+    score = await session.get(models.OpportunityScoreSnapshot, snapshot.score_snapshot_id)
+    critic = await session.get(models.CriticResult, snapshot.critic_result_id)
+    gap = await session.get(models.GapHypothesis, snapshot.gap_hypothesis_id)
     if card is None or score is None or critic is None or gap is None:
         raise ValueError("report snapshot references missing artifacts")
     decision = await validation_from_storage(
@@ -432,8 +473,9 @@ async def _report_opportunity(
         critic=critic,
         gap=gap,
         mission_revision_id=revision.id,
+        competitor_research_status=snapshot.competitor_research_status,
     )
-    if event.details["verdict"] != decision.verdict.value or assessment.verdict != decision.verdict:
+    if snapshot.verdict != decision.verdict.value:
         raise ValueError("report verdict disagrees with persisted validation snapshot")
     typed_card, typed_score = await _typed_card_and_score(
         session,

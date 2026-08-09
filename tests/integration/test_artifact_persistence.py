@@ -49,9 +49,7 @@ async def test_writer_persists_complete_typed_lineage_in_stage_transactions(
     try:
         stages = _stage_payloads(context, ids)
         for stage, payload in stages:
-            async with database.session() as session:
-                await writer.persist_stage(session, context, FakeCommit(stage, payload))
-                await session.commit()
+            await _commit_stage(database, writer, context, stage, payload)
 
         async with database.session() as session:
             assert await _count(session, models.PainSignal) == 1
@@ -113,6 +111,17 @@ async def test_writer_persists_complete_typed_lineage_in_stage_transactions(
         evidence = await queries.evidence_item(str(ids["raw_domain"]))
         assert evidence["id"] == ids["raw_domain"]
         assert evidence["kind"] == "raw_signal_revision"
+        captured = await queries.evidence_item(str(ids["competitor_evidence"]))
+        assert captured["kind"] == "competitor_evidence"
+        assert captured["claim_ids"] == [ids["competitor_claim"]]
+        assert captured["content_hash"] == hashlib.sha256(b"$99 per month").hexdigest()
+        listed_evidence = await queries.evidence(limit=10)
+        assert {item["id"] for item in listed_evidence} >= {
+            ids["raw_domain"],
+            ids["competitor_evidence"],
+        }
+        supported_claim = await queries.evidence_item(str(ids["competitor_claim"]))
+        assert supported_claim["citations"][0]["evidence_id"] == str(ids["competitor_evidence"])
         opportunity = await queries.opportunity(ids["opportunity"])
         assert opportunity["origin_gap_hypothesis_id"] == ids["gap"]
         assert opportunity["assessments"][0]["score_snapshot_id"] == ids["score"]
@@ -123,6 +132,20 @@ async def test_writer_persists_complete_typed_lineage_in_stage_transactions(
         assert run_report.opportunities[0].validation.passed is True
         opportunity_report = await queries.opportunity_report(ids["opportunity"])
         assert opportunity_report.opportunity.evidence_card.id == str(ids["card"])
+        async with database.session() as session:
+            snapshot = await session.scalar(
+                select(models.FinalAssessmentSnapshot).where(
+                    models.FinalAssessmentSnapshot.run_id == context.run_id
+                )
+            )
+            assert snapshot is not None
+            with pytest.raises(DBAPIError, match="append-only"):
+                await session.execute(
+                    update(models.FinalAssessmentSnapshot)
+                    .where(models.FinalAssessmentSnapshot.id == snapshot.id)
+                    .values(verdict="REJECT")
+                )
+                await session.commit()
     finally:
         await database.dispose()
 
@@ -136,13 +159,7 @@ async def test_later_monitor_persists_snapshots_without_mutating_terminal_valida
     writer = ResearchArtifactWriter()
     try:
         for stage, payload in _stage_payloads(initial_context, initial_ids):
-            async with database.session() as session:
-                await writer.persist_stage(
-                    session,
-                    initial_context,
-                    FakeCommit(stage, payload),
-                )
-                await session.commit()
+            await _commit_stage(database, writer, initial_context, stage, payload)
 
         monitor_context = await _seed_followup_context(database, initial_context)
         monitor_ids = dict(initial_ids)
@@ -163,13 +180,23 @@ async def test_later_monitor_persists_snapshots_without_mutating_terminal_valida
             "Later monitoring confirms the same reconciliation gap"
         )
         for stage in ("GAP", "CARD_SCORE", "HYPOTHESIS", "CRITIC", "FINAL"):
-            async with database.session() as session:
-                await writer.persist_stage(
-                    session,
-                    monitor_context,
-                    FakeCommit(stage, monitor_stages[stage]),
-                )
-                await session.commit()
+            await _commit_stage(
+                database,
+                writer,
+                monitor_context,
+                stage,
+                monitor_stages[stage],
+            )
+
+        queries = ResearchQueryService(database.session_factory)
+        initial_report = await queries.run_report(initial_context.run_id)
+        monitor_report = await queries.run_report(monitor_context.run_id)
+        latest_report = await queries.opportunity_report(initial_ids["opportunity"])
+        opportunity_view = await queries.opportunity(initial_ids["opportunity"])
+        assert initial_report.opportunities[0].evidence_card.id == str(initial_ids["card"])
+        assert monitor_report.opportunities[0].evidence_card.id == str(monitor_ids["card"])
+        assert latest_report.opportunity.evidence_card.id == str(monitor_ids["card"])
+        assert opportunity_view["assessments"][0]["score_snapshot_id"] == monitor_ids["score"]
 
         async with database.session() as session:
             assessment = await session.scalar(
@@ -206,6 +233,227 @@ async def test_later_monitor_persists_snapshots_without_mutating_terminal_valida
                 )
                 is not None
             )
+            assert await _count(session, models.FinalAssessmentSnapshot) == 2
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_final_snapshot_database_rejects_cross_run_lineage_and_bad_gates(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context, ids = await _seed_pipeline_context(database)
+    writer = ResearchArtifactWriter()
+    try:
+        for stage, payload in _stage_payloads(context, ids):
+            await _commit_stage(database, writer, context, stage, payload)
+        followup = await _seed_followup_context(database, context)
+        followup_score_id = uuid4()
+        followup_critic_id = uuid5(
+            followup.run_id,
+            f"critic:1:{ids['opportunity']}",
+        )
+        async with database.session() as session:
+            original_score = await session.get(models.OpportunityScoreSnapshot, ids["score"])
+            original_critic = await session.scalar(
+                select(models.CriticResult).where(models.CriticResult.run_id == context.run_id)
+            )
+            assert original_score is not None
+            assert original_critic is not None
+            session.add(
+                models.OpportunityScoreSnapshot(
+                    id=followup_score_id,
+                    assessment_id=original_score.assessment_id,
+                    run_id=followup.run_id,
+                    algorithm_version=original_score.algorithm_version,
+                    raw_metrics=original_score.raw_metrics,
+                    evidence_strength=original_score.evidence_strength,
+                    opportunity_fit=original_score.opportunity_fit,
+                    evidence_components=original_score.evidence_components,
+                    opportunity_fit_components=original_score.opportunity_fit_components,
+                    weights=original_score.weights,
+                    penalties=original_score.penalties,
+                    pre_penalty_score=original_score.pre_penalty_score,
+                    final_score=original_score.final_score,
+                    confidence=original_score.confidence,
+                    explanation=original_score.explanation,
+                )
+            )
+            session.add(
+                models.CriticResult(
+                    id=followup_critic_id,
+                    assessment_id=original_critic.assessment_id,
+                    run_id=followup.run_id,
+                    agent_call_id=uuid5(
+                        followup.run_id,
+                        f"{followup.task_id}:CRITIC:1:{followup.task_attempt}",
+                    ),
+                    verdict=original_critic.verdict,
+                    confidence=original_critic.confidence,
+                    fatal_flags=original_critic.fatal_flags,
+                    weak_assumptions=original_critic.weak_assumptions,
+                    contradictions=original_critic.contradictions,
+                    missing_evidence=original_critic.missing_evidence,
+                    recommended_intents=original_critic.recommended_intents,
+                    summary=original_critic.summary,
+                )
+            )
+            await session.commit()
+        assessment_id = uuid5(
+            context.mission_revision.id,
+            f"assessment:{ids['opportunity']}",
+        )
+        valid_gates = [
+            {"name": f"gate-{number}", "passed": True, "actual": "ok", "required": "ok"}
+            for number in range(14)
+        ]
+        base = {
+            "assessment_id": assessment_id,
+            "run_id": context.run_id,
+            "gap_hypothesis_id": ids["gap"],
+            "evidence_card_id": ids["card"],
+            "score_snapshot_id": ids["score"],
+            "critic_result_id": uuid5(
+                context.run_id,
+                f"critic:1:{ids['opportunity']}",
+            ),
+            "round_number": 2,
+            "verdict": "VALIDATE",
+            "competitor_research_status": "COMPLETE",
+            "gates": valid_gates,
+        }
+        invalid_cases = (
+            (
+                {"run_id": followup.run_id},
+                "Evidence Card lineage is invalid",
+            ),
+            (
+                {"score_snapshot_id": followup_score_id},
+                "score lineage is invalid",
+            ),
+            (
+                {"critic_result_id": followup_critic_id},
+                "critic lineage is invalid",
+            ),
+            ({"gates": []}, None),
+            (
+                {
+                    "gates": [
+                        {
+                            "name": f"gate-{number}",
+                            "passed": True,
+                            "actual": "x" * 2000,
+                            "required": "ok",
+                        }
+                        for number in range(14)
+                    ]
+                },
+                None,
+            ),
+        )
+        for updates, message in invalid_cases:
+            async with database.session() as session:
+                error = (
+                    pytest.raises(DBAPIError, match=message)
+                    if message
+                    else pytest.raises(DBAPIError)
+                )
+                with error:
+                    await session.execute(
+                        insert(models.FinalAssessmentSnapshot).values(
+                            {"id": uuid4(), **base, **updates}
+                        )
+                    )
+                    await session.commit()
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_report_snapshots_freeze_competitor_status_across_monitor_runs(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    initial_context, initial_ids = await _seed_pipeline_context(database)
+    writer = ResearchArtifactWriter()
+    try:
+        await _set_competitor_status(database, initial_context, "RESEARCH_UNAVAILABLE")
+        initial_stages = {
+            stage: copy.deepcopy(payload)
+            for stage, payload in _stage_payloads(initial_context, initial_ids)
+        }
+        initial_stages["CRITIC"]["results"][0]["verdict"] = "RESEARCH_MORE"
+        initial_stages["FINAL"]["decisions"][0]["verdict"] = "RESEARCH_MORE"
+        for stage in (
+            "EXTRACT",
+            "CLUSTER",
+            "GAP",
+            "CARD_SCORE",
+            "HYPOTHESIS",
+            "CRITIC",
+            "FINAL",
+        ):
+            await _commit_stage(database, writer, initial_context, stage, initial_stages[stage])
+
+        monitor_context = await _seed_followup_context(database, initial_context)
+        monitor_ids = dict(initial_ids)
+        monitor_ids["gap"] = uuid4()
+        monitor_ids["card"] = uuid5(
+            monitor_context.run_id,
+            f"card:{monitor_ids['opportunity']}",
+        )
+        monitor_ids["score"] = uuid5(
+            monitor_context.run_id,
+            f"score:{monitor_ids['opportunity']}",
+        )
+        monitor_stages = {
+            stage: copy.deepcopy(payload)
+            for stage, payload in _stage_payloads(monitor_context, monitor_ids)
+        }
+        monitor_stages["GAP"]["gaps"][0]["statement"] = (
+            "Monitoring completed competitor research for the same pain"
+        )
+        for stage in ("GAP", "CARD_SCORE", "HYPOTHESIS", "CRITIC", "FINAL"):
+            await _commit_stage(
+                database,
+                writer,
+                monitor_context,
+                stage,
+                monitor_stages[stage],
+            )
+
+        queries = ResearchQueryService(database.session_factory)
+        initial_report = await queries.run_report(initial_context.run_id)
+        monitor_report = await queries.run_report(monitor_context.run_id)
+        initial_item = initial_report.opportunities[0]
+        monitor_item = monitor_report.opportunities[0]
+        assert initial_item.verdict.value == "RESEARCH_MORE"
+        assert monitor_item.verdict.value == "VALIDATE"
+        initial_gate = next(
+            gate for gate in initial_item.validation.gates if gate.name == "competitor_research"
+        )
+        monitor_gate = next(
+            gate for gate in monitor_item.validation.gates if gate.name == "competitor_research"
+        )
+        assert initial_gate.passed is False
+        assert monitor_gate.passed is True
+        async with database.session() as session:
+            snapshots = tuple(
+                await session.scalars(
+                    select(models.FinalAssessmentSnapshot).where(
+                        models.FinalAssessmentSnapshot.assessment_id
+                        == uuid5(
+                            initial_context.mission_revision.id,
+                            f"assessment:{initial_ids['opportunity']}",
+                        )
+                    )
+                )
+            )
+            assert {item.competitor_research_status for item in snapshots} == {
+                "RESEARCH_UNAVAILABLE",
+                "COMPLETE",
+            }
     finally:
         await database.dispose()
 
@@ -254,6 +502,47 @@ async def test_writer_rejects_unknown_lineage_atomically(
             assert await session.get(models.CanonicalProblem, problem_id) is None
             assert await session.get(models.ProblemCluster, cluster_id) is None
             assert await session.get(models.PainSignal, ids["pain"]) is None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_final_rejects_another_opportunity_gap_from_the_same_problem(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context, ids = await _seed_pipeline_context(database)
+    writer = ResearchArtifactWriter()
+    stages = {stage: copy.deepcopy(payload) for stage, payload in _stage_payloads(context, ids)}
+    other_gap_id = uuid4()
+    other_opportunity_id = uuid4()
+    other_gap = copy.deepcopy(stages["GAP"]["gaps"][0])
+    other_gap["id"] = str(other_gap_id)
+    other_gap["statement"] = "A distinct gap snapshot for a sibling opportunity"
+    stages["GAP"]["gaps"].append(other_gap)
+    other_opportunity = copy.deepcopy(stages["GAP"]["opportunities"][0])
+    other_opportunity["id"] = str(other_opportunity_id)
+    other_opportunity["gap_hypothesis_id"] = str(other_gap_id)
+    other_opportunity["title"] = "Sibling reconciliation opportunity"
+    stages["GAP"]["opportunities"].append(other_opportunity)
+    other_fit = copy.deepcopy(stages["GAP"]["opportunity_fit"][0])
+    other_fit["opportunity_id"] = str(other_opportunity_id)
+    stages["GAP"]["opportunity_fit"].append(other_fit)
+    try:
+        for stage in ("EXTRACT", "CLUSTER", "GAP", "CARD_SCORE", "HYPOTHESIS", "CRITIC"):
+            await _commit_stage(database, writer, context, stage, stages[stage])
+        invalid_final = copy.deepcopy(stages["FINAL"])
+        invalid_final["decisions"][0]["gap_hypothesis_id"] = str(other_gap_id)
+        async with database.session() as session:
+            with pytest.raises(ValueError, match="one run/opportunity snapshot"):
+                await writer.persist_stage(
+                    session,
+                    context,
+                    FakeCommit("FINAL", invalid_final),
+                )
+            await session.rollback()
+        async with database.session() as session:
+            assert await _count(session, models.FinalAssessmentSnapshot) == 0
     finally:
         await database.dispose()
 
@@ -546,9 +835,7 @@ async def test_round_two_report_restarts_from_exact_snapshot_without_mutating_or
         r1["CRITIC"]["results"][0]["verdict"] = "RESEARCH_MORE"
         r1["FINAL"]["decisions"][0]["verdict"] = "RESEARCH_MORE"
         for stage in ("EXTRACT", "CLUSTER", "GAP", "CARD_SCORE", "HYPOTHESIS", "CRITIC", "FINAL"):
-            async with database.session() as session:
-                await writer.persist_stage(session, context, FakeCommit(stage, r1[stage]))
-                await session.commit()
+            await _commit_stage(database, writer, context, stage, r1[stage])
 
         origin_gap_id = ids["gap"]
         r2_gap_id = uuid4()
@@ -598,9 +885,7 @@ async def test_round_two_report_restarts_from_exact_snapshot_without_mutating_or
             ("CRITIC", "CRITIC_R2"),
             ("FINAL", "FINAL"),
         ):
-            async with database.session() as session:
-                await writer.persist_stage(session, context, FakeCommit(target, r2[source]))
-                await session.commit()
+            await _commit_stage(database, writer, context, target, r2[source])
 
         restarted_queries = ResearchQueryService(database.session_factory)
         opportunity = await restarted_queries.opportunity(ids["opportunity"])
@@ -634,6 +919,27 @@ async def test_round_two_report_restarts_from_exact_snapshot_without_mutating_or
 
 async def _count(session: AsyncSession, model: type[models.Base]) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+async def _commit_stage(
+    database: Database,
+    writer: ResearchArtifactWriter,
+    context: FakeContext,
+    stage: str,
+    payload: dict[str, object],
+) -> None:
+    async with database.session() as session:
+        await writer.persist_stage(session, context, FakeCommit(stage, payload))
+        task = await session.get(models.ResearchTask, context.task_id)
+        assert task is not None
+        checkpoint = copy.deepcopy(task.checkpoint)
+        pipeline = checkpoint.setdefault("pipeline", {})
+        assert isinstance(pipeline, dict)
+        stages = pipeline.setdefault("stages", {})
+        assert isinstance(stages, dict)
+        stages[stage] = {"payload": copy.deepcopy(payload)}
+        task.checkpoint = checkpoint
+        await session.commit()
 
 
 async def _seed_pipeline_context(
@@ -880,6 +1186,20 @@ async def _seed_followup_context(
     )
     await _seed_critic_call(database, context, round_number=1)
     return context
+
+
+async def _set_competitor_status(
+    database: Database,
+    context: FakeContext,
+    status: str,
+) -> None:
+    async with database.session() as session:
+        task = await session.get(models.ResearchTask, context.task_id)
+        assert task is not None
+        checkpoint = copy.deepcopy(task.checkpoint)
+        checkpoint["pipeline"]["stages"]["COMPETITOR_RESEARCH"]["payload"]["status"] = status
+        task.checkpoint = checkpoint
+        await session.commit()
 
 
 def _stage_payloads(
