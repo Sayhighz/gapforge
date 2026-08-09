@@ -19,6 +19,10 @@ the volume survives container recreation.
 For credential-free infrastructure validation, set `AGENT_PROVIDER=fake`. This checks the
 database, migration, queue, destinations, and budgets without claiming Codex is authenticated.
 
+The manually dispatched credentialed smoke workflow uses Node 24 GitHub Actions. Its dedicated
+`self-hosted`, `linux`, `gapforge-smoke` runner must run a current GitHub Actions runner release
+with Node 24 action support.
+
 Start daily verified PostgreSQL backups with `docker compose --profile backup up -d backup`.
 Retention keeps the union of the newest backup in seven daily, four ISO-weekly, and six monthly
 buckets, so one archive can satisfy more than one tier. The backup service mounts only the database
