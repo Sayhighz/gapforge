@@ -312,6 +312,105 @@ async def test_task_lease_never_extends_past_run_deadline(
 
 
 @pytest.mark.postgres
+async def test_checkpoint_and_completion_after_deadline_preserve_partial_work(
+    migrated_postgres_url: str,
+) -> None:
+    started = datetime.now(UTC)
+    deadline = started + timedelta(seconds=10)
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database, deadline_at=deadline)
+    try:
+        async with database.session() as session:
+            task, _ = await DurableQueue(session).enqueue(
+                run_id=run.id,
+                task_type="extract",
+                idempotency_key="deadline-checkpoint",
+                payload={},
+                available_at=started,
+            )
+            await session.commit()
+        async with database.session() as session:
+            queue = DurableQueue(session)
+            claimed = await queue.claim(
+                worker_id="worker-a",
+                lease_duration=timedelta(minutes=5),
+                now=started,
+            )
+            assert claimed is not None
+            expired = await queue.checkpoint(
+                task.id,
+                worker_id="worker-a",
+                checkpoint={"last_evidence_id": "evidence-7"},
+                lease_duration=timedelta(minutes=5),
+                now=deadline + timedelta(milliseconds=1),
+            )
+            await session.commit()
+            assert expired.status == "PENDING"
+
+        async with database.session() as session:
+            persisted_run = await session.get(ResearchRun, run.id)
+            persisted_task = await session.get(ResearchTask, task.id)
+            assert persisted_run is not None
+            assert persisted_task is not None
+            assert persisted_run.status == "BUDGET_EXHAUSTED"
+            assert persisted_run.last_checkpoint["expired_by"] == "task_checkpoint"
+            assert persisted_task.status == "PENDING"
+            assert persisted_task.checkpoint == {"last_evidence_id": "evidence-7"}
+            assert persisted_task.result is None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_completion_one_millisecond_after_deadline_cannot_succeed(
+    migrated_postgres_url: str,
+) -> None:
+    started = datetime.now(UTC)
+    deadline = started + timedelta(seconds=10)
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database, deadline_at=deadline)
+    try:
+        async with database.session() as session:
+            task, _ = await DurableQueue(session).enqueue(
+                run_id=run.id,
+                task_type="extract",
+                idempotency_key="late-completion",
+                payload={},
+                available_at=started,
+            )
+            await session.commit()
+        async with database.session() as session:
+            queue = DurableQueue(session)
+            claimed = await queue.claim(
+                worker_id="worker-a",
+                lease_duration=timedelta(minutes=5),
+                now=started,
+            )
+            assert claimed is not None
+            completed = await queue.succeed(
+                task.id,
+                worker_id="worker-a",
+                result={"must_not_persist": True},
+                now=deadline + timedelta(milliseconds=1),
+            )
+            await session.commit()
+            assert completed.status == "PENDING"
+
+        async with database.session() as session:
+            persisted_run = await session.get(ResearchRun, run.id)
+            persisted_task = await session.get(ResearchTask, task.id)
+            assert persisted_run is not None
+            assert persisted_task is not None
+            assert persisted_run.status == "BUDGET_EXHAUSTED"
+            assert persisted_run.last_checkpoint["expired_by"] == "task_completion"
+            assert persisted_task.status == "PENDING"
+            assert persisted_task.result is None
+            assert persisted_task.completed_at is None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
 async def test_queue_poll_expires_overdue_run_with_pending_work(
     migrated_postgres_url: str,
 ) -> None:
@@ -395,6 +494,31 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
             assert reclaimed is not None
             await DurableAgentCallAdmission(session).release(reclaimed.id, lease_owner="worker-3")
             await session.commit()
+    finally:
+        await _finish_run(database, run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_provider_call_lease_never_extends_past_run_deadline(
+    migrated_postgres_url: str,
+) -> None:
+    started = datetime.now(UTC)
+    deadline = started + timedelta(seconds=10)
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database, deadline_at=deadline)
+    try:
+        async with database.session() as session:
+            lease = await DurableAgentCallAdmission(session).acquire(
+                run.id,
+                call_key="bounded-call",
+                lease_owner="worker-a",
+                lease_duration=timedelta(minutes=5),
+                now=started,
+            )
+            assert lease is not None
+            assert lease.lease_expires_at == deadline
+            await session.rollback()
     finally:
         await _finish_run(database, run.id)
         await database.dispose()

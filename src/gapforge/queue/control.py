@@ -159,7 +159,7 @@ class DurableAgentCallAdmission:
             run_id=run_id,
             call_key=call_key,
             lease_owner=lease_owner,
-            lease_expires_at=current_time + lease_duration,
+            lease_expires_at=min(current_time + lease_duration, run.deadline_at),
         )
         self.session.add(lease)
         await self.session.flush()

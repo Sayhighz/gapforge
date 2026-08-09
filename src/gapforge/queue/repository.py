@@ -161,7 +161,13 @@ class DurableQueue:
         task = await self._leased_by(task_id, worker_id)
         checkpoint_time = now or datetime.now(UTC)
         task.checkpoint = checkpoint
-        task.lease_expires_at = checkpoint_time + lease_duration
+        if not await self._renew_owned_task(
+            task,
+            lease_duration=lease_duration,
+            now=checkpoint_time,
+            expired_by="task_checkpoint",
+        ):
+            return task
         await self.session.flush()
         return task
 
@@ -175,27 +181,48 @@ class DurableQueue:
     ) -> ResearchTask | None:
         task = await self._leased_by(task_id, worker_id)
         renewal_time = now or datetime.now(UTC)
+        if not await self._renew_owned_task(
+            task,
+            lease_duration=lease_duration,
+            now=renewal_time,
+            expired_by="worker_heartbeat",
+        ):
+            return None
+        await self.session.flush()
+        return task
+
+    async def _renew_owned_task(
+        self,
+        task: ResearchTask,
+        *,
+        lease_duration: timedelta,
+        now: datetime,
+        expired_by: str,
+    ) -> bool:
         run = await self.session.scalar(
             select(ResearchRun).where(ResearchRun.id == task.run_id).with_for_update()
         )
         if run is None:
             raise RuntimeError("task run disappeared during renewal")
-        if run.deadline_at <= renewal_time:
+        if run.deadline_at <= now:
             run.status = "BUDGET_EXHAUSTED"
-            run.completed_at = renewal_time
+            run.completed_at = now
             run.last_checkpoint = {
                 **run.last_checkpoint,
                 "reason": "deadline",
-                "expired_by": "worker_heartbeat",
+                "expired_by": expired_by,
             }
             task.status = "PENDING"
             task.lease_owner = None
             task.lease_expires_at = None
             await self.session.flush()
-            return None
-        task.lease_expires_at = min(renewal_time + lease_duration, run.deadline_at)
-        await self.session.flush()
-        return task
+            return False
+        if run.status != "RUNNING":
+            raise PermissionError("task run is no longer active")
+        if task.lease_expires_at is None or task.lease_expires_at <= now:
+            raise PermissionError("task lease has expired")
+        task.lease_expires_at = min(now + lease_duration, run.deadline_at)
+        return True
 
     async def succeed(
         self,
@@ -206,9 +233,14 @@ class DurableQueue:
         now: datetime | None = None,
     ) -> ResearchTask:
         task = await self._leased_by(task_id, worker_id)
+        completion_time = now or datetime.now(UTC)
+        if not await self._terminal_write_allowed(
+            task, now=completion_time, expired_by="task_completion"
+        ):
+            return task
         task.status = "SUCCEEDED"
         task.result = result
-        task.completed_at = now or datetime.now(UTC)
+        task.completed_at = completion_time
         task.lease_owner = None
         task.lease_expires_at = None
         await self.session.flush()
@@ -225,6 +257,10 @@ class DurableQueue:
     ) -> ResearchTask:
         task = await self._leased_by(task_id, worker_id)
         failure_time = now or datetime.now(UTC)
+        if not await self._terminal_write_allowed(
+            task, now=failure_time, expired_by="task_failure"
+        ):
+            return task
         task.retry_class = decision.kind.value
         task.last_error = sanitized_error
         task.lease_owner = None
@@ -237,6 +273,23 @@ class DurableQueue:
             task.completed_at = failure_time
         await self.session.flush()
         return task
+
+    async def _terminal_write_allowed(
+        self,
+        task: ResearchTask,
+        *,
+        now: datetime,
+        expired_by: str,
+    ) -> bool:
+        # A zero-duration renewal performs all ownership/deadline checks without
+        # extending the lease. Terminal state is written only while both leases
+        # (task and run) are still current.
+        return await self._renew_owned_task(
+            task,
+            lease_duration=timedelta(0),
+            now=now,
+            expired_by=expired_by,
+        )
 
     async def _leased_by(self, task_id: UUID, worker_id: str) -> ResearchTask:
         task = await self.session.scalar(
