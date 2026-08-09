@@ -6,17 +6,34 @@ if [ "${GAPFORGE_PLATFORM_SMOKE_CONFIRM:-}" != "run" ]; then
     exit 2
 fi
 
+smoke_env_file=${GAPFORGE_SMOKE_ENV_FILE:-}
+if [ -z "$smoke_env_file" ]; then
+    echo "Set GAPFORGE_SMOKE_ENV_FILE to a protected file outside the checkout." >&2
+    exit 2
+fi
+checkout_root=$(pwd -P)
+scripts/validate-smoke-env "$smoke_env_file" "$checkout_root"
+
 if command -v docker-compose >/dev/null 2>&1; then
     compose() {
-        docker-compose "$@"
+        docker-compose --env-file "$smoke_env_file" "$@"
     }
 else
     compose() {
-        docker compose "$@"
+        docker compose --env-file "$smoke_env_file" "$@"
     }
 fi
 
-# The approved runner must already own the device-auth volume and deployment .env.
+# The approved runner must already own the dedicated device-auth volume.
+compose build worker
+compose run --rm --no-deps worker \
+    python /app/scripts/container-volume-check.py auth-write
+compose --profile auth run --rm --no-deps --entrypoint python codex-status \
+    /app/scripts/container-volume-check.py auth-readonly
 compose --profile auth run --rm codex-status
-compose up -d postgres migrate worker
+compose up -d --no-build postgres migrate worker
 compose exec -T worker gap health --json
+compose run --rm --no-deps worker \
+    gap-smoke credentialed-codex --confirm run --json
+compose run --rm --no-deps worker gap-smoke hacker-news --json
+compose run --rm --no-deps worker gap-smoke credentialed-sources --json

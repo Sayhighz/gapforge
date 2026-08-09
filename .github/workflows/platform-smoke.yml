@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: gapforge-credentialed-platform-smoke
+  cancel-in-progress: false
+
 jobs:
   smoke:
     if: inputs.confirm == 'run'
@@ -19,6 +23,7 @@ jobs:
     timeout-minutes: 20
     env:
       GAPFORGE_PLATFORM_SMOKE_CONFIRM: ${{ inputs.confirm }}
+      GAPFORGE_SMOKE_ENV_FILE: ${{ vars.GAPFORGE_SMOKE_ENV_FILE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

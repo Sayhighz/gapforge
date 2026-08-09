@@ -44,6 +44,12 @@ class SemanticCall:
 
     request: domain.AgentRequest
     output_schema: dict[str, Any]
+    max_output_bytes: int = 1_048_576
+    allow_repair: bool = True
+
+    def __post_init__(self) -> None:
+        if not 1_024 <= self.max_output_bytes <= 8_388_608:
+            raise ValueError("semantic max_output_bytes must contain 1024-8388608 bytes")
 
 
 class SemanticReasoner(Protocol):
@@ -119,7 +125,7 @@ class AuditedSemanticReasoner:
             schema_name=call.request.output_schema_name,
             output_schema=call.output_schema,
         )
-        request_hash = agent_request_identity(call.request, schema_identity=schema_hash)
+        request_hash = _semantic_request_identity(call, schema_hash=schema_hash)
         if _contains_secret(call.request.input_json, self._secret_values) or _contains_secret(
             call.output_schema, self._secret_values
         ):
@@ -137,7 +143,7 @@ class AuditedSemanticReasoner:
                     schema_hash=schema_hash,
                     request_hash=request_hash,
                 )
-                if replay.status is not domain.AgentStatus.INVALID_OUTPUT:
+                if replay.status is not domain.AgentStatus.INVALID_OUTPUT or not call.allow_repair:
                     return replay
                 return await self._repair(
                     context,
@@ -160,7 +166,10 @@ class AuditedSemanticReasoner:
             provider_request=provider_request,
             repair_attempt=0,
         )
-        if provider_result.status is provider_contracts.AgentStatus.INVALID_OUTPUT:
+        if (
+            provider_result.status is provider_contracts.AgentStatus.INVALID_OUTPUT
+            and call.allow_repair
+        ):
             return await self._repair(
                 context,
                 call,
@@ -300,6 +309,13 @@ class AuditedSemanticReasoner:
         repair_call = SemanticCall(
             request=call.request.model_copy(update={"call_id": str(repair_id)}),
             output_schema=call.output_schema,
+            max_output_bytes=call.max_output_bytes,
+            allow_repair=False,
+        )
+        repair_request_hash = (
+            request_hash
+            if call.max_output_bytes == 1_048_576 and call.allow_repair
+            else _semantic_request_identity(repair_call, schema_hash=schema_hash)
         )
         async with self._session_factory() as session:
             existing = await session.get(AgentCall, repair_id)
@@ -309,7 +325,7 @@ class AuditedSemanticReasoner:
                     context=context,
                     call=repair_call,
                     schema_hash=schema_hash,
-                    request_hash=request_hash,
+                    request_hash=repair_request_hash,
                 )
                 return replay.model_copy(
                     update={"call_id": call.request.call_id, "repair_attempted": True}
@@ -327,7 +343,7 @@ class AuditedSemanticReasoner:
             repair_call,
             call_id=repair_id,
             schema_hash=schema_hash,
-            request_hash=request_hash,
+            request_hash=repair_request_hash,
             provider_request=repair_request,
             repair_attempt=1,
         )
@@ -349,11 +365,12 @@ class AuditedSemanticReasoner:
         denied: SemanticAdmissionError | None = None
         admitted: _Admission | None = None
         async with self._session_factory() as session, session.begin():
-            run = await session.scalar(
-                select(ResearchRun).where(ResearchRun.id == context.run_id).with_for_update()
-            )
+            # Match worker heartbeats and stage commits: task row before run row.
             task = await session.scalar(
                 select(ResearchTask).where(ResearchTask.id == context.task_id).with_for_update()
+            )
+            run = await session.scalar(
+                select(ResearchRun).where(ResearchRun.id == context.run_id).with_for_update()
             )
             if (
                 run is None
@@ -616,6 +633,8 @@ class AuditedSemanticReasoner:
             effort=provider_contracts.ReasoningEffort(call.request.effort.value),
             model=self._model,
             timeout_seconds=timeout_seconds,
+            max_output_bytes=call.max_output_bytes,
+            allow_repair=call.allow_repair,
         )
 
     async def _heartbeat_provider_lease(
@@ -834,6 +853,27 @@ def _canonical_call_uuid(value: str) -> UUID:
 
 def _repair_call_uuid(original: UUID) -> UUID:
     return uuid5(original, "repair:1")
+
+
+def _semantic_request_identity(call: SemanticCall, *, schema_hash: bytes) -> bytes:
+    """Bind non-default execution policy to replay identity without changing legacy defaults."""
+
+    base = agent_request_identity(call.request, schema_identity=schema_hash)
+    if call.max_output_bytes == 1_048_576 and call.allow_repair:
+        return base
+    policy = json.dumps(
+        {
+            "allow_repair": call.allow_repair,
+            "base_request_sha256": base.hex(),
+            "max_output_bytes": call.max_output_bytes,
+            "policy_schema": "semantic-execution-policy-v1",
+        },
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(policy).digest()
 
 
 def _json_hash(value: dict[str, Any]) -> bytes:

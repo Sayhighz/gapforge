@@ -116,7 +116,7 @@ without direct SQL, and every supported claim resolves to stored evidence.
 
 - [x] Wire Thai and English deterministic report renderers to `gap report` commands.
 - [x] Persist report artifacts atomically under the configured reports directory.
-- [ ] Verify the canonical repository skill invokes only implemented CLI surfaces and follows up using persisted IDs/history.
+- [x] Verify the canonical repository skill invokes only implemented CLI surfaces and follows up using persisted IDs/history.
 - [x] Keep Product Hypothesis creation explicit and available only after `VALIDATE`.
 
 Progress: PR #13 code checkpoint `6a32890` wires terminal Thai/English run reports and
@@ -133,19 +133,42 @@ migration/health/backup/restore job. The canonical skill command guide is parser
 implemented CLI and documents persisted-ID/history follow-up, but the acceptance-level fake-provider
 HUNT inspected through a fresh skill/CLI process is intentionally left unchecked for I7 rather than
 replaced with synthetic seeding. The implementation was independently reviewed and PR #13 was
-squash-merged as `55d546d`.
+squash-merged as `55d546d`. PR #14 checkpoint `c9f47cb` completes that deferred acceptance with a
+production-wired fake-provider HUNT and fresh executable CLI processes that render the persisted run
+report, then follow its persisted opportunity/evidence IDs through `opportunity show`,
+`evidence show`, and `changes`; the deterministic report bytes and `latest.md` survive process
+restart.
 
 Acceptance: the fake-provider HUNT reaches a deterministic persisted report and the repository skill
 can inspect it after a fresh process starts.
 
 ## I7 — Integrated verification
 
-- [ ] Run Ruff, formatting, strict mypy, and the complete PostgreSQL-backed pytest suite from a clean install.
-- [ ] Add a deterministic fake-provider end-to-end HUNT regression with lineage assertions.
-- [ ] Test hard-gate refusal, zero-opportunity success, partial-source completion, and crash resume.
-- [ ] Build both target architectures where available and validate Compose migration, health, persistence, auth volume, and backup restore.
-- [ ] Run credential-free HN smoke; prove gated GitHub, Reddit, Brave, and Codex integrations fail gracefully without credentials.
+- [x] Run Ruff, formatting, strict mypy, and the complete PostgreSQL-backed pytest suite from a clean install.
+- [x] Add a deterministic fake-provider end-to-end HUNT regression with lineage assertions.
+- [x] Test hard-gate refusal, zero-opportunity success, partial-source completion, and crash resume.
+- [x] Build both target architectures where available and validate Compose migration, health, persistence, auth volume, and backup restore.
+- [x] Run credential-free HN smoke; prove gated GitHub, Reddit, Brave, and Codex integrations fail gracefully without credentials.
 - [ ] Load manual-smoke credentials from a protected post-checkout source and execute bounded real calls from a trusted ref; do not rely on an untracked `.env` surviving checkout.
+
+Progress: Draft PR #14 checkpoint `c9f47cb` adds versioned, sanitized `gap-smoke` entrypoints;
+strict protected external-env validation; isolated auth/database named-volume and restart checks;
+amd64/arm64 pinned builds; and a production-wired fake-provider HUNT through RunScheduler,
+RunController, Worker, audited semantic admission, PostgreSQL stage persistence, lifecycle/report
+projections, and a fresh executable CLI process. The vertical matrix covers clean completion,
+hard-gate refusal, zero opportunities, partial-source warnings, and real task-lease loss/reclaim from
+a committed CARD_SCORE checkpoint without repeating earlier provider or external calls. A discovered
+semantic-admission/heartbeat deadlock was fixed in `7512c99` by enforcing task-before-run locking and
+is covered by a deterministic concurrent PostgreSQL regression. GitHub Quality run `31303250007`
+passed Ruff, formatting across 131 files, strict mypy across 66 source files, 414 tests with 1
+environment-gated skip, the 22-second native arm64 build, and the 3-minute Compose migration,
+health, persistence, backup, and restore job. The manual credential-free command
+`uv run --frozen gap-smoke hacker-news --query 'manual workflow pain' --json` returned AVAILABLE
+with exactly 1 request and 5 items; `uv run --frozen gap-smoke missing-credentials --json` returned
+the expected zero-request GitHub CREDENTIAL_MISSING, Reddit SOURCE_UNAVAILABLE, Brave
+RESEARCH_UNAVAILABLE, and isolated Codex AUTH_REQUIRED outcomes. Protected post-checkout credential
+loading and bounded real source/Codex commands are implemented, but no trusted credentialed
+execution record exists yet, so the final manual-smoke item remains deliberately unchecked.
 
 Acceptance: all public CI checks are credential-free and every live integration remains an explicit,
 non-public smoke command.
@@ -160,11 +183,11 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1-I6 are reviewed and merged. I3 closed the I2 real-handler item. I6 report
-artifacts, report CLI, and explicit Product Hypothesis gates are on the integration branch; the
-fresh-process repository-skill acceptance remains open for I7, and I8 remains pending.
+Current state: I1-I6 are reviewed and merged. I7 code and credential-free verification are complete
+on draft PR #14 at implementation checkpoint `c9f47cb`, with GitHub Quality run `31303250007`
+green. The protected credentialed live-call execution record and I8 remain pending.
 
-Exact next action: merge the latest integration branch into draft PR #14 without rebasing, then
-exercise a credential-free fake-provider HUNT through the production queue/Worker and inspect its
-persisted report from a fresh CLI/skill process before checking the remaining I6 repository-skill
-item.
+Exact next action: integration lead reviews and merges PR #14 into `integration/v0.1`, then completes
+the I8 release audit and merges reviewed integration PR #4 into `main`. Only then can the protected
+workflow's hard checkout of `main` dispatch the bounded credentialed source/Codex smoke; capture that
+execution in a follow-up checkpoint/PR and keep its I7 box unchecked until the record exists.

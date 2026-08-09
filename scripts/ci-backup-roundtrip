@@ -41,6 +41,9 @@ export AUTHOR_HMAC_KEY=ci-test-only-author-hmac-key-32-bytes
 # Build the shared application image once. Building migrate and worker together
 # makes Compose export the same large image twice and can exhaust small CI runners.
 compose build worker
+compose run --rm --no-deps worker python /app/scripts/container-volume-check.py auth-write
+compose --profile auth run --rm --no-deps --entrypoint python codex-status \
+    /app/scripts/container-volume-check.py auth-readonly
 compose up -d postgres
 compose run --rm migrate
 compose run --rm --no-deps worker python /app/scripts/container-healthcheck.py
@@ -49,6 +52,15 @@ compose run --rm --no-deps worker gap mission create \
     --title "CI backup sentinel" \
     --output-locale en \
     --json >/dev/null
+
+compose stop postgres
+compose up -d postgres
+compose run --rm migrate
+persisted_count=$(compose run --rm --no-deps -e PGPASSWORD=gapforge worker \
+    psql --host postgres --username gapforge --dbname gapforge \
+    --tuples-only --no-align \
+    --command "SELECT count(*) FROM research_missions WHERE title = 'CI backup sentinel'")
+test "$persisted_count" = "1"
 
 backup_json=$(compose run --rm --no-deps worker gap backup create --json)
 backup_name=$(printf '%s' "$backup_json" | "$python_command" -c \

@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Validate the protected, external environment file used by manual live smokes."""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+ALLOWED_KEYS = frozenset(
+    {
+        "AGENT_PROVIDER",
+        "AUTHOR_HMAC_KEY",
+        "BACKUP_INTERVAL_SECONDS",
+        "BACKUP_MAINTENANCE_DATABASE",
+        "BRAVE_API_KEY",
+        "CODEX_MODEL",
+        "DATABASE_URL",
+        "GITHUB_TOKEN",
+        "INITIAL_LOOKBACK_DAYS",
+        "LOG_JSON",
+        "LOG_LEVEL",
+        "MAX_AGENT_CALLS_PER_RUN",
+        "MAX_COLLECTOR_REQUESTS_PER_RUN",
+        "MAX_PARALLEL_AGENT_CALLS",
+        "MAX_RAW_SIGNALS_PER_RUN",
+        "MAX_RESEARCH_ROUNDS",
+        "MAX_RUN_DURATION_MINUTES",
+        "MAX_SEARCH_CALLS_PER_RUN",
+        "MONITOR_OVERLAP_HOURS",
+        "POSTGRES_DB",
+        "POSTGRES_PASSWORD",
+        "POSTGRES_USER",
+        "RAW_SIGNAL_RETENTION_DAYS",
+        "REDDIT_CLIENT_ID",
+        "REDDIT_CLIENT_SECRET",
+        "REJECTED_REOPEN_COOLDOWN_DAYS",
+        "RUN_INTERVAL_HOURS",
+    }
+)
+EMPTY_ALLOWED = frozenset({"CODEX_MODEL"})
+ENV_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
+MAX_BYTES = 32_768
+MIN_DATABASE_PASSWORD_LENGTH = 16
+DATABASE_PASSWORD_PLACEHOLDER = "replace-with-a-long-random-password"
+
+
+def fail(message: str) -> int:
+    print(f"smoke credential file rejected: {message}", file=sys.stderr)
+    return 2
+
+
+def validate(path_value: str, checkout_value: str) -> int:
+    path = Path(path_value)
+    checkout = Path(checkout_value)
+    if not path.is_absolute() or not checkout.is_absolute():
+        return fail("file and checkout paths must be absolute")
+    if path.is_symlink():
+        return fail("file must not be a symbolic link")
+    try:
+        resolved = path.resolve(strict=True)
+        checkout_resolved = checkout.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError:
+        return fail("file or checkout path is unavailable")
+    if resolved.is_relative_to(checkout_resolved):
+        return fail("file must be outside the checkout")
+    if not stat.S_ISREG(metadata.st_mode):
+        return fail("path must identify a regular file")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        return fail("file permissions must be exactly 0600")
+    if metadata.st_uid != os.getuid():
+        return fail("file must be owned by the smoke-runner user")
+    if not 0 < metadata.st_size <= MAX_BYTES:
+        return fail("file must contain 1-32768 bytes")
+    try:
+        contents = resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return fail("file must be readable UTF-8")
+    if "\x00" in contents:
+        return fail("file contains an invalid NUL byte")
+
+    values: dict[str, str] = {}
+    for raw_line in contents.splitlines():
+        if not raw_line or raw_line.startswith("#"):
+            continue
+        if raw_line != raw_line.strip():
+            return fail("file values must use unambiguous literal values")
+        matched = ENV_LINE.fullmatch(raw_line)
+        if matched is None:
+            return fail("file contains a malformed environment assignment")
+        key, value = matched.groups()
+        if key not in ALLOWED_KEYS:
+            return fail("file contains a key outside the smoke allowlist")
+        if key in values:
+            return fail("file contains a duplicate key")
+        if not value and key not in EMPTY_ALLOWED:
+            return fail("file contains an empty required value")
+        if any(character.isspace() or character in "$'\"#\\" for character in value):
+            return fail("file values must use unambiguous literal values")
+        values[key] = value
+    if values.keys() != ALLOWED_KEYS:
+        return fail("file does not contain every required smoke credential")
+    if values["AGENT_PROVIDER"] != "codex_cli":
+        return fail("manual live smoke requires the codex_cli provider")
+    if len(values["AUTHOR_HMAC_KEY"]) < 32:
+        return fail("AUTHOR_HMAC_KEY must contain at least 32 characters")
+    if values["POSTGRES_PASSWORD"] == "gapforge":  # noqa: S105 -- reject public dev default
+        return fail("development database credentials are forbidden")
+    if (
+        values["POSTGRES_PASSWORD"] == DATABASE_PASSWORD_PLACEHOLDER
+        or len(values["POSTGRES_PASSWORD"]) < MIN_DATABASE_PASSWORD_LENGTH
+    ):
+        return fail("database password is a known placeholder or has fewer than 16 characters")
+    try:
+        database = urlsplit(values["DATABASE_URL"])
+        port = database.port
+    except ValueError:
+        return fail("DATABASE_URL is malformed")
+    if (
+        database.scheme != "postgresql+asyncpg"
+        or database.hostname != "postgres"
+        or port != 5432
+        or unquote(database.username or "") != values["POSTGRES_USER"]
+        or unquote(database.password or "") != values["POSTGRES_PASSWORD"]
+        or unquote(database.path.removeprefix("/")) != values["POSTGRES_DB"]
+    ):
+        return fail("DATABASE_URL must match the protected PostgreSQL deployment values")
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        return fail("usage: validate-smoke-env ABSOLUTE_FILE ABSOLUTE_CHECKOUT")
+    return validate(sys.argv[1], sys.argv[2])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

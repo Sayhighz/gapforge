@@ -477,6 +477,7 @@ async def test_writer_rejects_unknown_lineage_atomically(
     problem_id = uuid4()
     cluster_id = uuid4()
     payload = {
+        "schema_version": "0.1",
         "problems": [
             {
                 "schema_version": "0.1",
@@ -614,10 +615,42 @@ async def test_writer_ignores_only_reserved_input_bounds_and_rejects_unknown_sta
         async with database.session() as session:
             await writer.persist_stage(session, context, FakeCommit("EXTRACT", extraction))
             await session.commit()
+        missing_version = {
+            key: value for key, value in extraction.items() if key != "schema_version"
+        }
+        async with database.session() as session:
+            with pytest.raises(ValueError, match=r"payload schema_version must be '0\.1'"):
+                await writer.persist_stage(
+                    session,
+                    context,
+                    FakeCommit("EXTRACT", missing_version),
+                )
+        wrong_version = {**extraction, "schema_version": "9.9"}
+        async with database.session() as session:
+            with pytest.raises(ValueError, match=r"payload schema_version must be '0\.1'"):
+                await writer.persist_stage(
+                    session,
+                    context,
+                    FakeCommit("EXTRACT", wrong_version),
+                )
         invalid = {**extraction, "invented": []}
         async with database.session() as session:
             with pytest.raises(ValueError, match="unknown EXTRACT payload keys"):
                 await writer.persist_stage(session, context, FakeCommit("EXTRACT", invalid))
+        for unversioned_stage, payload in (
+            ("CARD_SCORE", {"schema_version": "0.1", "cards": [], "scores": []}),
+            ("FINAL", {"schema_version": "0.1", "decisions": []}),
+        ):
+            async with database.session() as session:
+                with pytest.raises(
+                    ValueError,
+                    match=rf"unknown {unversioned_stage} payload keys",
+                ):
+                    await writer.persist_stage(
+                        session,
+                        context,
+                        FakeCommit(unversioned_stage, payload),
+                    )
         async with database.session() as session:
             with pytest.raises(ValueError, match="unsupported artifact stage"):
                 await writer.persist_stage(
@@ -1266,6 +1299,7 @@ def _stage_payloads(
         (
             "EXTRACT",
             {
+                "schema_version": "0.1",
                 "pain_signals": [
                     {
                         "schema_version": "0.1",
@@ -1285,12 +1319,13 @@ def _stage_payloads(
                         "confidence": 0.9,
                         "excerpt": "manually reconcile spreadsheets",
                     }
-                ]
+                ],
             },
         ),
         (
             "CLUSTER",
             {
+                "schema_version": "0.1",
                 "problems": [
                     {
                         "schema_version": "0.1",
@@ -1320,6 +1355,7 @@ def _stage_payloads(
         (
             "GAP",
             {
+                "schema_version": "0.1",
                 "claims": [
                     {
                         "schema_version": "0.1",
@@ -1458,6 +1494,7 @@ def _stage_payloads(
         (
             "HYPOTHESIS",
             {
+                "schema_version": "0.1",
                 "hypotheses": [
                     {
                         "schema_version": "0.1",
@@ -1478,6 +1515,7 @@ def _stage_payloads(
         (
             "CRITIC",
             {
+                "schema_version": "0.1",
                 "results": [
                     {
                         "schema_version": "0.1",
@@ -1491,7 +1529,7 @@ def _stage_payloads(
                         "recommended_intents": [],
                         "summary": "Evidence supports validation",
                     }
-                ]
+                ],
             },
         ),
         (
