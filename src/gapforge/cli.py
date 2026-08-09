@@ -7,7 +7,7 @@ import json
 import socket
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any
@@ -22,6 +22,7 @@ from gapforge.backup import BackupError, BackupService
 from gapforge.config import AgentProviderName, Settings
 from gapforge.health import HealthService
 from gapforge.providers.codex_cli import CodexCliProvider
+from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.storage.admin import execute_read_only_sql
 from gapforge.storage.database import Database
 from gapforge.storage.models import (
@@ -38,7 +39,7 @@ from gapforge.storage.models import (
     ResearchTask,
 )
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
-from gapforge.worker import Worker
+from gapforge.worker import TaskHandlerRegistry, Worker
 
 app = typer.Typer(name="gap", no_args_is_help=True, pretty_exceptions_enable=False)
 mission_app = typer.Typer(no_args_is_help=True)
@@ -82,6 +83,12 @@ def _settings() -> Settings:
 
 def _database(settings: Settings) -> Database:
     return Database.from_url(settings.database_url.get_secret_value())
+
+
+def _build_task_handler_registry() -> TaskHandlerRegistry:
+    """Integration seam for I3's concrete research orchestrator handler."""
+
+    return TaskHandlerRegistry()
 
 
 def _jsonable(value: Any) -> Any:
@@ -393,21 +400,18 @@ def hunt(
                     raise CliError("NOT_FOUND", "mission not found", exit_code=3)
                 if mission.status == "ARCHIVED":
                     raise CliError("INVALID_STATE", "archived mission cannot hunt", exit_code=4)
-                run = ResearchRun(
-                    mission_revision_id=revision.id,
-                    mode="HUNT",
-                    status="QUEUED",
-                    priority=0,
-                    deadline_at=datetime.now(UTC)
-                    + timedelta(minutes=settings.max_run_duration_minutes),
-                    budget_limits=settings.budget_snapshot(),
-                    budget_used={},
-                    warnings=[],
-                    last_checkpoint={},
+                if uow.session is None:
+                    raise RuntimeError("unit of work session unavailable")
+                scheduled = await RunScheduler(uow.session).schedule(
+                    request=RunScheduleRequest(
+                        mission_revision_id=revision.id,
+                        mode="HUNT",
+                        priority=0,
+                        budget_limits=settings.budget_snapshot(),
+                    ),
                 )
-                await uow.runs.add(run)
                 await uow.commit()
-                return _run_data(run)
+                return _run_data(scheduled.run)
         finally:
             await database.dispose()
 
@@ -438,26 +442,18 @@ def monitor(
                     revision = await uow.missions.latest_revision(mission.id)
                     if revision is None:
                         continue
-                    run = ResearchRun(
-                        mission_revision_id=revision.id,
-                        mode="MONITOR",
-                        status="QUEUED",
-                        priority=100,
-                        deadline_at=datetime.now(UTC)
-                        + timedelta(minutes=settings.max_run_duration_minutes),
-                        budget_limits=settings.budget_snapshot(),
-                        budget_used={},
-                        warnings=[],
-                        last_checkpoint={},
+                    scheduled = await RunScheduler(session).schedule(
+                        request=RunScheduleRequest(
+                            mission_revision_id=revision.id,
+                            mode="MONITOR",
+                            priority=100,
+                            budget_limits=settings.budget_snapshot(),
+                        ),
                     )
-                    try:
-                        async with session.begin_nested():
-                            session.add(run)
-                            await session.flush()
-                    except IntegrityError:
+                    if not scheduled.created:
                         warnings.append(f"mission {mission.id} already has an active revision run")
                         continue
-                    queued.append(_run_data(run))
+                    queued.append(_run_data(scheduled.run))
                 await uow.commit()
             return CommandOutcome({"queued": queued}, tuple(warnings))
         finally:
@@ -515,17 +511,32 @@ def worker(
     json_output: JsonOption = False,
 ) -> None:
     async def operation() -> dict[str, Any]:
+        registry = _build_task_handler_registry()
+        registered_task_types = sorted(registry.task_types)
+        if not registered_task_types and once:
+            raise CliError(
+                "WORKER_NOT_CONFIGURED",
+                "no research task handlers are registered",
+                exit_code=4,
+            )
+        if not registered_task_types:
+            typer.echo(
+                "warning: worker is idle because no research task handlers are registered",
+                err=True,
+            )
         database = _database(_settings())
         try:
             runtime = Worker(
-                database, worker_id=f"{socket.gethostname()}:{os_getpid()}", handlers={}
+                database,
+                worker_id=f"{socket.gethostname()}:{os_getpid()}",
+                handlers=registry,
             )
             if not once:
                 await runtime.run_forever()
-                return {"processed": False, "registered_task_types": []}
+                return {"processed": False, "registered_task_types": registered_task_types}
             return {
                 "processed": await runtime.run_once(),
-                "registered_task_types": [],
+                "registered_task_types": registered_task_types,
             }
         finally:
             await database.dispose()

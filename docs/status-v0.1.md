@@ -51,6 +51,8 @@ Completed:
   diff hygiene, and bytecode hygiene passing; PR #6 squash-merged as `0a21190`.
 - Lane A A1-A8 reviewed with 98 tests, Ruff, format, strict mypy, PostgreSQL, Docker,
   backup/restore, CI, and independent review passing; PR #5 squash-merged as `14fe4a2`.
+- Post-merge integration baseline passes Ruff, format, strict mypy, diff hygiene, and
+  172 tests with one host-only PostgreSQL-client skip at checkpoint `03713c7`.
 
 In progress:
 

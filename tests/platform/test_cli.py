@@ -8,8 +8,9 @@ from sqlalchemy import func, select
 from typer.testing import CliRunner
 
 from gapforge.cli import app
+from gapforge.queue.repository import DurableQueue
 from gapforge.storage.database import Database
-from gapforge.storage.models import ResearchRun
+from gapforge.storage.models import ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
 
 runner = CliRunner()
@@ -106,7 +107,9 @@ def test_hunt_and_run_inspection_use_stable_json(cli_database_url: str) -> None:
 
     shown, exit_code, _ = _invoke_json(["run", "show", str(hunt["data"]["id"])])
     assert exit_code == 0
-    assert shown["data"]["tasks"] == []
+    assert len(shown["data"]["tasks"]) == 1
+    assert shown["data"]["tasks"][0]["task_type"] == "research.run"
+    assert shown["data"]["tasks"][0]["status"] == "PENDING"
 
 
 @pytest.mark.postgres
@@ -139,6 +142,14 @@ async def test_monitor_conflict_uses_savepoint_and_reports_real_queues(
             )
             assert uow.session is not None
             uow.session.add(existing)
+            await uow.session.flush()
+            await DurableQueue(uow.session).enqueue(
+                run_id=existing.id,
+                task_type="research.run",
+                idempotency_key="run-root:v1",
+                payload={},
+                priority=100,
+            )
             await uow.commit()
 
         result = await asyncio_to_thread_cli(["monitor", "--once", "--json"])
@@ -157,7 +168,17 @@ async def test_monitor_conflict_uses_savepoint_and_reports_real_queues(
                 .select_from(ResearchRun)
                 .where(ResearchRun.mission_revision_id.in_(revision_ids))
             )
+            root_tasks = await session.scalar(
+                select(func.count())
+                .select_from(ResearchTask)
+                .join(ResearchRun, ResearchRun.id == ResearchTask.run_id)
+                .where(
+                    ResearchRun.mission_revision_id.in_((revision_ids[0], revision_ids[2])),
+                    ResearchTask.task_type == "research.run",
+                )
+            )
         assert persisted == 3
+        assert root_tasks == 2
     finally:
         await database.dispose()
 
@@ -177,6 +198,32 @@ def test_invalid_identifier_uses_json_error_envelope(cli_database_url: str) -> N
         "code": "INVALID_ARGUMENT",
         "message": "invalid mission ID",
     }
+
+
+def test_worker_refuses_to_claim_without_production_handlers() -> None:
+    envelope, exit_code, stderr = _invoke_json(["worker", "--once"])
+
+    assert exit_code == 4
+    assert stderr == ""
+    assert envelope["error"] == {
+        "code": "WORKER_NOT_CONFIGURED",
+        "message": "no research task handlers are registered",
+    }
+
+
+def test_continuous_worker_stays_idle_without_production_handlers(
+    cli_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def stop_immediately(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("gapforge.cli.Worker.run_forever", stop_immediately)
+    envelope, exit_code, stderr = _invoke_json(["worker", "--continuous"])
+
+    assert exit_code == 0
+    assert envelope["data"] == {"processed": False, "registered_task_types": []}
+    assert stderr == "warning: worker is idle because no research task handlers are registered\n"
 
 
 def test_admin_sql_cli_requires_guard_and_keeps_stdout_clean(cli_database_url: str) -> None:

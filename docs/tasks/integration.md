@@ -8,7 +8,8 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A and Lane B are reviewed and merged; I1-I2 are next.
+Last checkpoint: Lane A, Lane B, and the reviewed I2 runtime checkpoint are merged; I1 and
+the real I3 handler registration are next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -29,13 +30,18 @@ research module depends on a database session.
 
 ## I2 — Run admission and durable task graph
 
-- [ ] Make `gap hunt` and `gap monitor --once` atomically create an idempotent root task with each queued run.
-- [ ] Promote eligible queued runs through `RunController` while preserving global RUNNING exclusivity.
-- [ ] Start the configured run-duration clock at the `QUEUED` to `RUNNING` transition, not while waiting in the queue.
+- [x] Make `gap hunt` and `gap monitor --once` atomically create an idempotent root task with each queued run.
+- [x] Promote eligible queued runs through `RunController` while preserving global RUNNING exclusivity.
+- [x] Start the configured run-duration clock at the `QUEUED` to `RUNNING` transition, not while waiting in the queue.
 - [ ] Register real worker handlers; remove the empty production handler registry.
-- [ ] Finalize runs only after their durable task graph is terminal, preserving warnings and checkpoints.
-- [ ] Map authentication and total/permanent handler failure to `AUTH_REQUIRED`/`FAILED`; use `COMPLETED_WITH_WARNINGS` only when useful partial work survived.
-- [ ] Test concurrent admission, duplicate scheduling, restart, lease loss, and deadline exhaustion.
+- [x] Finalize runs only after their durable task graph is terminal, preserving warnings and checkpoints.
+- [x] Map authentication and total/permanent handler failure to `AUTH_REQUIRED`/`FAILED`; use `COMPLETED_WITH_WARNINGS` only when useful partial work survived.
+- [x] Test concurrent admission, duplicate scheduling, restart, lease loss, and deadline exhaustion.
+
+Progress: PR #9 was squash-merged as `f30fc7b` after independent reproduction of 208 passed,
+1 environment-gated skip, whole-repository Ruff/format, strict mypy, diff-check, and green
+GitHub Python/container-backup jobs. The production registry deliberately remains empty and
+fail-closed until I3 supplies the real `research.run` orchestrator; no fake handler was added.
 
 Acceptance: a queued HUNT is structurally reachable by a worker and resumes safely after process
 or host restart without duplicating committed effects.
@@ -107,7 +113,8 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1-I8 pending.
+Current state: I2 runtime admission/finalization is merged except for real I3 handler
+registration; I1 and I3-I8 remain pending.
 
-Exact next action: implement I1 contract/migration reconciliation and I2 durable runtime assembly
-on separate reviewed branches before adding pipeline stages.
+Exact next action: finish and review I1 contract/migration reconciliation, then register the real
+I3 pipeline handler against the merged I2 runtime boundary.
