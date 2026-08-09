@@ -8,22 +8,28 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A, Lane B, and the reviewed I2 runtime checkpoint are merged; I1 and
-the real I3 handler registration are next.
+Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, and the reviewed I2 runtime
+checkpoint are merged; I3 evidence orchestration and I4 provider admission/audit are next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
 
 ## I1 — Contract reconciliation
 
-- [ ] Map Lane B domain contracts to Lane A persistence models without importing SQLAlchemy into research modules.
-- [ ] Reconcile task status mapping (`QUEUED/COMPLETED` versus `PENDING/SUCCEEDED`) and duplicated run, provider, enum, ID, timestamp, checkpoint-cursor, and locale contracts explicitly.
-- [ ] Add the missing bounded `QUERY_PLAN` semantic operation and its explicit effort policy.
-- [ ] Add a migration for bounded pain frequency/severity, opportunity-scoped Evidence Cards, competitor research status, claim contradictions/citations, duplicate groups, lossless score components/pre-penalty score, constrained final verdicts, and AgentCall operation/schema identity.
-- [ ] Enable and index PostgreSQL `pg_trgm`/full-text candidate discovery required by the canonical deduplication order.
-- [ ] Resolve domain string revision IDs versus storage UUID revision IDs without losing lineage.
-- [ ] Add typed mapping tests that reject lossy or invalid conversions.
-- [ ] Narrow root ignore rules so source packages such as `src/gapforge/reports/` remain trackable.
+- [x] Map Lane B domain contracts to Lane A persistence models without importing SQLAlchemy into research modules.
+- [x] Reconcile task status mapping (`QUEUED/COMPLETED` versus `PENDING/SUCCEEDED`) and duplicated run, provider, enum, ID, timestamp, checkpoint-cursor, and locale contracts explicitly.
+- [x] Add the missing bounded `QUERY_PLAN` semantic operation and its explicit effort policy.
+- [x] Add a migration for bounded pain frequency/severity, opportunity-scoped Evidence Cards, competitor research status, claim contradictions/citations, duplicate groups, lossless score components/pre-penalty score, constrained final verdicts, and AgentCall operation/schema identity.
+- [x] Enable and index PostgreSQL `pg_trgm`/full-text candidate discovery required by the canonical deduplication order.
+- [x] Resolve domain string revision IDs versus storage UUID revision IDs without losing lineage.
+- [x] Add typed mapping tests that reject lossy or invalid conversions.
+- [x] Narrow root ignore rules so source packages such as `src/gapforge/reports/` remain trackable.
+
+Progress: PR #8 was squash-merged as `a5b36b1` after independent reproduction of 249 passed,
+1 environment-gated skip, whole-repository Ruff/format, strict mypy, Alembic drift, diff-check,
+and green GitHub Python/container-backup jobs. Pre-release databases containing legacy raw
+revisions or competitor evidence are refused transactionally because their missing original
+lineage cannot be reconstructed; export/reset is required rather than inventing identifiers.
 
 Acceptance: every persisted research entity has one deliberate domain-to-storage mapping and no
 research module depends on a database session.
@@ -113,8 +119,8 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I2 runtime admission/finalization is merged except for real I3 handler
-registration; I1 and I3-I8 remain pending.
+Current state: I1 and the I2 runtime admission/finalization checkpoint are merged. The I2 real
+handler-registration item remains open and is owned by I3; I3-I8 remain pending.
 
-Exact next action: finish and review I1 contract/migration reconciliation, then register the real
-I3 pipeline handler against the merged I2 runtime boundary.
+Exact next action: implement I3 evidence-pipeline orchestration and register its real
+`research.run` handler while I4 implements durable provider admission and per-subprocess audit.
