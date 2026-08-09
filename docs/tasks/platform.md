@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A4 constrained providers pushed in `eaa9e66`; A5 CLI/health is next.
+Last checkpoint: A5 CLI/health pushed in `921ff43`; A6 containers/auth is next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -80,11 +80,11 @@ Acceptance: untrusted prompt text cannot alter process arguments or inherit appl
 
 ## A5 — CLI and health
 
-- [ ] Implement Typer command tree from spec section 19.
-- [ ] Implement stable JSON envelope and exit-code mapping.
-- [ ] Make JSON stdout clean and send diagnostics to stderr.
-- [ ] Implement functional mission lifecycle, run/task inspection, worker, health, and bounded read-only admin SQL commands.
-- [ ] Test JSON snapshots, errors, and SQL safeguards.
+- [x] Implement Typer command tree from spec section 19.
+- [x] Implement stable JSON envelope and exit-code mapping.
+- [x] Make JSON stdout clean and send diagnostics to stderr.
+- [x] Implement functional mission lifecycle, run/task inspection, worker, health, and bounded read-only admin SQL commands.
+- [x] Test JSON snapshots, errors, and SQL safeguards.
 
 Acceptance: an agent can create/list/revise/activate/pause missions and inspect run state without SQL.
 
@@ -118,8 +118,8 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## Resume note
 
-Current state: A1-A4 complete; A5 in progress.
+Current state: A1-A5 complete; A6 in progress.
 
-Last pushed commit: `eaa9e66` (`add constrained Codex provider`).
+Last pushed commit: `921ff43` (`add platform CLI and health checks`).
 
-Next action: implement the complete Typer CLI, health checks, and read-only SQL safeguards for A5.
+Next action: implement the non-root pinned-Codex image, Compose topology, and auth helpers for A6.
