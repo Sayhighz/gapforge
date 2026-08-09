@@ -26,7 +26,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `02f7d10` |
+| Integration | `integration/v0.1` | #4 | active draft | `55d546d` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
@@ -34,7 +34,8 @@ This is the first file to read after interruption. It records only reviewed/push
 | I3 evidence pipeline | `agent/integration-evidence-pipeline` | #11 | reviewed and squash-merged | `b026074` |
 | I4 provider audit | `agent/integration-provider-audit` | #10 | reviewed and squash-merged | `5df58b4` |
 | I5 persistence surfaces | `agent/integration-persistence-surfaces` | #12 | reviewed and squash-merged | `6e9f56e` |
-| I6 reports and skill | `agent/integration-reports-skill` | #13 | active draft | `6d26afd` |
+| I6 reports and skill | `agent/integration-reports-skill` | #13 | reviewed and squash-merged | `957a824` |
+| I7 integrated verification | `agent/integration-verification` | #14 | active draft | `df6ba41` |
 
 GitHub issues:
 
@@ -74,18 +75,24 @@ Completed:
   query/report lineage, competitor evidence reads, and production writer wiring were independently
   reproduced with 358 passed, 1 environment-gated skip and green container backup; PR #12 was
   squash-merged as `02f7d10`.
+- I6 deterministic Thai/English run and opportunity reports, crash-safe immutable artifact storage,
+  explicit post-`VALIDATE` Product Hypotheses, and parser-valid canonical skill commands were
+  independently reproduced with 377 passed, 1 environment-gated skip and green container backup;
+  PR #13 was squash-merged as `55d546d`. The fresh-process skill acceptance remains deliberately
+  open for I7 rather than being claimed from synthetic fixtures.
 
 In progress:
 
-- I6 deterministic report artifacts and the canonical repository skill are active in draft PR #13.
-- The first I6 checkpoint is isolated from I5-owned seams; CLI/query wiring follows its refresh
-  onto merged I5.
+- I7 integrated verification and bounded smoke surfaces are active in draft PR #14.
+- Its next vertical slice refreshes onto merged I6, then runs a fake-provider HUNT through the
+  production scheduler, controller, worker, evidence pipeline, persistence writer, and fresh report
+  CLI process.
 
 Exact next action:
 
-1. Complete and review I6 reports and repository skill on the merged I5 seam.
-2. Add the final end-to-end fake-provider/report and credential-free smoke coverage.
-3. Run I7 integrated verification and I8 release handoff.
+1. Merge the latest `integration/v0.1` into PR #14 without rebasing its published branch.
+2. Add the production-wired fake-provider/report regression and failure/resume variants.
+3. Complete I7 integrated verification, then run the I8 release audit and handoff.
 
 ## Recovery rules
 
