@@ -128,14 +128,11 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
         assert {
             "ck_pain_signals_severity_range",
             "ck_pain_signals_frequency_range",
+            "ck_mission_opportunity_assessments_competitor_research_status",
             "ck_mission_opportunity_assessments_valid_verdict",
             "ck_agent_calls_output_schema_sha256_length",
             "ck_raw_signal_revisions_duplicate_group_key_format",
         } <= constraints
-        assert any(
-            name.startswith("ck_mission_opportunity_assessments_valid_competitor_res")
-            for name in constraints
-        )
         assert {
             "ix_raw_signals_canonical_url_trgm",
             "ix_raw_signal_revisions_search_document",

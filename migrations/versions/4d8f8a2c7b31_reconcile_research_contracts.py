@@ -218,7 +218,7 @@ def upgrade() -> None:
         postgresql_using="relevance::numeric(6,5)",
     )
     op.create_check_constraint(
-        op.f("ck_mission_opportunity_assessments_valid_competitor_research_status"),
+        op.f("ck_mission_opportunity_assessments_competitor_research_status"),
         "mission_opportunity_assessments",
         "competitor_research_status IN ('COMPLETE', 'INCOMPLETE', 'RESEARCH_UNAVAILABLE')",
     )
@@ -399,7 +399,7 @@ def downgrade() -> None:
         type_="check",
     )
     op.drop_constraint(
-        op.f("ck_mission_opportunity_assessments_valid_competitor_research_status"),
+        op.f("ck_mission_opportunity_assessments_competitor_research_status"),
         "mission_opportunity_assessments",
         type_="check",
     )

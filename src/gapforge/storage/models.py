@@ -565,7 +565,7 @@ class MissionOpportunityAssessment(IdMixin, UpdatedAtMixin, Base):
         ),
         CheckConstraint(
             "competitor_research_status IN ('COMPLETE', 'INCOMPLETE', 'RESEARCH_UNAVAILABLE')",
-            name="valid_competitor_research_status",
+            name="competitor_research_status",
         ),
         Index(
             "ix_assessments_revision_status",
