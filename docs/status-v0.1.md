@@ -15,7 +15,7 @@ This is the first file to read after interruption. It records only reviewed/push
 - [x] `integration/v0.1` baseline created.
 - [x] Lane A developer dispatched.
 - [x] Lane B developer dispatched.
-- [ ] Lane A PR reviewed and merged to integration.
+- [x] Lane A PR reviewed and merged to integration.
 - [x] Lane B PR reviewed and merged to integration.
 - [ ] Cross-lane integration complete.
 - [ ] Full CI and Docker validation complete.
@@ -26,8 +26,8 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `0a21190` |
-| Lane A | `agent/platform-foundation` | #5 | implementing/reviewed through A6 | `ee72e72` |
+| Integration | `integration/v0.1` | #4 | active draft | `14fe4a2` |
+| Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 
 GitHub issues:
@@ -49,17 +49,19 @@ Completed:
 - Reference repository architecture/license review recorded in `docs/reference-review-v0.1.md`.
 - Lane B B1-B9 reviewed with 74 tests, Ruff, format, strict mypy, skill validation,
   diff hygiene, and bytecode hygiene passing; PR #6 squash-merged as `0a21190`.
+- Lane A A1-A8 reviewed with 98 tests, Ruff, format, strict mypy, PostgreSQL, Docker,
+  backup/restore, CI, and independent review passing; PR #5 squash-merged as `14fe4a2`.
 
 In progress:
 
-- Lane A is implementing A7-A8 after reviewed A1-A6 checkpoints and requested fixes.
-- Cross-lane recovery work is now decomposed in `docs/tasks/integration.md`.
+- Cross-lane I1 contract/schema reconciliation and I2 durable runtime assembly are next.
+- Cross-lane recovery work is decomposed in `docs/tasks/integration.md` and issue #7.
 
 Exact next action:
 
-1. Review Lane A A6-A8 and merge PR #5 only after all platform checks pass.
-2. Implement cross-lane adapters and end-to-end orchestration on `integration/v0.1`.
-3. Run bare repo checks, PostgreSQL, Docker/Compose, fake E2E, and live smoke gates.
+1. Implement/review I1 contract and migration reconciliation.
+2. Implement/review I2 run admission, initial task, worker finalization, and status semantics.
+3. Wire I3-I6 pipeline/adapters/reports, then run I7 verification.
 
 ## Recovery rules
 

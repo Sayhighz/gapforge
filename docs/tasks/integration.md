@@ -8,7 +8,7 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane B merged; Lane A is reviewed through A6 and implementing A7-A8.
+Last checkpoint: Lane A and Lane B are reviewed and merged; I1-I2 are next.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -109,4 +109,5 @@ non-public smoke command.
 
 Current state: I1-I8 pending.
 
-Exact next action: merge reviewed Lane A PR #5, then implement I1-I2 before adding pipeline stages.
+Exact next action: implement I1 contract/migration reconciliation and I2 durable runtime assembly
+on separate reviewed branches before adding pipeline stages.
