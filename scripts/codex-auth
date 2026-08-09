@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+# Opens the Codex device-auth flow. Only the dedicated codex_auth volume is mounted;
+# application/source secrets are intentionally absent from this service.
+if command -v docker-compose >/dev/null 2>&1; then
+    exec docker-compose --profile auth run --rm codex-auth "$@"
+fi
+exec docker compose --profile auth run --rm codex-auth "$@"

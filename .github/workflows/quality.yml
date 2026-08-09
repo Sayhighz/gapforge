@@ -1,0 +1,61 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [integration/v0.1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+        env:
+          POSTGRES_DB: gapforge
+          POSTGRES_USER: gapforge
+          POSTGRES_PASSWORD: gapforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gapforge -d gapforge"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://gapforge:gapforge@127.0.0.1:5432/gapforge
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked toolchain
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.11.7
+          uv sync --frozen --extra dev
+      - name: Ruff
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+      - name: Mypy
+        run: uv run --frozen mypy src
+      - name: Pytest
+        run: uv run --frozen pytest -q
+      - name: Whitespace
+        run: git diff --check
+
+  container-backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build, migrate, healthcheck, backup, restore, and corrupt-check
+        run: scripts/ci-backup-roundtrip
