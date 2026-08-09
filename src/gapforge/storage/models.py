@@ -394,6 +394,17 @@ class MergeCandidate(IdMixin, UpdatedAtMixin, Base):
         UniqueConstraint("left_problem_id", "right_problem_id"),
         CheckConstraint("left_problem_id <> right_problem_id", name="different_problems"),
         CheckConstraint("similarity >= 0 AND similarity <= 1", name="similarity_range"),
+        CheckConstraint(
+            "status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'REVERSED')",
+            name="valid_status",
+        ),
+        ForeignKeyConstraint(
+            ["decision_event_id", "id"],
+            ["merge_decision_events.id", "merge_decision_events.candidate_id"],
+            name="fk_merge_candidates_decision_event_same_candidate",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
         Index("ix_merge_candidates_status_created", "status", "created_at"),
     )
 
@@ -407,10 +418,53 @@ class MergeCandidate(IdMixin, UpdatedAtMixin, Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(160))
     decision_reason: Mapped[str | None] = mapped_column(Text)
     lifecycle_event_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("lifecycle_events.id", ondelete="SET NULL")
     )
+    decision_event_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+
+
+class MergeDecisionEvent(IdMixin, CreatedAtMixin, Base):
+    __tablename__ = "merge_decision_events"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "decision_number"),
+        UniqueConstraint("id", "candidate_id"),
+        CheckConstraint("decision_number >= 1", name="positive_decision_number"),
+        CheckConstraint("action IN ('ACCEPT', 'REJECT', 'REVERSE')", name="valid_action"),
+        CheckConstraint(
+            "from_status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'REVERSED')",
+            name="valid_from_status",
+        ),
+        CheckConstraint(
+            "to_status IN ('ACCEPTED', 'REJECTED', 'REVERSED')",
+            name="valid_to_status",
+        ),
+        CheckConstraint(
+            "(action = 'ACCEPT' AND from_status = 'PENDING' AND to_status = 'ACCEPTED') OR "
+            "(action = 'REJECT' AND from_status = 'PENDING' AND to_status = 'REJECTED') OR "
+            "(action = 'REVERSE' AND from_status = 'ACCEPTED' AND to_status = 'REVERSED')",
+            name="valid_transition",
+        ),
+        CheckConstraint("length(btrim(actor)) BETWEEN 1 AND 160", name="bounded_actor"),
+        CheckConstraint("length(btrim(reason)) BETWEEN 1 AND 500", name="bounded_reason"),
+        Index(
+            "ix_merge_decision_events_candidate_version",
+            "candidate_id",
+            "decision_number",
+        ),
+    )
+
+    candidate_id: Mapped[UUID] = mapped_column(
+        ForeignKey("merge_candidates.id", ondelete="RESTRICT"), nullable=False
+    )
+    decision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    from_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    to_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    actor: Mapped[str] = mapped_column(String(160), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class EvidenceCard(IdMixin, CreatedAtMixin, Base):
@@ -786,5 +840,6 @@ APPEND_ONLY_MODELS = (
     CriticResult,
     ProductHypothesis,
     LifecycleEvent,
+    MergeDecisionEvent,
     AgentCall,
 )
