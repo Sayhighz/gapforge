@@ -220,3 +220,21 @@ async def test_worker_lost_lease_does_not_mutate_as_stale_owner(
     finally:
         await _cancel_run(database, run.id)
         await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_continuous_worker_can_idle_until_stopped(migrated_postgres_url: str) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    polls = 0
+
+    def stop() -> bool:
+        nonlocal polls
+        polls += 1
+        return polls > 1
+
+    worker = Worker(database, worker_id="idle-worker", handlers={})
+    try:
+        await worker.run_forever(poll_interval_seconds=0.001, stop=stop)
+        assert polls == 2
+    finally:
+        await database.dispose()

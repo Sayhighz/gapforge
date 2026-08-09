@@ -42,6 +42,7 @@ _SAFE_PARENT_ENV = (
     "SSL_CERT_FILE",
     "TZ",
 )
+_FILE_AUTH_CONFIG = 'cli_auth_credentials_store="file"'
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,8 @@ class CodexCliProvider:
             "-c",
             "mcp_servers={}",
             "-c",
+            _FILE_AUTH_CONFIG,
+            "-c",
             f'model_reasoning_effort="{request.effort.value}"',
         ]
         for feature in _DISABLED_FEATURES:
@@ -141,7 +144,7 @@ class CodexCliProvider:
             if version_result.returncode != 0 or version_result.timed_out:
                 return CodexProbe(True, version, False, "Codex CLI version probe failed")
             auth_result = await self.runner.run(
-                [self.binary, "login", "status"],
+                [self.binary, "-c", _FILE_AUTH_CONFIG, "login", "status"],
                 stdin=b"",
                 env=environment,
                 cwd=cwd,

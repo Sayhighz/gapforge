@@ -507,7 +507,10 @@ def run_show(run_id: str, json_output: JsonOption = False) -> None:
 
 @app.command("worker")
 def worker(
-    once: Annotated[bool, typer.Option("--once")] = True,
+    once: Annotated[
+        bool,
+        typer.Option("--once/--continuous", help="Process once or poll continuously."),
+    ] = True,
     json_output: JsonOption = False,
 ) -> None:
     async def operation() -> dict[str, Any]:
@@ -517,11 +520,8 @@ def worker(
                 database, worker_id=f"{socket.gethostname()}:{os_getpid()}", handlers={}
             )
             if not once:
-                raise CliError(
-                    "INTEGRATION_REQUIRED",
-                    "research task handlers must be registered before continuous worker mode",
-                    exit_code=6,
-                )
+                await runtime.run_forever()
+                return {"processed": False, "registered_task_types": []}
             return {
                 "processed": await runtime.run_once(),
                 "registered_task_types": [],

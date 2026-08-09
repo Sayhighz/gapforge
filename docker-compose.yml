@@ -1,0 +1,117 @@
+name: gapforge
+
+x-gapforge-image: &gapforge-image
+  image: gapforge-worker:0.1.0
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-runtime-environment: &runtime-environment
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://gapforge:gapforge@postgres:5432/gapforge}
+  AGENT_PROVIDER: ${AGENT_PROVIDER:-codex_cli}
+  CODEX_MODEL: ${CODEX_MODEL:-}
+  CODEX_HOME: /var/lib/gapforge/codex
+  REPORTS_DIR: /var/lib/gapforge/reports
+  BACKUPS_DIR: /var/lib/gapforge/backups
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+  RUN_INTERVAL_HOURS: ${RUN_INTERVAL_HOURS:-12}
+  MAX_RESEARCH_ROUNDS: ${MAX_RESEARCH_ROUNDS:-2}
+  MAX_AGENT_CALLS_PER_RUN: ${MAX_AGENT_CALLS_PER_RUN:-6}
+  MAX_PARALLEL_AGENT_CALLS: ${MAX_PARALLEL_AGENT_CALLS:-2}
+  MAX_RUN_DURATION_MINUTES: ${MAX_RUN_DURATION_MINUTES:-30}
+  MAX_COLLECTOR_REQUESTS_PER_RUN: ${MAX_COLLECTOR_REQUESTS_PER_RUN:-60}
+  MAX_SEARCH_CALLS_PER_RUN: ${MAX_SEARCH_CALLS_PER_RUN:-20}
+  MAX_RAW_SIGNALS_PER_RUN: ${MAX_RAW_SIGNALS_PER_RUN:-300}
+  RAW_SIGNAL_RETENTION_DAYS: ${RAW_SIGNAL_RETENTION_DAYS:-0}
+  INITIAL_LOOKBACK_DAYS: ${INITIAL_LOOKBACK_DAYS:-365}
+  MONITOR_OVERLAP_HOURS: ${MONITOR_OVERLAP_HOURS:-24}
+  REJECTED_REOPEN_COOLDOWN_DAYS: ${REJECTED_REOPEN_COOLDOWN_DAYS:-30}
+  AUTHOR_HMAC_KEY: ${AUTHOR_HMAC_KEY:-}
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+  REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+  BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+
+x-runtime-security: &runtime-security
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+
+services:
+  postgres:
+    image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gapforge}
+      POSTGRES_USER: ${POSTGRES_USER:-gapforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gapforge}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    security_opt: [no-new-privileges:true]
+
+  migrate:
+    <<: [*gapforge-image, *runtime-security]
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://gapforge:gapforge@postgres:5432/gapforge}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  worker:
+    <<: [*gapforge-image, *runtime-security]
+    command: ["gap", "worker", "--continuous"]
+    restart: unless-stopped
+    environment: *runtime-environment
+    volumes:
+      - codex_auth:/var/lib/gapforge/codex
+      - reports_data:/var/lib/gapforge/reports
+      - backups_data:/var/lib/gapforge/backups
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, "python", "/app/scripts/container-healthcheck.py"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 15s
+
+  codex-auth:
+    <<: [*gapforge-image, *runtime-security]
+    profiles: [auth]
+    entrypoint: ["codex"]
+    command: ["-c", "cli_auth_credentials_store=\"file\"", "login", "--device-auth"]
+    environment:
+      CODEX_HOME: /var/lib/gapforge/codex
+    volumes:
+      - codex_auth:/var/lib/gapforge/codex
+    stdin_open: true
+    tty: true
+
+  codex-status:
+    <<: [*gapforge-image, *runtime-security]
+    profiles: [auth]
+    entrypoint: ["codex"]
+    command: ["-c", "cli_auth_credentials_store=\"file\"", "login", "status"]
+    environment:
+      CODEX_HOME: /var/lib/gapforge/codex
+    volumes:
+      - codex_auth:/var/lib/gapforge/codex:ro
+
+volumes:
+  postgres_data:
+  codex_auth:
+  reports_data:
+  backups_data:

@@ -122,7 +122,12 @@ class StubRunner(AsyncProcessRunner):
         self.calls.append((list(command), stdin, dict(env), cwd))
         if command[-1] == "--version":
             return ProcessResult(0, b"codex-cli 0.test\n", b"", False, False, False)
-        if command[1:] == ["login", "status"]:
+        if command[1:] == [
+            "-c",
+            'cli_auth_credentials_store="file"',
+            "login",
+            "status",
+        ]:
             if self.authenticated:
                 return ProcessResult(0, b"Logged in using ChatGPT\n", b"", False, False, False)
             return ProcessResult(1, b"", b"Not logged in\n", False, False, False)
@@ -162,6 +167,7 @@ def test_codex_command_is_argument_safe_and_disables_capabilities(tmp_path: Path
     assert "--ignore-rules" in command
     assert 'shell_environment_policy.inherit="none"' in command
     assert "mcp_servers={}" in command
+    assert 'cli_auth_credentials_store="file"' in command
     disabled = {command[index + 1] for index, item in enumerate(command) if item == "--disable"}
     assert {"shell_tool", "unified_exec", "multi_agent", "apps", "plugins"} <= disabled
 
@@ -190,6 +196,27 @@ def test_environment_allowlist_excludes_application_and_source_secrets(tmp_path:
         "HOME": str(tmp_path / "home"),
         "CODEX_HOME": str(tmp_path / "codex"),
     }
+
+
+@pytest.mark.asyncio
+async def test_codex_probe_forces_file_credential_store(tmp_path: Path) -> None:
+    runner = StubRunner()
+    provider = CodexCliProvider(
+        binary=sys.executable,
+        codex_home=tmp_path / "codex",
+        runner=runner,
+    )
+
+    probe = await provider.probe()
+
+    assert probe.authenticated is True
+    assert runner.calls[1][0] == [
+        sys.executable,
+        "-c",
+        'cli_auth_credentials_store="file"',
+        "login",
+        "status",
+    ]
 
 
 @pytest.mark.asyncio
