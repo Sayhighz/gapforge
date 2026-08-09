@@ -111,6 +111,15 @@ without direct SQL, and every supported claim resolves to stored evidence.
 - [ ] Verify the canonical repository skill invokes only implemented CLI surfaces and follows up using persisted IDs/history.
 - [ ] Keep Product Hypothesis creation explicit and available only after `VALIDATE`.
 
+Progress: draft PR #13 checkpoint `2d374be` persists deterministic terminal Thai/English run
+reports to immutable dated paths and a chronology-safe `latest.md` using bounded, same-directory
+fsync/replace writes. Identical restarts are idempotent; changed content, traversal, symlinks,
+nonterminal runs, and unsafe Product Hypothesis command invention fail closed. Repository-skill
+examples are parser-validated against the current CLI, including required options. Whole-repository
+Ruff/format, strict mypy, and 247 credential-free non-PostgreSQL tests pass. Next: after I5 merges,
+merge the latest integration head without rebasing, wire `gap report run|opportunity` to persisted
+query projections, and prove fresh-process fake-provider report generation before checking I6 items.
+
 Acceptance: the fake-provider HUNT reaches a deterministic persisted report and the repository skill
 can inspect it after a fresh process starts.
 
