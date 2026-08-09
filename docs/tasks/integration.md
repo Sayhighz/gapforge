@@ -90,6 +90,11 @@ or provider audit history.
 - [ ] Keep global evidence identity separate from mission-revision relevance, score, and verdict.
 - [ ] Complete opportunity, evidence, changes, rejections, merge, and report CLI commands over persisted data.
 - [ ] Record reversible manual merge decisions with actor, reason, and lifecycle/event history.
+  Progress: checkpoint `b64a7d4` adds an append-only, candidate-versioned PostgreSQL decision
+  journal plus an atomically maintained ACCEPTED-equivalence projection. Exact state transitions,
+  concurrent decisions, direct-SQL tampering, same-candidate lineage, and populated legacy-link
+  migration round trips pass in 5 PostgreSQL tests. Exact next action: expose the journal through
+  query/CLI surfaces and prove only ACCEPTED candidates affect equivalence reads.
 - [ ] Make report identity, claims, scores, verdicts, citations, and locale derive from the same persisted snapshot.
 
 Acceptance: evidence, scores, verdicts, rejections, changes, merges, and reopen events are queryable
