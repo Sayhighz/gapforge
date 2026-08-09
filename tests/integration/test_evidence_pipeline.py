@@ -464,6 +464,37 @@ class FullReasoner:
         )
 
 
+class InvalidClusterReasoner(FullReasoner):
+    async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
+        result = await super().run(context, call)
+        if call.request.task is not SemanticOperation.CLUSTER:
+            return result
+        assert result.output_json is not None
+        output = dict(result.output_json)
+        memberships = [dict(item) for item in output["memberships"]]
+        memberships[0]["cluster_id"] = "invented-cluster"
+        return result.model_copy(update={"output_json": {**output, "memberships": memberships}})
+
+
+class OverBudgetSearch(FullSearch):
+    async def search(self, query: str, *, max_results: int, max_requests: int) -> SearchResponse:
+        result = await super().search(
+            query,
+            max_results=max_results,
+            max_requests=max_requests,
+        )
+        return result.model_copy(update={"request_count": max_requests + 1})
+
+
+class MismatchedFetcher(FullFetcher):
+    async def fetch(self, url: str, *, approved_urls: tuple[str, ...]) -> FetchResult:
+        result = await super().fetch(url, approved_urls=approved_urls)
+        assert result.snapshot is not None
+        return result.model_copy(
+            update={"snapshot": result.snapshot.model_copy(update={"sha256": "d" * 64})}
+        )
+
+
 class BudgetStore(RecordingStore):
     async def commit_stage(self, context: PipelineContext, commit: PipelineStageCommit) -> None:
         if commit.stage == "COLLECT":
@@ -498,6 +529,24 @@ def context(run_id: UUID, task_id: UUID) -> PipelineContext:
             "initial_lookback_days": 365,
         },
         collection_until=NOW,
+    )
+
+
+def research_task(run_id: UUID, task_id: UUID) -> ResearchTask:
+    return ResearchTask(
+        id=task_id,
+        run_id=run_id,
+        task_type="research.run",
+        status="LEASED",
+        priority=1,
+        idempotency_key="run-root:v1",
+        payload={"run_id": str(run_id)},
+        checkpoint={},
+        attempt_count=1,
+        max_attempts=3,
+        available_at=NOW,
+        lease_owner="test-worker",
+        lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
     )
 
 
@@ -843,6 +892,64 @@ def test_large_evidence_batch_is_deterministically_bounded_with_omission_count()
         len(evidence) - len(payload["evidence"])
     )
     assert len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()) < 20_000
+
+
+@pytest.mark.asyncio
+async def test_unknown_cluster_membership_is_rejected_instead_of_dropped() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline = EvidencePipeline(
+        store=FullStore(context(run_id, task_id), []),
+        reasoner=InvalidClusterReasoner(),
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ValueError, match="unknown cluster"):
+        await pipeline(research_task(run_id, task_id))
+
+
+@pytest.mark.asyncio
+async def test_search_cannot_report_more_requests_than_admitted() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    search = OverBudgetSearch()
+    fetcher = FullFetcher()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=FullReasoner(),
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=search,
+        safe_fetch=fetcher,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ValueError, match="exceeded its admitted request budget"):
+        await pipeline(research_task(run_id, task_id))
+
+    assert len(search.calls) == 1
+    assert fetcher.calls == []
+    assert "COMPETITOR_RESEARCH" not in store.completed
+
+
+@pytest.mark.asyncio
+async def test_competitor_evidence_must_match_the_captured_fetch() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline = EvidencePipeline(
+        store=FullStore(context(run_id, task_id), []),
+        reasoner=FullReasoner(),
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=MismatchedFetcher(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ValueError, match="does not match captured fetch"):
+        await pipeline(research_task(run_id, task_id))
 
 
 @pytest.mark.postgres
