@@ -8,9 +8,8 @@ Owner: integration lead
 
 GitHub issue: #7
 
-Last checkpoint: Lane A, Lane B, I1 contract/schema reconciliation, I2 runtime admission,
-I3 evidence orchestration, and I4 provider admission/audit are reviewed and merged. I5 is
-refreshing its persistence/query work onto the reviewed I3 seam.
+Last checkpoint: Lane A, Lane B, and I1-I5 integration are reviewed and merged. I6 reports and
+repository skill are active in draft PR #13.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work,
 leave `[ ]` and add a `Progress:` note with the commit and exact next action.
@@ -145,9 +144,9 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1-I4 are reviewed and merged. I3 closed the I2 real-handler item. I5 is active;
-I6-I8 remain pending.
+Current state: I1-I5 are reviewed and merged. I3 closed the I2 real-handler item. I6 is active;
+I7-I8 remain pending.
 
-Exact next action: merge integration checkpoint `a491d40` into the I5 branch, wire the artifact
-writer into the reviewed atomic stage seam, and verify immutable per-run final snapshots,
-query/report lineage, merge history, migrations, and the full PostgreSQL/container suite.
+Exact next action: refresh I6 draft PR #13 onto integration checkpoint `02f7d10`, wire the
+reviewed query snapshots into atomic report persistence and CLI commands, then verify the
+canonical repository skill and Product Hypothesis gate without inventing unsupported surfaces.
