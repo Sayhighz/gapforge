@@ -186,9 +186,12 @@ class RunController:
             run.warnings = [
                 *run.warnings,
                 {
-                    "failed_tasks": failed,
-                    "failure_classes": failure_classes,
-                    "useful_successes": useful_successes,
+                    "code": "PARTIAL_TASK_FAILURE",
+                    "details": {
+                        "failed_tasks": failed,
+                        "failure_classes": failure_classes,
+                        "useful_successes": useful_successes,
+                    },
                 },
             ]
         elif failed or not succeeded:

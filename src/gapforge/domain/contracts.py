@@ -59,6 +59,7 @@ class TaskStatus(StrEnum):
     LEASED = "LEASED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class EpistemicStatus(StrEnum):
@@ -163,6 +164,18 @@ class ResearchMission(Contract):
     created_at: datetime
 
 
+class RunWarning(Contract):
+    """Stable, lossless warning emitted while a run still produces useful evidence."""
+
+    code: Identifier
+    details: dict[str, Any] = Field(default_factory=dict, max_length=50)
+
+    @field_validator("details")
+    @classmethod
+    def details_are_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
+
+
 class ResearchRun(Contract):
     id: UUID
     mission_revision_id: UUID
@@ -171,7 +184,7 @@ class ResearchRun(Contract):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    warning_codes: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
+    warnings: tuple[RunWarning, ...] = Field(default_factory=tuple, max_length=50)
 
     @model_validator(mode="after")
     def timestamps_match_status(self) -> ResearchRun:
@@ -450,8 +463,22 @@ class Competitor(Contract):
 
 
 class CompetitorEvidence(Contract):
+    id: Identifier
     competitor_id: Identifier
+    source_url: HttpUrl
+    captured_excerpt: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000)
+    ]
+    observed_at: datetime
+    content_hash: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
+    evidence_kind: Identifier
+    metadata: dict[str, Any] = Field(default_factory=dict)
     claim_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=50)
+
+    @field_validator("metadata")
+    @classmethod
+    def bound_competitor_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
 
 
 class GapHypothesis(Contract):
@@ -474,9 +501,12 @@ class MissionOpportunityAssessment(Contract):
     mission_revision_id: UUID
     opportunity_id: Identifier
     lifecycle_state: LifecycleState
-    verdict: Verdict
+    relevance: float = Field(ge=0, le=1)
+    verdict: Verdict | None = None
+    competitor_research_status: CompetitorResearchStatus = CompetitorResearchStatus.INCOMPLETE
     score_snapshot_id: Identifier | None = None
     evidence_card_id: Identifier | None = None
+    rejected_at: datetime | None = None
     assessed_at: datetime
 
     @model_validator(mode="after")
@@ -688,6 +718,17 @@ class AgentEffort(StrEnum):
     HIGH = "high"
 
 
+class SemanticOperation(StrEnum):
+    QUERY_PLAN = "QUERY_PLAN"
+    EXTRACT = "EXTRACT"
+    RELEVANCE = "RELEVANCE"
+    CLUSTER = "CLUSTER"
+    HYPOTHESIS = "HYPOTHESIS"
+    GAP = "GAP"
+    CRITIC = "CRITIC"
+    DEEP_RESEARCH = "DEEP_RESEARCH"
+
+
 class AgentStatus(StrEnum):
     COMPLETED = "COMPLETED"
     INVALID_OUTPUT = "INVALID_OUTPUT"
@@ -698,15 +739,7 @@ class AgentStatus(StrEnum):
 
 class AgentRequest(Contract):
     call_id: Identifier
-    task: Literal[
-        "EXTRACT",
-        "RELEVANCE",
-        "CLUSTER",
-        "HYPOTHESIS",
-        "GAP",
-        "CRITIC",
-        "DEEP_RESEARCH",
-    ]
+    task: SemanticOperation
     effort: AgentEffort
     input_json: dict[str, Any] = Field(max_length=100)
     permitted_evidence_ids: tuple[Identifier, ...] = Field(max_length=500)
@@ -722,13 +755,14 @@ class AgentRequest(Contract):
     @model_validator(mode="after")
     def effort_matches_task(self) -> AgentRequest:
         expected = {
-            "EXTRACT": AgentEffort.LOW,
-            "RELEVANCE": AgentEffort.LOW,
-            "CLUSTER": AgentEffort.MEDIUM,
-            "HYPOTHESIS": AgentEffort.MEDIUM,
-            "GAP": AgentEffort.MEDIUM,
-            "CRITIC": AgentEffort.MEDIUM,
-            "DEEP_RESEARCH": AgentEffort.HIGH,
+            SemanticOperation.QUERY_PLAN: AgentEffort.MEDIUM,
+            SemanticOperation.EXTRACT: AgentEffort.LOW,
+            SemanticOperation.RELEVANCE: AgentEffort.LOW,
+            SemanticOperation.CLUSTER: AgentEffort.MEDIUM,
+            SemanticOperation.HYPOTHESIS: AgentEffort.MEDIUM,
+            SemanticOperation.GAP: AgentEffort.MEDIUM,
+            SemanticOperation.CRITIC: AgentEffort.MEDIUM,
+            SemanticOperation.DEEP_RESEARCH: AgentEffort.HIGH,
         }
         if self.effort is not expected[self.task]:
             raise ValueError("agent effort does not match the bounded task policy")
@@ -778,7 +812,13 @@ def _bounded_metadata(value: dict[str, Any]) -> dict[str, Any]:
     if len(value) > 50:
         raise ValueError("metadata may contain at most 50 keys")
     try:
-        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("metadata must be JSON serializable") from exc
     if len(encoded.encode("utf-8")) > 20_000:

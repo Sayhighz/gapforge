@@ -307,6 +307,7 @@ def test_product_hypothesis_requires_explicit_request_after_validate() -> None:
         mission_revision_id=uuid4(),
         opportunity_id="o-1",
         lifecycle_state=LifecycleState.RESEARCH_MORE,
+        relevance=0.8,
         verdict=Verdict.RESEARCH_MORE,
         assessed_at=NOW,
     )

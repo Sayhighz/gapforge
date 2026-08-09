@@ -143,6 +143,7 @@ def test_validate_assessment_requires_evidence_card_and_score() -> None:
             mission_revision_id=uuid4(),
             opportunity_id="o-1",
             lifecycle_state="VALIDATE",
+            relevance=0.8,
             verdict=Verdict.VALIDATE,
             assessed_at=NOW,
         )

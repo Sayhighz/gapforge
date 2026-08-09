@@ -146,15 +146,9 @@ def validated_claim_view(
     if original_quote:
         if not original_language:
             raise ValueError("original quote requires an original language")
-        permitted = (
-            record.text for key, record in evidence.items() if key in claim.evidence_ids
-        )
-        if not any(
-            normalize_text(original_quote) in normalize_text(text) for text in permitted
-        ):
-            raise ValueError(
-                "original quote is not present in permitted captured evidence"
-            )
+        permitted = (record.text for key, record in evidence.items() if key in claim.evidence_ids)
+        if not any(normalize_text(original_quote) in normalize_text(text) for text in permitted):
+            raise ValueError("original quote is not present in permitted captured evidence")
     return ValidatedClaimView(
         claim,
         original_quote,
@@ -203,9 +197,7 @@ class OpportunityReportData:
     output_locale: str
 
 
-def _render_claim(
-    view: ValidatedClaimView, labels: dict[str, str], locale: str
-) -> list[str]:
+def _render_claim(view: ValidatedClaimView, labels: dict[str, str], locale: str) -> list[str]:
     requested = locale.casefold().split("-", 1)[0]
     translated = (
         view.translation
@@ -213,28 +205,24 @@ def _render_claim(
         and view.translation_locale.casefold().split("-", 1)[0] == requested
     )
     presentation = view.translation if translated else view.claim.text
-    lines = [
-        f"- **{view.claim.status.value}** — {_md(presentation or view.claim.text)}"
-    ]
+    lines = [f"- **{view.claim.status.value}** — {_md(presentation or view.claim.text)}"]
     if view.original_quote:
         language = _md(view.original_language or "und")
-        lines.append(
-            f"  - {labels['original_quote']} ({language}): “{_md(view.original_quote)}”"
-        )
+        lines.append(f"  - {labels['original_quote']} ({language}): “{_md(view.original_quote)}”")
     if view.translation:
+        translation_locale = _md(view.translation_locale or "")
         lines.append(
-            f"  - {labels['translation']} ({_md(view.translation_locale or '')}): “{_md(view.translation)}”"
+            f"  - {labels['translation']} ({translation_locale}): “{_md(view.translation)}”"
         )
     if view.claim.evidence_ids:
-        evidence = ", ".join(
-            f"`{_md(item)}`" for item in sorted(view.claim.evidence_ids)
-        )
+        evidence = ", ".join(f"`{_md(item)}`" for item in sorted(view.claim.evidence_ids))
         lines.append(f"  - {labels['evidence']}: {evidence}")
     return lines
 
 
 def render_run_report(data: RunReportData) -> str:
     labels, display_locale = _catalog(data.output_locale)
+    finished = data.finished_at.isoformat() if data.finished_at else labels["incomplete"]
     lines = [
         f"# {labels['run_report']}",
         "",
@@ -242,7 +230,7 @@ def render_run_report(data: RunReportData) -> str:
         f"- {labels['mission_revision']}: `{_md(data.mission_revision_id)}`",
         f"- {labels['status']}: `{data.status.value}`",
         f"- {labels['started']}: `{data.started_at.isoformat()}`",
-        f"- {labels['finished']}: `{data.finished_at.isoformat() if data.finished_at else labels['incomplete']}`",
+        f"- {labels['finished']}: `{finished}`",
         f"- {labels['presentation_locale']}: `{_md(display_locale)}`",
         "",
         f"## {labels['warnings']}",
@@ -253,6 +241,12 @@ def render_run_report(data: RunReportData) -> str:
         lines.append(f"- {labels['none']}")
     lines.extend(("", f"## {labels['opportunities']}", ""))
     for opportunity in sorted(data.opportunities, key=lambda item: item.opportunity_id):
+        evidence_card = opportunity.evidence_card
+        counts = (
+            len(evidence_card.known_author_ids),
+            len(evidence_card.thread_ids),
+            len(evidence_card.user_sources),
+        )
         lines.extend(
             (
                 f"### {_md(opportunity.title)}",
@@ -260,8 +254,8 @@ def render_run_report(data: RunReportData) -> str:
                 f"- {labels['id']}: `{_md(opportunity.opportunity_id)}`",
                 f"- {labels['verdict']}: `{opportunity.verdict.value}`",
                 f"- {labels['score']}: `{opportunity.score.final_score:.2f}`",
-                f"- {labels['evidence_confidence']}: `{opportunity.evidence_card.confidence:.2f}`",
-                f"- {labels['counts']}: `{len(opportunity.evidence_card.known_author_ids)}` / `{len(opportunity.evidence_card.thread_ids)}` / `{len(opportunity.evidence_card.user_sources)}`",
+                f"- {labels['evidence_confidence']}: `{evidence_card.confidence:.2f}`",
+                f"- {labels['counts']}: `{counts[0]}` / `{counts[1]}` / `{counts[2]}`",
                 "",
                 f"{labels['claims']}:",
                 "",
@@ -296,16 +290,13 @@ def render_opportunity_report(data: OpportunityReportData) -> str:
     ]
     for gate in item.validation.gates:
         passed = labels["yes"] if gate.passed else labels["no"]
-        lines.append(
-            f"| {_md(gate.name)} | {passed} | {_md(gate.actual)} | {_md(gate.required)} |"
-        )
+        lines.append(f"| {_md(gate.name)} | {passed} | {_md(gate.actual)} | {_md(gate.required)} |")
     lines.extend(("", f"## {labels['score_explanation']}", ""))
     lines.extend(f"- {_md(value)}" for value in item.score.explanation)
     if item.score.penalties:
         lines.extend(("", f"{labels['penalties']}:", ""))
         lines.extend(
-            f"- {_md(name)}: `{value:.2f}`"
-            for name, value in sorted(item.score.penalties.items())
+            f"- {_md(name)}: `{value:.2f}`" for name, value in sorted(item.score.penalties.items())
         )
     lines.extend(("", f"## {labels['evidence']}", ""))
     lines.extend(
@@ -342,9 +333,7 @@ def write_report_atomic(path: Path, content: str) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def run_report_paths(
-    base: Path, run_id: str, started_at: datetime
-) -> tuple[Path, Path]:
+def run_report_paths(base: Path, run_id: str, started_at: datetime) -> tuple[Path, Path]:
     safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
     if not run_id or any(character not in safe for character in run_id):
         raise ValueError("run ID is unsafe for a report filename")
