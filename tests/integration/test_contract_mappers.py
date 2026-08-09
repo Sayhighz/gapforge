@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from gapforge.domain.contracts import (
     AgentEffort,
     AgentRequest,
+    SemanticOperation,
     Source,
     SourceCheckpoint,
     TaskStatus,
@@ -105,12 +106,12 @@ def test_string_identifiers_map_to_stable_uuid_without_losing_original() -> None
 
 def test_agent_schema_identity_is_canonical_and_operation_scoped() -> None:
     first = agent_schema_identity(
-        operation="query_plan",
+        operation=SemanticOperation.QUERY_PLAN,
         schema_name="query-plan-v1",
         output_schema={"required": ["intents"], "type": "object"},
     )
     reordered = agent_schema_identity(
-        operation="query_plan",
+        operation=SemanticOperation.QUERY_PLAN,
         schema_name="query-plan-v1",
         output_schema={"type": "object", "required": ["intents"]},
     )
@@ -118,7 +119,17 @@ def test_agent_schema_identity_is_canonical_and_operation_scoped() -> None:
     assert first == reordered
     assert len(first) == 32
     assert first != agent_schema_identity(
-        operation="critic",
+        operation=SemanticOperation.CRITIC,
         schema_name="query-plan-v1",
         output_schema={"type": "object", "required": ["intents"]},
     )
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_agent_schema_identity_rejects_noncanonical_numbers(invalid: float) -> None:
+    with pytest.raises(MappingError, match="finite JSON"):
+        agent_schema_identity(
+            operation=SemanticOperation.QUERY_PLAN,
+            schema_name="query-plan-v1",
+            output_schema={"const": invalid},
+        )

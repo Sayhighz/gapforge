@@ -12,6 +12,7 @@ from uuid import UUID, uuid5
 
 from gapforge.domain.contracts import (
     AgentRequest,
+    SemanticOperation,
     Source,
     SourceCheckpoint,
     TaskStatus,
@@ -119,20 +120,24 @@ def domain_identifier_from_storage(kind: str, storage_id: UUID, identifier: str)
 
 
 def agent_schema_identity(
-    *, operation: str, schema_name: str, output_schema: dict[str, Any]
+    *, operation: SemanticOperation, schema_name: str, output_schema: dict[str, Any]
 ) -> bytes:
     """Hash operation, versioned schema name, and canonical JSON into one audit identity."""
 
-    if not operation or not schema_name:
-        raise MappingError("agent operation and schema name must be non-empty")
-    payload = json.dumps(
-        {
-            "operation": operation,
-            "output_schema": output_schema,
-            "schema_name": schema_name,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    if not schema_name:
+        raise MappingError("agent schema name must be non-empty")
+    try:
+        payload = json.dumps(
+            {
+                "operation": operation.value,
+                "output_schema": output_schema,
+                "schema_name": schema_name,
+            },
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    except (TypeError, ValueError) as exc:
+        raise MappingError("output schema must contain finite JSON values") from exc
     return hashlib.sha256(payload).digest()
