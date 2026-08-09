@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -18,7 +19,11 @@ from gapforge.domain.contracts import (
     SemanticOperation,
     Source,
 )
-from gapforge.integration.evidence_store import SqlAlchemyEvidencePipelineStore
+from gapforge.integration.evidence_store import (
+    CollectionBudgetExhausted,
+    SqlAlchemyEvidencePipelineStore,
+    StageConflictError,
+)
 from gapforge.integration.semantic import SemanticCall, SemanticContext
 from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.runtime.evidence_pipeline import (
@@ -48,7 +53,7 @@ class RecordingStore:
 
     async def query_existing(self, context: PipelineContext) -> ExistingIntelligence:
         self.events.append("existing")
-        return ExistingIntelligence(opportunity_count=0, evidence_count=0)
+        return ExistingIntelligence()
 
     async def load_stage(self, context: PipelineContext, stage: str) -> dict[str, object] | None:
         return self.completed.get(stage)
@@ -246,7 +251,7 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
         async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
             _, revision = await uow.missions.create_with_revision(
                 title="Pipeline persistence",
-                mission_text="Find recurring accounting workflow pain",
+                mission_text="Invoice reconciliation takes hours spreadsheet",
                 original_language="en",
                 output_locale="en",
             )
@@ -302,27 +307,212 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
             "item_count": 1,
         }
 
+        commit = PipelineStageCommit(
+            stage="COLLECT",
+            idempotency_key=str(uuid5(scheduled.run.id, "pipeline:COLLECT:v1")),
+            payload=payload,
+        )
+        await asyncio.gather(
+            store.commit_stage(pipeline_context, commit),
+            store.commit_stage(pipeline_context, commit),
+        )
+        with pytest.raises(StageConflictError, match="input changed"):
+            await store.commit_stage(
+                pipeline_context,
+                PipelineStageCommit(
+                    stage="COLLECT",
+                    idempotency_key=commit.idempotency_key,
+                    payload={**payload, "item_count": 2},
+                ),
+            )
+
+        existing = await store.query_existing(pipeline_context)
+        assert any(
+            candidate.identifier == "HACKER_NEWS:hn-42:r1" for candidate in existing.candidates
+        )
+
+        async with database.session() as session:
+            first_run = await session.get(ResearchRun, scheduled.run.id)
+            first_task = await session.get(ResearchTask, scheduled.task.id)
+            assert first_run is not None
+            assert first_task is not None
+            first_run.status = "COMPLETED"
+            first_run.completed_at = NOW
+            first_task.status = "SUCCEEDED"
+            first_task.completed_at = NOW
+            first_task.lease_owner = None
+            first_task.lease_expires_at = None
+            await session.commit()
+
+        async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+            _, second_revision = await uow.missions.create_with_revision(
+                title="Cross-run deduplication",
+                mission_text="Find recurring accounting workflow pain",
+                original_language="en",
+                output_locale="en",
+            )
+            assert uow.session is not None
+            second = await RunScheduler(uow.session).schedule(
+                request=RunScheduleRequest(
+                    mission_revision_id=second_revision.id,
+                    mode="HUNT",
+                    priority=0,
+                    budget_limits={"max_run_duration_minutes": 30},
+                ),
+                now=started_at,
+            )
+            second.run.status = "RUNNING"
+            second.run.started_at = started_at
+            second.run.deadline_at = datetime(2026, 8, 9, 12, 30, tzinfo=UTC)
+            second.task.status = "LEASED"
+            second.task.attempt_count = 1
+            second.task.lease_owner = "test-worker"
+            second.task.lease_expires_at = datetime(2026, 8, 9, 12, 5, tzinfo=UTC)
+            await uow.commit()
+        second_context = await store.load_context(second.task)
         await store.commit_stage(
-            pipeline_context,
+            second_context,
             PipelineStageCommit(
                 stage="COLLECT",
-                idempotency_key=str(uuid5(scheduled.run.id, "pipeline:COLLECT:v1")),
-                payload=payload,
+                idempotency_key=str(uuid5(second.run.id, "pipeline:COLLECT:v1")),
+                payload={
+                    "results": [
+                        {
+                            "source": "GITHUB",
+                            "availability": "AVAILABLE",
+                            "items": [
+                                {
+                                    **item,
+                                    "source": "GITHUB",
+                                    "external_id": "gh-99",
+                                    "canonical_url": "https://different.example.test/issues/99",
+                                }
+                            ],
+                            "request_count": 1,
+                        }
+                    ],
+                    "item_count": 1,
+                },
             ),
         )
 
         async with database.session() as session:
+            second_run = await session.get(ResearchRun, second.run.id)
+            second_task = await session.get(ResearchTask, second.task.id)
+            assert second_run is not None
+            assert second_task is not None
+            second_run.status = "COMPLETED"
+            second_run.completed_at = NOW
+            second_task.status = "SUCCEEDED"
+            second_task.completed_at = NOW
+            second_task.lease_owner = None
+            second_task.lease_expires_at = None
+            await session.commit()
+
+        async with database.session() as session:
             persisted_run = await session.get(ResearchRun, scheduled.run.id)
             persisted_task = await session.get(ResearchTask, scheduled.task.id)
-            revisions = (await session.scalars(select(RawSignalRevision))).all()
+            revisions = (
+                await session.scalars(
+                    select(RawSignalRevision).where(
+                        RawSignalRevision.domain_revision_id.in_(
+                            ("HACKER_NEWS:hn-42:r1", "GITHUB:gh-99:r1")
+                        )
+                    )
+                )
+            ).all()
         assert persisted_run is not None
         assert persisted_task is not None
         assert persisted_run.budget_used == {"collector_requests": 2, "raw_signals": 1}
-        assert persisted_task.checkpoint["pipeline"]["stages"]["COLLECT"]["idempotency_key"] == str(
-            uuid5(scheduled.run.id, "pipeline:COLLECT:v1")
+        checkpoint = persisted_task.checkpoint["pipeline"]["stages"]["COLLECT"]
+        assert checkpoint["idempotency_key"] == str(uuid5(scheduled.run.id, "pipeline:COLLECT:v1"))
+        assert len(checkpoint["input_sha256"]) == 64
+        assert {row.domain_revision_id for row in revisions} == {
+            "HACKER_NEWS:hn-42:r1",
+            "GITHUB:gh-99:r1",
+        }
+        assert len({row.duplicate_group_key for row in revisions}) == 1
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_collection_budget_refusal_is_atomic_and_terminal(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    try:
+        async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+            _, revision = await uow.missions.create_with_revision(
+                title="Atomic collection budget",
+                mission_text="Bound collection",
+                original_language="en",
+                output_locale="en",
+            )
+            assert uow.session is not None
+            scheduled = await RunScheduler(uow.session).schedule(
+                request=RunScheduleRequest(
+                    mission_revision_id=revision.id,
+                    mode="HUNT",
+                    priority=0,
+                    budget_limits={
+                        "max_run_duration_minutes": 30,
+                        "max_raw_signals_per_run": 1,
+                    },
+                ),
+                now=NOW,
+            )
+            scheduled.run.status = "RUNNING"
+            scheduled.run.started_at = NOW
+            scheduled.run.deadline_at = datetime(2026, 8, 9, 12, 30, tzinfo=UTC)
+            scheduled.task.status = "LEASED"
+            scheduled.task.attempt_count = 1
+            scheduled.task.lease_owner = "test-worker"
+            scheduled.task.lease_expires_at = datetime(2026, 8, 9, 12, 5, tzinfo=UTC)
+            await uow.commit()
+        store = SqlAlchemyEvidencePipelineStore(
+            database.session_factory,
+            author_hmac_secret=None,
+            clock=lambda: NOW,
         )
-        assert len(revisions) == 1
-        assert revisions[0].domain_revision_id == "HACKER_NEWS:hn-42:r1"
-        assert len(revisions[0].duplicate_group_key) == 64
+        pipeline_context = await store.load_context(scheduled.task)
+        items = [
+            {
+                "source": "HACKER_NEWS",
+                "external_id": f"budget-{index}",
+                "canonical_url": f"https://example.test/budget/{index}",
+                "title": f"Pain {index}",
+                "source_created_at": NOW.isoformat(),
+            }
+            for index in range(2)
+        ]
+        with pytest.raises(CollectionBudgetExhausted):
+            await store.commit_stage(
+                pipeline_context,
+                PipelineStageCommit(
+                    stage="COLLECT",
+                    idempotency_key=str(uuid5(scheduled.run.id, "pipeline:COLLECT:v1")),
+                    payload={
+                        "results": [
+                            {
+                                "source": "HACKER_NEWS",
+                                "availability": "AVAILABLE",
+                                "items": items,
+                                "request_count": 1,
+                            }
+                        ],
+                        "item_count": 2,
+                    },
+                ),
+            )
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+        assert run is not None
+        assert task is not None
+        assert run.status == "BUDGET_EXHAUSTED"
+        assert run.budget_used == {}
+        assert run.last_checkpoint["reason"] == "budget"
+        assert "COLLECT" not in task.checkpoint.get("pipeline", {}).get("stages", {})
     finally:
         await database.dispose()

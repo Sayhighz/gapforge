@@ -35,9 +35,23 @@ from gapforge.worker import TaskHandlerResult
 
 
 @dataclass(frozen=True, slots=True)
+class ExistingCandidate:
+    kind: str
+    identifier: str
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExistingIntelligence:
-    opportunity_count: int
-    evidence_count: int
+    candidates: tuple[ExistingCandidate, ...] = ()
+
+    @property
+    def opportunity_count(self) -> int:
+        return sum(candidate.kind == "OPPORTUNITY" for candidate in self.candidates)
+
+    @property
+    def evidence_count(self) -> int:
+        return sum(candidate.kind == "EVIDENCE" for candidate in self.candidates)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,13 +113,29 @@ class EvidencePipeline:
         if existing_payload is None:
             existing = await self.store.query_existing(context)
             existing_payload = {
-                "opportunity_count": existing.opportunity_count,
-                "evidence_count": existing.evidence_count,
+                "candidates": [
+                    {
+                        "kind": candidate.kind,
+                        "identifier": candidate.identifier,
+                        "summary": candidate.summary,
+                    }
+                    for candidate in existing.candidates
+                ],
             }
             await self._commit(context, "EXISTING", existing_payload)
+        candidate_values = existing_payload.get("candidates")
+        if not isinstance(candidate_values, list):
+            raise ValueError("EXISTING checkpoint candidates must be a list")
         existing = ExistingIntelligence(
-            opportunity_count=_integer_field(existing_payload, "opportunity_count"),
-            evidence_count=_integer_field(existing_payload, "evidence_count"),
+            tuple(
+                ExistingCandidate(
+                    kind=_string_field(value, "kind"),
+                    identifier=_string_field(value, "identifier"),
+                    summary=_string_field(value, "summary"),
+                )
+                for value in candidate_values
+                if isinstance(value, dict)
+            )
         )
 
         plan_payload = await self.store.load_stage(context, "QUERY_PLAN")
@@ -154,6 +184,14 @@ class EvidencePipeline:
                 "existing": {
                     "opportunities": existing.opportunity_count,
                     "evidence": existing.evidence_count,
+                    "candidates": [
+                        {
+                            "kind": candidate.kind,
+                            "id": candidate.identifier,
+                            "summary": candidate.summary,
+                        }
+                        for candidate in existing.candidates
+                    ],
                 },
                 "round": 1,
             },
@@ -292,4 +330,11 @@ def _integer_field(payload: Mapping[str, object], name: str) -> int:
     value = payload.get(name)
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{name} must be a nonnegative integer")
+    return value
+
+
+def _string_field(payload: Mapping[str, object], name: str) -> str:
+    value = payload.get(name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a nonempty string")
     return value
