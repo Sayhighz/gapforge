@@ -187,7 +187,7 @@ Current state: I1-I6 are reviewed and merged. I7 code and credential-free verifi
 on draft PR #14 at implementation checkpoint `c9f47cb`, with GitHub Quality run `31303250007`
 green. The protected credentialed live-call execution record and I8 remain pending.
 
-Exact next action: integration lead reviews PR #14 without merging it prematurely, then runs the
-protected bounded source/Codex smoke workflow from a trusted ref with real credentials. Keep its I7
-box unchecked until that execution record is captured; proceed to I8 only after the review and
-manual gate are complete.
+Exact next action: integration lead reviews and merges PR #14 into `integration/v0.1`, then completes
+the I8 release audit and merges reviewed integration PR #4 into `main`. Only then can the protected
+workflow's hard checkout of `main` dispatch the bounded credentialed source/Codex smoke; capture that
+execution in a follow-up checkpoint/PR and keep its I7 box unchecked until the record exists.
