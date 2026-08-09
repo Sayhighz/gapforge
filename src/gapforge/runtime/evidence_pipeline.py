@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from gapforge.analysis.critic import validate_critic_result
+from gapforge.analysis.critic import research_more_intents, validate_critic_result
 from gapforge.analysis.evidence import (
     EvidenceObservation,
     EvidenceRecord,
@@ -22,6 +22,7 @@ from gapforge.analysis.hypotheses import (
     validate_gap_hypothesis,
     validate_problem_hypothesis,
 )
+from gapforge.analysis.lifecycle import TrendObservation, classify_trend
 from gapforge.analysis.normalization import normalize_text, normalize_url
 from gapforge.collectors.base import Collector, collect_isolated
 from gapforge.domain.contracts import (
@@ -45,6 +46,7 @@ from gapforge.domain.contracts import (
     SemanticOperation,
     Source,
     SourceCheckpoint,
+    TrendLabel,
     Verdict,
 )
 from gapforge.integration.semantic import (
@@ -270,6 +272,7 @@ class EvidencePipeline:
             collect_payload = {
                 "results": [result.model_dump(mode="json") for result in results],
                 "item_count": sum(len(result.items) for result in results),
+                "examined_volume": _examined_volume(results, as_of=context.collection_until),
             }
             try:
                 await self._commit(context, "COLLECT", collect_payload)
@@ -350,9 +353,19 @@ class EvidencePipeline:
             competitor_research,
             execution,
         )
-        cards, scores = await self._cards_and_scores(context, evidence, extraction, clusters, gap)
+        cards, scores = await self._cards_and_scores(
+            context,
+            evidence,
+            extraction,
+            clusters,
+            gap,
+            examined_volume=_examined_volume_field(collect_payload),
+        )
         hypotheses = await self._hypotheses(context, gap, cards, clusters, execution)
         critics = await self._critic(context, gap, cards, hypotheses, execution)
+        research_more_warning = await self._checkpoint_research_more(context, critics)
+        if research_more_warning is not None:
+            warning_codes.append(research_more_warning)
         _append_omission_warning(warning_codes, execution)
         decisions = []
         score_by_opportunity = {score.opportunity_id: score for score in scores}
@@ -387,6 +400,50 @@ class EvidencePipeline:
                 omissions=execution.omissions,
             ),
         )
+
+    async def _checkpoint_research_more(
+        self,
+        context: PipelineContext,
+        critics: CriticBatch,
+    ) -> str | None:
+        recommendations = tuple(
+            intent
+            for result in critics.results
+            for intent in research_more_intents(
+                result,
+                completed_rounds=1,
+                remaining_agent_calls=4,
+            )
+        )
+        unique = {intent.id: intent for intent in recommendations}
+        intents = tuple(unique[key] for key in sorted(unique))[:4]
+        if not intents:
+            return None
+        existing = await self.store.load_stage(context, "RESEARCH_MORE_CONTROL")
+        if existing is not None:
+            status = _string_field(existing, "status")
+        else:
+            remaining = await self.store.remaining_agent_calls(context)
+            if context.budget_limits.get("max_research_rounds", 1) < 2:
+                status = "STOPPED_ROUND_LIMIT"
+            elif remaining < 5:
+                status = "STOPPED_AGENT_BUDGET"
+            else:
+                # Five semantic calls are required for a coherent second pass:
+                # EXTRACT, CLUSTER, GAP, HYPOTHESIS, and blind CRITIC. Persist the
+                # intent rather than partially executing a round.
+                status = "DEFERRED_COHERENT_ROUND"
+            await self._commit(
+                context,
+                "RESEARCH_MORE_CONTROL",
+                {
+                    "status": status,
+                    "remaining_agent_calls": remaining,
+                    "required_agent_calls": 5,
+                    "intents": [intent.model_dump(mode="json") for intent in intents],
+                },
+            )
+        return "RESEARCH_MORE_DEFERRED_AGENT_BUDGET" if status == "STOPPED_AGENT_BUDGET" else None
 
     async def _extract(
         self,
@@ -697,6 +754,8 @@ class EvidencePipeline:
         extraction: PainExtractionBatch,
         clusters: ClusterBatch,
         gap: GapResearchBatch,
+        *,
+        examined_volume: tuple[int, int],
     ) -> tuple[tuple[EvidenceCard, ...], tuple[OpportunityScoreSnapshot, ...]]:
         existing = await self.store.load_stage(context, "CARD_SCORE")
         if existing is not None:
@@ -768,10 +827,28 @@ class EvidencePipeline:
                 if representative_pains
                 else 0.0
             )
-            # Collection checkpoints do not yet retain comparable current/prior
-            # examined-volume denominators. A fabricated equal denominator can
-            # promote viral/cross-posted activity, so v0.1 scores trend as unknown.
-            trend_score = 0.0
+            current_volume, previous_volume = examined_volume
+            trend = classify_trend(
+                tuple(
+                    TrendObservation(
+                        signal_id=item.evidence_id,
+                        author_id=item.author_id,
+                        thread_id=item.thread_id,
+                        observed_at=item.observed_at,
+                        duplicate_group=item.duplicate_group,
+                    )
+                    for item in observations
+                ),
+                as_of=context.collection_until,
+                current_examined_volume=current_volume,
+                previous_examined_volume=previous_volume,
+            )
+            trend_score = {
+                TrendLabel.RISING: 100.0,
+                TrendLabel.FLAT: 50.0,
+                TrendLabel.FALLING: 0.0,
+                TrendLabel.INSUFFICIENT_DATA: 0.0,
+            }[trend.label]
             diversity = 100 * min(
                 1.0,
                 (
@@ -1157,6 +1234,32 @@ def _collection_warning_codes(results: tuple[CollectResult, ...]) -> list[str]:
         if result.availability is not Availability.AVAILABLE
     )
     return sorted(warnings)
+
+
+def _examined_volume(
+    results: tuple[CollectResult, ...],
+    *,
+    as_of: datetime,
+) -> dict[str, int]:
+    current_start = as_of - timedelta(days=7)
+    previous_start = as_of - timedelta(days=35)
+    timestamps = tuple(item.source_created_at for result in results for item in result.items)
+    return {
+        "current_7d": sum(current_start <= value < as_of for value in timestamps),
+        "previous_28d": sum(previous_start <= value < current_start for value in timestamps),
+    }
+
+
+def _examined_volume_field(payload: Mapping[str, object]) -> tuple[int, int]:
+    value = payload.get("examined_volume")
+    if value is None:
+        return (0, 0)
+    if not isinstance(value, dict):
+        raise ValueError("examined_volume must be an object")
+    return (
+        _integer_field(value, "current_7d"),
+        _integer_field(value, "previous_28d"),
+    )
 
 
 def _run_warnings(

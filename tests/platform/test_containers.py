@@ -67,7 +67,12 @@ def test_backup_roundtrip_builds_shared_worker_image_only_once() -> None:
 
     assert "compose build worker" in script
     assert "compose run --rm migrate" in script
-    assert "compose up -d --no-build worker" in script
+    health_command = (
+        "compose run --rm --no-deps worker python /app/scripts/container-healthcheck.py"
+    )
+    assert health_command in script
+    assert script.count("compose run --rm --no-deps") >= 6
+    assert "compose exec" not in script
     assert "compose up -d --build" not in script
 
 

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4, uuid5
 
 import pytest
 from sqlalchemy import select
 
+from gapforge.analysis.lifecycle import TrendObservation, classify_trend
 from gapforge.domain.contracts import (
     AgentEffort,
     AgentResult,
@@ -40,6 +41,7 @@ from gapforge.runtime.evidence_pipeline import (
     PipelineStageCommit,
     _bounded_evidence_input,
     _bounded_stage_input,
+    _examined_volume,
 )
 from gapforge.runtime.evidence_stages import PainExtractionBatch
 from gapforge.storage.database import Database
@@ -80,6 +82,7 @@ class RecordingStore:
         self.commits: list[PipelineStageCommit] = []
         self.completed: dict[str, dict[str, object]] = {}
         self.crash_after_stage: str | None = None
+        self.remaining_calls = context.budget_limits["max_agent_calls_per_run"]
 
     async def load_context(self, task: ResearchTask) -> PipelineContext:
         assert task.run_id == self.context.run_id
@@ -112,7 +115,7 @@ class RecordingStore:
             raise RuntimeError("simulated process crash after durable commit")
 
     async def remaining_agent_calls(self, context: PipelineContext) -> int:
-        return context.budget_limits["max_agent_calls_per_run"]
+        return self.remaining_calls
 
 
 class RecordingReasoner:
@@ -179,6 +182,15 @@ class FullCollector:
                 ],
                 "request_count": 1,
             }
+        )
+
+
+class UnavailableGithubCollector:
+    async def collect(self, request: CollectRequest) -> CollectResult:
+        return CollectResult(
+            source=Source.GITHUB,
+            availability=Availability.SOURCE_UNAVAILABLE,
+            request_count=1,
         )
 
 
@@ -272,10 +284,17 @@ class FullStore(RecordingStore):
 
 
 class FullReasoner:
-    def __init__(self, *, reverse_outputs: bool = False, alias_suffix: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        reverse_outputs: bool = False,
+        alias_suffix: str = "",
+        recommend_more: bool = False,
+    ) -> None:
         self.operations: list[SemanticOperation] = []
         self.reverse_outputs = reverse_outputs
         self.alias_suffix = alias_suffix
+        self.recommend_more = recommend_more
         self.input_sizes: list[int] = []
         self.inputs: list[dict[str, object]] = []
 
@@ -461,6 +480,16 @@ class FullReasoner:
             output["results"][0]["opportunity_id"] = call.request.input_json["cases"][0][
                 "opportunity_id"
             ]
+            if self.recommend_more:
+                output["results"][0]["recommended_intents"] = [
+                    {
+                        "id": "follow-up-1",
+                        "kind": "TARGETED",
+                        "concept": "reconciliation payment signal",
+                        "sources": ["GITHUB"],
+                        "rationale": "close missing willingness-to-pay evidence",
+                    }
+                ]
         if self.reverse_outputs and operation is SemanticOperation.GAP:
             output["competitors"].reverse()
         return AgentResult(
@@ -471,6 +500,18 @@ class FullReasoner:
             effort=call.request.effort,
             duration_ms=1,
         )
+
+
+class PartialSourceReasoner(FullReasoner):
+    async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
+        result = await super().run(context, call)
+        if call.request.task is not SemanticOperation.QUERY_PLAN:
+            return result
+        assert result.output_json is not None
+        output = dict(result.output_json)
+        intents = [dict(item) for item in output["intents"]]
+        intents[0]["sources"] = ["HACKER_NEWS", "GITHUB"]
+        return result.model_copy(update={"output_json": {**output, "intents": intents}})
 
 
 class InvalidClusterReasoner(FullReasoner):
@@ -745,6 +786,30 @@ async def test_fake_hunt_runs_complete_lineage_and_valid_zero_validate() -> None
 
 
 @pytest.mark.asyncio
+async def test_partial_source_failure_preserves_useful_result_and_typed_warning() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline = EvidencePipeline(
+        store=FullStore(context(run_id, task_id), []),
+        reasoner=PartialSourceReasoner(),
+        collectors={
+            Source.HACKER_NEWS: FullCollector(),
+            Source.GITHUB: UnavailableGithubCollector(),
+        },
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    result = await pipeline(research_task(run_id, task_id))
+
+    assert result.useful_artifact is True
+    assert result.payload["completed_stage"] == "FINAL"
+    assert result.payload["warnings"] == ["GITHUB_SOURCE_UNAVAILABLE"]
+    assert [warning.code for warning in result.warnings] == ["GITHUB_SOURCE_UNAVAILABLE"]
+
+
+@pytest.mark.asyncio
 async def test_resume_after_card_score_does_not_repeat_reasoning_search_or_fetch() -> None:
     run_id = uuid4()
     task_id = uuid4()
@@ -792,6 +857,36 @@ async def test_resume_after_card_score_does_not_repeat_reasoning_search_or_fetch
     assert search.calls[0][1:] == (10, 1)
     assert fetcher.calls == ["https://competitor.test/manual"]
     assert store.completed["CARD_SCORE"] == first_card_score
+
+
+@pytest.mark.asyncio
+async def test_research_more_stops_durably_at_exact_persisted_agent_budget() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    # Represents six base semantic calls plus any audited repair already charged
+    # by I4. The pipeline must query this durable value, not reset a local cap.
+    store.remaining_calls = 0
+    reasoner = FullReasoner(recommend_more=True)
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
+        clock=lambda: NOW,
+    )
+
+    first = await pipeline(research_task(run_id, task_id))
+    second = await pipeline(research_task(run_id, task_id))
+
+    checkpoint = store.completed["RESEARCH_MORE_CONTROL"]
+    assert checkpoint["status"] == "STOPPED_AGENT_BUDGET"
+    assert checkpoint["remaining_agent_calls"] == 0
+    assert checkpoint["required_agent_calls"] == 5
+    assert reasoner.operations.count(SemanticOperation.CRITIC) == 1
+    assert first.payload["warnings"] == ["RESEARCH_MORE_DEFERRED_AGENT_BUDGET"]
+    assert second.payload == first.payload
 
 
 @pytest.mark.asyncio
@@ -1018,6 +1113,60 @@ async def test_cluster_bounds_oversized_extraction_and_uses_selected_lineage() -
     membership = memberships[0]
     assert isinstance(membership, dict)
     assert membership["pain_signal_id"] == selected_id
+
+
+def test_pipeline_trend_volume_is_windowed_and_duplicate_groups_block_viral_growth() -> None:
+    items = [
+        {
+            "source": "HACKER_NEWS",
+            "external_id": f"current-{index}",
+            "canonical_url": f"https://example.test/current/{index}",
+            "title": "Current pain",
+            "source_created_at": NOW - timedelta(days=1),
+        }
+        for index in range(20)
+    ] + [
+        {
+            "source": "HACKER_NEWS",
+            "external_id": f"previous-{index}",
+            "canonical_url": f"https://example.test/previous/{index}",
+            "title": "Previous pain",
+            "source_created_at": NOW - timedelta(days=14),
+        }
+        for index in range(100)
+    ]
+    results = (
+        CollectResult.model_validate(
+            {
+                "source": "HACKER_NEWS",
+                "availability": "AVAILABLE",
+                "items": items,
+                "request_count": 1,
+            }
+        ),
+    )
+    volumes = _examined_volume(results, as_of=NOW)
+    copies = tuple(
+        TrendObservation(
+            signal_id=f"copy-{index}",
+            author_id=f"author-{index}",
+            thread_id=f"thread-{index}",
+            observed_at=NOW - timedelta(days=1),
+            duplicate_group="same-cross-post",
+        )
+        for index in range(10)
+    )
+
+    trend = classify_trend(
+        copies,
+        as_of=NOW,
+        current_examined_volume=volumes["current_7d"],
+        previous_examined_volume=volumes["previous_28d"],
+    )
+
+    assert volumes == {"current_7d": 20, "previous_28d": 100}
+    assert trend.current_signals == 1
+    assert trend.label.value == "INSUFFICIENT_DATA"
 
 
 @pytest.mark.asyncio
