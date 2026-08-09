@@ -87,6 +87,14 @@ or provider audit history.
 ## I5 — Persistence and query surfaces
 
 - [ ] Persist raw evidence, revisions, pain signals, clusters, merge decisions, claims, cards, hypotheses, competitors, opportunities, assessments, snapshots, critic results, and lifecycle events.
+  Progress: checkpoint `0ee00e9` adds the atomic typed stage writer, bounded lineage
+  resolution, explicit R1/R2 card/score/critic/hypothesis/final snapshot identities, and an
+  Alembic-backed append-only lifecycle journal with per-assessment versions, exact transitions,
+  gap-snapshot FKs, projection triggers, and rejected-opportunity reopen gates. Ruff, format,
+  mypy, 56 credential-free focused tests (4 skipped PostgreSQL cases), and collection of all 296
+  tests pass. Local PostgreSQL remains unavailable because the host Docker daemon has overlay2
+  I/O errors; exact next action is refresh against I3's committed payload seam, use GitHub CI as
+  the PostgreSQL migration gate, then resolve any failures before marking this item complete.
 - [ ] Keep global evidence identity separate from mission-revision relevance, score, and verdict.
 - [ ] Complete opportunity, evidence, changes, rejections, merge, and report CLI commands over persisted data.
 - [ ] Record reversible manual merge decisions with actor, reason, and lifecycle/event history.
@@ -95,6 +103,10 @@ or provider audit history.
   concurrent decisions, direct-SQL tampering, same-candidate lineage, and populated legacy-link
   migration round trips pass in 5 PostgreSQL tests. Exact next action: expose the journal through
   query/CLI surfaces and prove only ACCEPTED candidates affect equivalence reads.
+  Progress: checkpoint `0ee00e9` additionally installs transaction-safe insert/projection
+  triggers, routes accept/reject/reverse through `MergeDecisionService`, and adds direct-SQL
+  orphan/projection regressions. Exact next action remains the typed history/query surface and
+  full PostgreSQL CI verification.
 - [ ] Make report identity, claims, scores, verdicts, citations, and locale derive from the same persisted snapshot.
 
 Acceptance: evidence, scores, verdicts, rejections, changes, merges, and reopen events are queryable
