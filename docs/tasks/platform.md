@@ -6,7 +6,7 @@ PR target: `integration/v0.1`
 
 Owner: Platform developer agent
 
-Last checkpoint: A7 backups/CI pushed in `4291f29`; A8 audit and PR handoff is next.
+Last checkpoint: A1-A8 complete; final audit and PR evidence are recorded in draft PR #5.
 
 Mark `[x]` only after implementation and tests are committed and pushed. For partial work, leave `[ ]` and add a `Progress:` note with commit and next action.
 
@@ -110,17 +110,18 @@ Acceptance: CI is credential-free and a verified backup can restore the tested d
 
 ## A8 — PR handoff
 
-- [ ] Re-read `docs/spec-v0.1.md` and audit owned deliverables.
-- [ ] Run all available checks and record exact output in the PR.
-- [ ] Update this file's `Last checkpoint` and every completed box.
-- [ ] Push all commits and open/update a draft PR targeting `integration/v0.1`.
-- [ ] Document cross-lane integration needs without editing Lane B paths.
+- [x] Re-read `docs/spec-v0.1.md` and audit owned deliverables.
+- [x] Run all available checks and record exact output in the PR.
+- [x] Update this file's `Last checkpoint` and every completed box.
+- [x] Push all commits and open/update a draft PR targeting `integration/v0.1`.
+- [x] Document cross-lane integration needs without editing Lane B paths.
 
 ## Resume note
 
-Current state: A1-A7 complete; A8 audit and handoff in progress.
+Current state: A1-A8 complete; draft PR #5 is ready for integration-lead review.
 
-Last pushed commit: `4291f29` (`add verified backup and CI operations`).
+Last pushed implementation commit: `4291f29` (`add verified backup and CI operations`);
+A7 checkpoint: `ff16b09`.
 
-Next action: re-read the canonical spec, audit all owned deliverables, run final checks, and update
-the draft PR with exact evidence and cross-lane integration needs.
+Next action: integration lead reviews PR #5 and wires the documented Lane B boundaries on
+`integration/v0.1`; no Lane A checklist work remains.
