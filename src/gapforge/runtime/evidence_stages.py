@@ -10,12 +10,14 @@ from gapforge.domain.contracts import (
     CompetitorResearchStatus,
     Contract,
     CriticResult,
+    FetchSnapshot,
     GapHypothesis,
     Opportunity,
     PainSignal,
     ProblemCluster,
     ProblemClusterMembership,
     ProblemHypothesis,
+    SearchResponse,
 )
 
 
@@ -29,14 +31,17 @@ class ClusterBatch(Contract):
     memberships: tuple[ProblemClusterMembership, ...]
 
 
-class ScoreInputContract(Contract):
+class CompetitorResearchCheckpoint(Contract):
+    status: CompetitorResearchStatus
+    searches: tuple[SearchResponse, ...]
+    snapshots: tuple[FetchSnapshot, ...]
+    warning_codes: tuple[str, ...] = ()
+
+
+class OpportunityFitContract(Contract):
+    """Semantic fit judgments; Python derives every evidence-strength component."""
+
     opportunity_id: str
-    severity: float
-    frequency: float
-    independent_diversity: float
-    behavioral_workaround: float
-    wtp_or_spend: float
-    recency_trend: float
     gap_strength: float
     competitor_dissatisfaction: float
     reachability: float
@@ -45,6 +50,7 @@ class ScoreInputContract(Contract):
     inverse_switching_friction: float
     why_now: float
     penalties: tuple[tuple[str, float], ...] = ()
+    explanation: tuple[str, ...] = ()
 
 
 class GapResearchBatch(Contract):
@@ -53,8 +59,7 @@ class GapResearchBatch(Contract):
     competitor_evidence: tuple[CompetitorEvidence, ...]
     gaps: tuple[GapHypothesis, ...]
     opportunities: tuple[Opportunity, ...]
-    score_inputs: tuple[ScoreInputContract, ...]
-    competitor_research_status: CompetitorResearchStatus
+    opportunity_fit: tuple[OpportunityFitContract, ...]
 
 
 class HypothesisBatch(Contract):

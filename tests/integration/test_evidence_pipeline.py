@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -14,8 +15,10 @@ from gapforge.domain.contracts import (
     Availability,
     CollectRequest,
     CollectResult,
+    FetchResult,
     MissionRevision,
     RunMode,
+    SearchResponse,
     SemanticOperation,
     Source,
 )
@@ -32,6 +35,8 @@ from gapforge.runtime.evidence_pipeline import (
     ExistingIntelligence,
     PipelineContext,
     PipelineStageCommit,
+    _bounded_evidence_input,
+    _bounded_stage_input,
 )
 from gapforge.storage.database import Database
 from gapforge.storage.models import RawSignalRevision, ResearchRun, ResearchTask
@@ -39,6 +44,29 @@ from gapforge.storage.uow import SqlAlchemyUnitOfWork
 from gapforge.worker import TaskHandlerRegistry, Worker
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
+PROVIDER_ALIASES = {
+    "pain-1",
+    "problem-1",
+    "cluster-1",
+    "claim-1",
+    "claim-2",
+    "manual-1",
+    "nothing-1",
+    "competitor-evidence-1",
+    "gap-1",
+    "opportunity-1",
+    "hypothesis-1",
+}
+
+
+def _rename_provider_aliases(value: object, suffix: str) -> object:
+    if isinstance(value, str):
+        return f"{value}{suffix}" if value in PROVIDER_ALIASES else value
+    if isinstance(value, list):
+        return [_rename_provider_aliases(item, suffix) for item in value]
+    if isinstance(value, dict):
+        return {key: _rename_provider_aliases(item, suffix) for key, item in value.items()}
+    return value
 
 
 class RecordingStore:
@@ -147,6 +175,53 @@ class FullCollector:
         )
 
 
+class FullSearch:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+
+    async def search(self, query: str, *, max_results: int, max_requests: int) -> SearchResponse:
+        self.calls.append((query, max_results, max_requests))
+        return SearchResponse.model_validate(
+            {
+                "availability": "AVAILABLE",
+                "query": query,
+                "results": [
+                    {
+                        "id": "search-1",
+                        "title": "Manual reconciliation",
+                        "url": "https://competitor.test/manual",
+                        "snippet": "Spreadsheet copying workaround",
+                        "observed_at": NOW,
+                        "rank": 1,
+                    }
+                ],
+                "request_count": 1,
+            }
+        )
+
+
+class FullFetcher:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def fetch(self, url: str, *, approved_urls: tuple[str, ...]) -> FetchResult:
+        assert url in approved_urls
+        self.calls.append(url)
+        return FetchResult.model_validate(
+            {
+                "availability": "AVAILABLE",
+                "snapshot": {
+                    "url": url,
+                    "final_url": url,
+                    "text": "Manual work requires spreadsheet copying",
+                    "content_type": "text/plain",
+                    "sha256": "c" * 64,
+                    "observed_at": NOW,
+                },
+            }
+        )
+
+
 class FullStore(RecordingStore):
     async def commit_stage(
         self,
@@ -162,6 +237,9 @@ class FullStore(RecordingStore):
             }
         else:
             self.completed[commit.stage] = commit.payload
+        if self.crash_after_stage == commit.stage:
+            self.crash_after_stage = None
+            raise RuntimeError("simulated process crash after durable commit")
 
     async def load_evidence(
         self,
@@ -187,12 +265,26 @@ class FullStore(RecordingStore):
 
 
 class FullReasoner:
-    def __init__(self) -> None:
+    def __init__(self, *, reverse_outputs: bool = False, alias_suffix: str = "") -> None:
         self.operations: list[SemanticOperation] = []
+        self.reverse_outputs = reverse_outputs
+        self.alias_suffix = alias_suffix
+        self.input_sizes: list[int] = []
 
     async def run(self, context: SemanticContext, call: SemanticCall) -> AgentResult:
         operation = call.request.task
         self.operations.append(operation)
+        self.input_sizes.append(
+            len(
+                json.dumps(
+                    call.request.input_json,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+            )
+        )
         outputs = {
             SemanticOperation.QUERY_PLAN: {
                 "round_number": 1,
@@ -247,7 +339,23 @@ class FullReasoner:
                         "kind": "USER_PAIN",
                         "status": "SUPPORTED",
                         "evidence_ids": ["HACKER_NEWS:full-1:r1"],
-                    }
+                        "contradicts_claim_ids": ["claim-2"],
+                    },
+                    {
+                        "id": "claim-2",
+                        "text": "Manual work requires spreadsheet copying",
+                        "kind": "FEATURE",
+                        "status": "SUPPORTED",
+                        "evidence_ids": ["competitor-evidence-1"],
+                        "citations": [
+                            {
+                                "evidence_id": "competitor-evidence-1",
+                                "source_url": "https://competitor.test/manual",
+                                "excerpt": "Manual work requires spreadsheet copying",
+                                "observed_at": NOW.isoformat(),
+                            }
+                        ],
+                    },
                 ],
                 "competitors": [
                     {"id": "manual-1", "name": "Manual work", "kind": "MANUAL_WORK"},
@@ -257,12 +365,12 @@ class FullReasoner:
                     {
                         "id": "competitor-evidence-1",
                         "competitor_id": "manual-1",
-                        "source_url": "https://example.test/full-1",
-                        "captured_excerpt": "copy every line into a spreadsheet",
+                        "source_url": "https://competitor.test/manual",
+                        "captured_excerpt": "Manual work requires spreadsheet copying",
                         "observed_at": NOW.isoformat(),
-                        "content_hash": "b" * 64,
+                        "content_hash": "c" * 64,
                         "evidence_kind": "WORKAROUND",
-                        "claim_ids": ["claim-1"],
+                        "claim_ids": ["claim-2"],
                     }
                 ],
                 "gaps": [
@@ -278,18 +386,12 @@ class FullReasoner:
                 "opportunities": [
                     {"id": "opportunity-1", "gap_hypothesis_id": "gap-1", "title": "Reconcile"}
                 ],
-                "score_inputs": [
+                "opportunity_fit": [
                     {
                         "opportunity_id": "opportunity-1",
                         **{
                             name: 50
                             for name in (
-                                "severity",
-                                "frequency",
-                                "independent_diversity",
-                                "behavioral_workaround",
-                                "wtp_or_spend",
-                                "recency_trend",
                                 "gap_strength",
                                 "competitor_dissatisfaction",
                                 "reachability",
@@ -301,7 +403,6 @@ class FullReasoner:
                         },
                     }
                 ],
-                "competitor_research_status": "COMPLETE",
             },
             SemanticOperation.HYPOTHESIS: {
                 "hypotheses": [
@@ -330,10 +431,33 @@ class FullReasoner:
                 ]
             },
         }
+        output = outputs[operation]
+        if self.alias_suffix:
+            output = _rename_provider_aliases(output, self.alias_suffix)
+        if operation is SemanticOperation.CLUSTER:
+            output["memberships"][0]["pain_signal_id"] = call.request.input_json["pain_signals"][0][
+                "id"
+            ]
+        elif operation is SemanticOperation.GAP:
+            problem_id = call.request.input_json["problems"][0]["id"]
+            output["gaps"][0]["canonical_problem_id"] = problem_id
+        elif operation is SemanticOperation.HYPOTHESIS:
+            output["hypotheses"][0]["canonical_problem_id"] = call.request.input_json["problems"][
+                0
+            ]["id"]
+            output["hypotheses"][0]["supporting_claim_ids"] = [
+                call.request.input_json["claims"][0]["id"]
+            ]
+        elif operation is SemanticOperation.CRITIC:
+            output["results"][0]["opportunity_id"] = call.request.input_json["opportunities"][0][
+                "id"
+            ]
+        if self.reverse_outputs and operation is SemanticOperation.GAP:
+            output["competitors"].reverse()
         return AgentResult(
             call_id=call.request.call_id,
             status=AgentStatus.COMPLETED,
-            output_json=outputs[operation],
+            output_json=output,
             provider="fake",
             effort=call.request.effort,
             duration_ms=1,
@@ -368,6 +492,7 @@ def context(run_id: UUID, task_id: UUID) -> PipelineContext:
         budget_limits={
             "max_research_rounds": 2,
             "max_agent_calls_per_run": 6,
+            "max_search_calls_per_run": 20,
             "max_collector_requests_per_run": 60,
             "max_raw_signals_per_run": 300,
             "initial_lookback_days": 365,
@@ -489,6 +614,8 @@ async def test_fake_hunt_runs_complete_lineage_and_valid_zero_validate() -> None
         store=store,
         reasoner=reasoner,
         collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=FullSearch(),
+        safe_fetch=FullFetcher(),
         clock=lambda: NOW,
     )
     task = ResearchTask(
@@ -523,13 +650,16 @@ async def test_fake_hunt_runs_complete_lineage_and_valid_zero_validate() -> None
         SemanticOperation.HYPOTHESIS,
         SemanticOperation.CRITIC,
     ]
+    assert max(reasoner.input_sizes) < 20_000
     assert [commit.stage for commit in store.commits] == [
         "EXISTING",
         "QUERY_PLAN",
         "COLLECT",
         "EXTRACT",
         "CLUSTER",
+        "COMPETITOR_RESEARCH",
         "GAP",
+        "CARD_SCORE",
         "HYPOTHESIS",
         "CRITIC",
         "FINAL",
@@ -539,6 +669,180 @@ async def test_fake_hunt_runs_complete_lineage_and_valid_zero_validate() -> None
     first_decision = decisions[0]
     assert isinstance(first_decision, dict)
     assert first_decision["verdict"] == "RESEARCH_MORE"
+
+
+@pytest.mark.asyncio
+async def test_resume_after_card_score_does_not_repeat_reasoning_search_or_fetch() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    store = FullStore(context(run_id, task_id), [])
+    store.crash_after_stage = "CARD_SCORE"
+    reasoner = FullReasoner()
+    search = FullSearch()
+    fetcher = FullFetcher()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=search,
+        safe_fetch=fetcher,
+        clock=lambda: NOW,
+    )
+    task = ResearchTask(
+        id=task_id,
+        run_id=run_id,
+        task_type="research.run",
+        status="LEASED",
+        priority=1,
+        idempotency_key="run-root:v1",
+        payload={"run_id": str(run_id)},
+        checkpoint={},
+        attempt_count=1,
+        max_attempts=3,
+        available_at=NOW,
+        lease_owner="test-worker",
+        lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await pipeline(task)
+    first_operations = tuple(reasoner.operations)
+    first_card_score = store.completed["CARD_SCORE"]
+
+    result = await pipeline(task)
+
+    assert result.payload["completed_stage"] == "FINAL"
+    assert tuple(reasoner.operations[: len(first_operations)]) == first_operations
+    assert reasoner.operations.count(SemanticOperation.QUERY_PLAN) == 1
+    assert reasoner.operations.count(SemanticOperation.GAP) == 1
+    assert len(search.calls) == 1
+    assert search.calls[0][1:] == (10, 1)
+    assert fetcher.calls == ["https://competitor.test/manual"]
+    assert store.completed["CARD_SCORE"] == first_card_score
+
+
+@pytest.mark.asyncio
+async def test_zero_search_budget_skips_external_calls_and_returns_zero_opportunities() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    pipeline_context = context(run_id, task_id)
+    pipeline_context.budget_limits["max_search_calls_per_run"] = 0
+    store = FullStore(pipeline_context, [])
+    reasoner = FullReasoner()
+    search = FullSearch()
+    fetcher = FullFetcher()
+    pipeline = EvidencePipeline(
+        store=store,
+        reasoner=reasoner,
+        collectors={Source.HACKER_NEWS: FullCollector()},
+        competitor_search=search,
+        safe_fetch=fetcher,
+        clock=lambda: NOW,
+    )
+    task = ResearchTask(
+        id=task_id,
+        run_id=run_id,
+        task_type="research.run",
+        status="LEASED",
+        priority=1,
+        idempotency_key="run-root:v1",
+        payload={"run_id": str(run_id)},
+        checkpoint={},
+        attempt_count=1,
+        max_attempts=3,
+        available_at=NOW,
+        lease_owner="test-worker",
+        lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
+    )
+
+    result = await pipeline(task)
+
+    assert result.payload["opportunities"] == 0
+    assert result.payload["warnings"] == ["COMPETITOR_RESEARCH_UNAVAILABLE"]
+    assert search.calls == []
+    assert fetcher.calls == []
+    assert SemanticOperation.GAP not in reasoner.operations
+
+
+@pytest.mark.asyncio
+async def test_canonical_artifact_ids_are_stable_across_runs_and_provider_order() -> None:
+    stage_ids: list[dict[str, set[str]]] = []
+    for reverse_outputs in (False, True):
+        run_id = uuid4()
+        task_id = uuid4()
+        store = FullStore(context(run_id, task_id), [])
+        pipeline = EvidencePipeline(
+            store=store,
+            reasoner=FullReasoner(
+                reverse_outputs=reverse_outputs,
+                alias_suffix="" if not reverse_outputs else "-renamed",
+            ),
+            collectors={Source.HACKER_NEWS: FullCollector()},
+            competitor_search=FullSearch(),
+            safe_fetch=FullFetcher(),
+            clock=lambda: NOW,
+        )
+        task = ResearchTask(
+            id=task_id,
+            run_id=run_id,
+            task_type="research.run",
+            status="LEASED",
+            priority=1,
+            idempotency_key="run-root:v1",
+            payload={"run_id": str(run_id)},
+            checkpoint={},
+            attempt_count=1,
+            max_attempts=3,
+            available_at=NOW,
+            lease_owner="test-worker",
+            lease_expires_at=datetime(2026, 8, 9, 12, 5, tzinfo=UTC),
+        )
+        await pipeline(task)
+        stage_ids.append(
+            {
+                "pains": {item["id"] for item in store.completed["EXTRACT"]["pain_signals"]},
+                "problems": {item["id"] for item in store.completed["CLUSTER"]["problems"]},
+                "clusters": {item["id"] for item in store.completed["CLUSTER"]["clusters"]},
+                "claims": {item["id"] for item in store.completed["GAP"]["claims"]},
+                "competitors": {item["id"] for item in store.completed["GAP"]["competitors"]},
+                "gaps": {item["id"] for item in store.completed["GAP"]["gaps"]},
+                "opportunities": {item["id"] for item in store.completed["GAP"]["opportunities"]},
+                "hypotheses": {item["id"] for item in store.completed["HYPOTHESIS"]["hypotheses"]},
+            }
+        )
+
+    assert stage_ids[0] == stage_ids[1]
+    cards = store.completed["CARD_SCORE"]["cards"]
+    assert cards != []
+    assert cards[0]["contradicting_claim_ids"]
+
+
+def test_large_evidence_batch_is_deterministically_bounded_with_omission_count() -> None:
+    evidence = tuple(
+        CapturedEvidence(
+            evidence_id=f"HACKER_NEWS:large-{index}:r1",
+            source=Source.HACKER_NEWS,
+            url=f"https://example.test/large/{index}",
+            text="Repeated bounded pain text " * 500,
+            observed_at=NOW,
+            duplicate_group=f"{index:064x}",
+            author_id=f"author-{index}",
+            thread_id=f"thread-{index}",
+        )
+        for index in range(300)
+    )
+
+    selected = _bounded_evidence_input(evidence)
+    payload = _bounded_stage_input(
+        (("evidence", selected),),
+        total_counts={"evidence": len(evidence)},
+    )
+
+    assert 0 < len(payload["evidence"]) < len(evidence)
+    assert payload["input_bounds"]["omitted_counts"]["evidence"] == (
+        len(evidence) - len(payload["evidence"])
+    )
+    assert len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()) < 20_000
 
 
 @pytest.mark.postgres
@@ -616,6 +920,25 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
             store.commit_stage(pipeline_context, commit),
             store.commit_stage(pipeline_context, commit),
         )
+        competitor_commit = PipelineStageCommit(
+            stage="COMPETITOR_RESEARCH",
+            idempotency_key=str(uuid5(scheduled.run.id, "pipeline:COMPETITOR_RESEARCH:v1")),
+            payload={
+                "status": "RESEARCH_UNAVAILABLE",
+                "searches": [
+                    {
+                        "availability": "AVAILABLE",
+                        "query": "invoice reconciliation",
+                        "results": [],
+                        "request_count": 1,
+                    }
+                ],
+                "snapshots": [],
+                "warning_codes": ["NO_RESULTS"],
+            },
+        )
+        await store.commit_stage(pipeline_context, competitor_commit)
+        await store.commit_stage(pipeline_context, competitor_commit)
         with pytest.raises(StageConflictError, match="input changed"):
             await store.commit_stage(
                 pipeline_context,
@@ -723,7 +1046,11 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
             ).all()
         assert persisted_run is not None
         assert persisted_task is not None
-        assert persisted_run.budget_used == {"collector_requests": 2, "raw_signals": 1}
+        assert persisted_run.budget_used == {
+            "collector_requests": 2,
+            "raw_signals": 1,
+            "search_calls": 1,
+        }
         checkpoint = persisted_task.checkpoint["pipeline"]["stages"]["COLLECT"]
         assert checkpoint["idempotency_key"] == str(uuid5(scheduled.run.id, "pipeline:COLLECT:v1"))
         assert len(checkpoint["input_sha256"]) == 64

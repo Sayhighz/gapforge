@@ -34,6 +34,7 @@ from gapforge.runtime.evidence_pipeline import (
     PipelineContext,
     PipelineStageCommit,
 )
+from gapforge.runtime.evidence_stages import CompetitorResearchCheckpoint
 from gapforge.storage import models
 
 
@@ -90,6 +91,11 @@ class SqlAlchemyEvidencePipelineStore:
             limits["max_raw_signals_per_run"] = max(
                 0,
                 limits["max_raw_signals_per_run"] - int(run.budget_used.get("raw_signals", 0)),
+            )
+            limits["max_search_calls_per_run"] = max(
+                0,
+                limits.get("max_search_calls_per_run", 0)
+                - int(run.budget_used.get("search_calls", 0)),
             )
             return PipelineContext(
                 run_id=run.id,
@@ -254,6 +260,22 @@ class SqlAlchemyEvidencePipelineStore:
                 except CollectionBudgetExhaustedError:
                     await session.rollback()
                     raise
+            elif commit.stage == "COMPETITOR_RESEARCH":
+                try:
+                    checkpoint = CompetitorResearchCheckpoint.model_validate(commit.payload)
+                    await self._admit_budget(
+                        session,
+                        context.run_id,
+                        {
+                            "search_calls": (
+                                sum(item.request_count for item in checkpoint.searches),
+                                "max_search_calls_per_run",
+                            )
+                        },
+                    )
+                except CollectionBudgetExhaustedError:
+                    await session.rollback()
+                    raise
             stages[commit.stage] = {
                 **expected_identity,
                 "payload": durable_payload,
@@ -277,11 +299,16 @@ class SqlAlchemyEvidencePipelineStore:
         results = tuple(CollectResult.model_validate(value) for value in payload["results"])
         request_count = sum(result.request_count for result in results)
         items = tuple(item for result in results for item in result.items)
-        await self._admit_collection_budget(
+        await self._admit_budget(
             session,
             context.run_id,
-            collector_requests=request_count,
-            raw_signals=len(items),
+            {
+                "collector_requests": (
+                    request_count,
+                    "max_collector_requests_per_run",
+                ),
+                "raw_signals": (len(items), "max_raw_signals_per_run"),
+            },
         )
 
         evidence_ids: list[str] = []
@@ -319,13 +346,11 @@ class SqlAlchemyEvidencePipelineStore:
             "evidence_ids": evidence_ids,
         }
 
-    async def _admit_collection_budget(
+    async def _admit_budget(
         self,
         session: AsyncSession,
         run_id: Any,
-        *,
-        collector_requests: int,
-        raw_signals: int,
+        requested: dict[str, tuple[int, str]],
     ) -> None:
         run = await session.scalar(
             select(models.ResearchRun).where(models.ResearchRun.id == run_id).with_for_update()
@@ -333,17 +358,15 @@ class SqlAlchemyEvidencePipelineStore:
         if run is None:
             raise LookupError("research run no longer exists")
         now = self.clock()
-        requested = {
-            "collector_requests": (
-                collector_requests,
-                "max_collector_requests_per_run",
-            ),
-            "raw_signals": (raw_signals, "max_raw_signals_per_run"),
-        }
         exhausted = [
-            (counter, int(run.budget_used.get(counter, 0)), int(run.budget_limits[limit_key]))
+            (
+                counter,
+                int(run.budget_used.get(counter, 0)),
+                int(run.budget_limits.get(limit_key, 0)),
+            )
             for counter, (amount, limit_key) in requested.items()
-            if int(run.budget_used.get(counter, 0)) + amount > int(run.budget_limits[limit_key])
+            if int(run.budget_used.get(counter, 0)) + amount
+            > int(run.budget_limits.get(limit_key, 0))
         ]
         if run.deadline_at <= now or exhausted:
             raise CollectionBudgetExhaustedError("collection budget exhausted")
