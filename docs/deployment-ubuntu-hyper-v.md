@@ -18,10 +18,9 @@ Desktop on Windows Server, or mount the Windows host's entire Codex home into th
 
 ## 1. Release and security prerequisites
 
-Deploy only a reviewed commit from the intended trusted `main` ref. At this checkpoint, GitHub
-reports that `main` is **not protected**. Do not dispatch the credentialed platform smoke or treat
-`main` as a trusted execution boundary until an administrator records the release decision and
-enables branch protection with all of the following:
+Deploy only a reviewed commit from the intended trusted `main` ref. The I8 audit initially found
+`main` unprotected; the release lead then enabled branch protection. Verify that the repository
+still enforces all of the following before deployment or credentialed platform smoke:
 
 - changes enter through pull requests;
 - branches must be up to date before merge and the Quality checks (`python`, `container-backup`,
@@ -31,11 +30,11 @@ enables branch protection with all of the following:
 - force pushes are disabled; and
 - branch deletion is disabled.
 
-This repository does not mutate GitHub settings. Branch protection is an operator/repository-owner
-gate outside the deployment itself. Because the current repository has one owner and GitHub does
-not permit self-approval, required approving reviews may remain at zero for v0.1; that is an explicit
-single-owner limitation, not evidence that PR #4 received an independent GitHub approval. The
-integration lead must still record the final full-diff review before merge.
+The application and workflows do not mutate GitHub settings. Branch protection remains an
+operator/repository-owner gate outside the deployment itself. Because the current repository has
+one owner and GitHub does not permit self-approval, required approving reviews are zero for v0.1;
+that is an explicit single-owner limitation, not evidence that PR #4 received an independent
+GitHub approval. The integration lead must still record the final full-diff review before merge.
 
 Prepare these external dependencies:
 
@@ -328,11 +327,12 @@ specific pre-release dataset.
 ## 10. Protected credentialed smoke gate
 
 Public CI and normal release checks use no paid credentials. The protected workflow for bounded real
-GitHub, Reddit, Brave, and Codex calls is implemented but has **not** been executed. The repository
-currently has no enrolled self-hosted Actions runner, no configured `platform-smoke` environment,
-and an unprotected `main` branch. Do not dispatch it until all of these gates are complete:
+GitHub, Reddit, Brave, and Codex calls is implemented but has **not** been executed. Branch
+protection is enabled, but the repository currently has no enrolled self-hosted Actions runner and
+no configured `platform-smoke` environment. Do not dispatch it until all of these gates are
+complete:
 
-1. protect `main` as described in section 1 and record the reviewed release commit;
+1. verify `main` protection as described in section 1 and record the reviewed release commit;
 2. enroll a dedicated, patched Ubuntu runner with exact labels
    `self-hosted`, `linux`, and `gapforge-smoke`;
 3. create the GitHub environment `platform-smoke` with appropriate reviewer controls;

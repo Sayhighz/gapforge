@@ -104,9 +104,10 @@ named volume and is excluded from backups.
   cannot use shell, agents, MCP, plugins, project writes, or unrelated configuration.
 - Raw evidence is retained indefinitely by default. Operators are responsible for source terms,
   privacy obligations, VM access, host patching, and off-VM backups.
-- The protected credentialed smoke has not run. `main` is intended to be the trusted ref but is
-  currently unprotected; do not dispatch that workflow until branch protection and the release
-  decision are recorded.
+- The protected credentialed smoke has not run. `main` now requires pull requests, up-to-date
+  Quality checks, resolved conversations, linear history, and blocks force-push/deletion. Do not
+  dispatch the workflow until the reviewed release is on `main` and the external runner,
+  environment, credentials, and device auth are configured.
 
 ## Development and verification
 

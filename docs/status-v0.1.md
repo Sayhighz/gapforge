@@ -17,8 +17,8 @@ This is the first file to read after interruption. It records only reviewed/push
 - [x] Lane B developer dispatched.
 - [x] Lane A PR reviewed and merged to integration.
 - [x] Lane B PR reviewed and merged to integration.
-- [ ] Cross-lane integration complete.
-- [ ] Full CI and Docker validation complete.
+- [x] Cross-lane integration complete.
+- [x] Full CI and Docker validation complete.
 - [ ] Final integration PR reviewed and merged to `main`.
 
 ## Active branches and PRs
@@ -26,7 +26,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `fb44e06` |
+| Integration | `integration/v0.1` | #4 | active draft | `21bef48` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
@@ -36,6 +36,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | I5 persistence surfaces | `agent/integration-persistence-surfaces` | #12 | reviewed and squash-merged | `6e9f56e` |
 | I6 reports and skill | `agent/integration-reports-skill` | #13 | reviewed and squash-merged | `957a824` |
 | I7 integrated verification | `agent/integration-verification` | #14 | reviewed and squash-merged | `a9b8112` |
+| I8 release handoff | `agent/release-handoff` | #15 | reviewed and squash-merged | `3ca031c` |
 
 GitHub issues:
 
@@ -88,19 +89,32 @@ Completed:
   `fb44e06`. Credential-free HN and missing-credential smokes passed. The protected credentialed
   source/Codex execution record remains deliberately open until the reviewed workflow reaches
   `main`.
+- I8 completed the master acceptance audit, CLI-first README, Windows Server 2019 Hyper-V / Ubuntu
+  24.04 deployment guide, migration/security boundaries, and full-range whitespace cleanup. The
+  integration lead independently reproduced the non-PostgreSQL checks, reviewed the complete PR
+  #15 diff, and squash-merged it as `21bef48`. Docs-head Quality run `31304363528` passed 414 tests
+  with one environment-gated skip plus all Python, container-backup, and native arm64 jobs.
+- The integration lead enabled `main` branch protection with strict required `python`,
+  `container-backup`, and `arm64-build` checks, PR-only changes, resolved conversations, linear
+  history, admin enforcement, and force-push/deletion disabled. Required approvals are zero because
+  the repository currently has one owner and GitHub does not permit self-approval.
 
 In progress:
 
-- I8 release audit and handoff are next on the reviewed integration branch.
+- Final full-range review and release evidence for integration PR #4.
 - The protected credentialed smoke remains a post-`main` operational gate because the trusted
-  workflow intentionally hard-checks out protected `main`.
+  workflow intentionally hard-checks out protected `main`; no self-hosted runner or
+  `platform-smoke` environment exists yet.
 
 Exact next action:
 
-1. Audit every master-spec checkbox and release artifact against reviewed implementation evidence.
-2. Complete I8 handoff, review integration PR #4, and merge the reviewed branch into `main`.
-3. Dispatch the protected credentialed source/Codex smoke from `main` and record its result in a
-   follow-up checkpoint/PR without inventing an execution record.
+1. Review the complete `origin/main...origin/integration/v0.1` diff and update PR #4 with exact
+   release evidence and deliberately open gates.
+2. Mark PR #4 ready and merge the reviewed branch into protected `main` only after required checks
+   remain green.
+3. Provision the external runner/environment/auth prerequisites before dispatching the protected
+   credentialed source/Codex smoke; record any real result in a follow-up PR without inventing an
+   execution record.
 
 ## Recovery rules
 

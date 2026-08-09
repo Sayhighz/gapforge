@@ -20,22 +20,22 @@ It is not a startup-idea generator. A successful run may return zero `VALIDATE` 
 
 ### Master product checklist
 
-- [ ] Thai or English natural-language missions persist without hand-written YAML.
-- [ ] Existing intelligence is queried before new collection.
-- [ ] HUNT completes end to end with evidence lineage.
-- [ ] MONITOR is opt-in and resumes safely after restart.
-- [ ] ASK helpers inspect evidence, comparisons, changes, and rejections without SQL.
-- [ ] Every supported factual conclusion resolves to stored evidence.
-- [ ] No Evidence Card or failed hard gate can produce `VALIDATE`.
+- [x] Thai or English natural-language missions persist without hand-written YAML.
+- [x] Existing intelligence is queried before new collection.
+- [x] HUNT completes end to end with evidence lineage.
+- [x] MONITOR is opt-in and resumes safely after restart.
+- [x] ASK helpers inspect evidence, comparisons, changes, and rejections without SQL.
+- [x] Every supported factual conclusion resolves to stored evidence.
+- [x] No Evidence Card or failed hard gate can produce `VALIDATE`.
 - [x] Product Hypotheses are explicit, post-`VALIDATE` requests only.
 
 ## 2. Scope boundaries
 
 v0.1 excludes a web UI, HTTP API, multi-user auth, billing, Redis, Kubernetes, embeddings, vector infrastructure, browser automation, nested agents, AI model APIs, automatic Product Hypotheses, semantic auto-merge, and a production Claude background provider.
 
-- [ ] No out-of-scope runtime dependency or service is introduced.
-- [ ] `CodexCliProvider` and `FakeAgentProvider` are the only agent implementations.
-- [ ] Claude compatibility is limited to repository instructions/skill invoking `gap`.
+- [x] No out-of-scope runtime dependency or service is introduced.
+- [x] `CodexCliProvider` and `FakeAgentProvider` are the only agent implementations.
+- [x] Claude compatibility is limited to repository instructions/skill invoking `gap`.
 
 ## 3. Deployment and technology
 
@@ -45,9 +45,9 @@ The Compose stack contains a non-root worker image with Python and pinned Codex 
 
 Technology: Python 3.12+, SQLAlchemy 2, Alembic, PostgreSQL, Pydantic 2, pydantic-settings, Typer, httpx, pytest/pytest-asyncio, Ruff, and mypy.
 
-- [ ] Docker image builds reproducibly.
-- [ ] Compose starts, migrates, healthchecks, and persists PostgreSQL data.
-- [ ] Ubuntu-on-Hyper-V setup and limitations are documented.
+- [x] Docker image builds reproducibly.
+- [x] Compose starts, migrates, healthchecks, and persists PostgreSQL data.
+- [x] Ubuntu-on-Hyper-V setup and limitations are documented.
 
 ## 4. Architecture
 
@@ -70,10 +70,10 @@ durable worker -> bounded CodexCliProvider -> schema-validated result
 
 Only Python connects to PostgreSQL and source/search APIs. Codex receives bounded evidence batches without database or source credentials.
 
-- [ ] Package uses `src/gapforge/` with clean module boundaries.
-- [ ] Research modules do not depend directly on SQLAlchemy sessions.
-- [ ] Worker tasks are durable, idempotent, leased, and checkpointed.
-- [ ] Machine-facing contracts are versioned and schema validated.
+- [x] Package uses `src/gapforge/` with clean module boundaries.
+- [x] Research modules do not depend directly on SQLAlchemy sessions.
+- [x] Worker tasks are durable, idempotent, leased, and checkpointed.
+- [x] Machine-facing contracts are versioned and schema validated.
 
 ## 5. Configuration and budgets
 
@@ -96,10 +96,10 @@ REJECTED_REOPEN_COOLDOWN_DAYS=30
 
 An empty `CODEX_MODEL` inherits the authenticated CLI default. Reasoning effort is `low` for extraction/relevance, `medium` for clustering/hypotheses/gap/critic, and `high` only for explicit deep research.
 
-- [ ] Every hard limit is validated, persisted, and tested.
-- [ ] A hit limit checkpoints as `BUDGET_EXHAUSTED` without losing work.
-- [ ] Codex output cannot create extra calls or rounds.
-- [ ] Provider, model request, effort, CLI version, timing, and status are recorded.
+- [x] Every hard limit is validated, persisted, and tested.
+- [x] A hit limit checkpoints as `BUDGET_EXHAUSTED` without losing work.
+- [x] Codex output cannot create extra calls or rounds.
+- [x] Provider, model request, effort, CLI version, timing, and status are recorded.
 
 ## 6. Persistent domain model
 
@@ -124,11 +124,11 @@ ProductHypothesis
  -> RawSignalRevision -> source URL
 ```
 
-- [ ] All entities have keys, timestamps, constraints, and indexes.
-- [ ] Every run references its exact immutable mission revision.
-- [ ] Scores, claims, revisions, and lifecycle events are append-only.
-- [ ] Alembic upgrades a clean database and constraints are tested.
-- [ ] Repository/unit-of-work interfaces prevent routine hand-written SQL.
+- [x] All entities have keys, timestamps, constraints, and indexes.
+- [x] Every run references its exact immutable mission revision.
+- [x] Scores, claims, revisions, and lifecycle events are append-only.
+- [x] Alembic upgrades a clean database and constraints are tested.
+- [x] Repository/unit-of-work interfaces prevent routine hand-written SQL.
 
 ## 7. Mission, run, and queue state
 
@@ -138,11 +138,11 @@ Run statuses: `QUEUED`, `RUNNING`, `COMPLETED`, `COMPLETED_WITH_WARNINGS`, `BUDG
 
 Only one research run is active globally. At most two Codex calls run concurrently inside it. PostgreSQL leases and `FOR UPDATE SKIP LOCKED` drive the queue. Manual HUNT has priority but does not interrupt a commit.
 
-- [ ] Mission revisions record parent and change reason.
-- [ ] Activation, pause, archive, and HUNT are distinct.
-- [ ] Expired leases are reclaimable without duplicate effects.
-- [ ] One mission revision cannot have overlapping runs.
-- [ ] Crash recovery resumes from the last committed checkpoint.
+- [x] Mission revisions record parent and change reason.
+- [x] Activation, pause, archive, and HUNT are distinct.
+- [x] Expired leases are reclaimable without duplicate effects.
+- [x] One mission revision cannot have overlapping runs.
+- [x] Crash recovery resumes from the last committed checkpoint.
 
 ## 8. Collectors and raw evidence
 
@@ -156,11 +156,11 @@ Raw evidence stores source/external ID, canonical URL, parent thread, author ide
 
 Raw text/metadata are retained indefinitely by default without media. Edits create revisions; deletions create tombstones. The 300-signal budget starts at 100 per source; no source exceeds 50%. A thread contributes its parent and at most 20 comments, with diminishing weight after item five.
 
-- [ ] All three collectors implement one contract.
-- [ ] Missing credentials return `SOURCE_UNAVAILABLE`.
-- [ ] Checkpoints, pagination, timeouts, limits, and retries are tested.
-- [ ] Source/thread quotas prevent demand inflation.
-- [ ] Content revisions and tombstones preserve history.
+- [x] All three collectors implement one contract.
+- [x] Missing credentials return `SOURCE_UNAVAILABLE`.
+- [x] Checkpoints, pagination, timeouts, limits, and retries are tested.
+- [x] Source/thread quotas prevent demand inflation.
+- [x] Content revisions and tombstones preserve history.
 
 ## 9. Search and static fetch
 
@@ -168,10 +168,10 @@ Raw text/metadata are retained indefinitely by default without media. Edits crea
 
 Competitor URLs originate only from search results or explicit user input. Static fetching permits `http`/`https`, blocks private/loopback/link-local/metadata networks and DNS rebinding, bounds redirects/body/time, validates content types, and extracts visible text. Search snippets alone cannot support price or feature claims. JavaScript/login/CAPTCHA content is `CONTENT_UNAVAILABLE`.
 
-- [ ] Brave results normalize into evidence records.
-- [ ] Static fetch prevents SSRF and bounds redirects, size, type, and time.
-- [ ] Unavailable search blocks `VALIDATE` but not collection.
-- [ ] Agent-created URLs are rejected.
+- [x] Brave results normalize into evidence records.
+- [x] Static fetch prevents SSRF and bounds redirects, size, type, and time.
+- [x] Unavailable search blocks `VALIDATE` but not collection.
+- [x] Agent-created URLs are rejected.
 
 ## 10. Query planning and time sampling
 
@@ -179,10 +179,10 @@ Codex produces semantic `QueryIntent` objects. Python compiles source syntax, ad
 
 Limits: eight broad intents, four targeted intents per opportunity batch, two research rounds. Initial HUNT samples a 365-day lookback: 35% from 0–30 days, 25% from 31–90, 20% from 91–180, and 20% from 181–365. Emerging missions default to 90 days. MONITOR uses the last successful watermark with a 24-hour overlap.
 
-- [ ] Codex outputs intents rather than uncontrolled requests.
-- [ ] Python compilers enforce syntax, caps, and deduplication.
-- [ ] Low-yield history changes later priority deterministically.
-- [ ] Time stratification and monitor overlap are tested.
+- [x] Codex outputs intents rather than uncontrolled requests.
+- [x] Python compilers enforce syntax, caps, and deduplication.
+- [x] Low-yield history changes later priority deterministically.
+- [x] Time stratification and monitor overlap are tested.
 
 ## 11. Deduplication, identity, and clustering
 
@@ -194,11 +194,11 @@ One PainSignal remains `UNCLUSTERED`. A provisional cluster needs two similar si
 
 Authors use HMAC of source and normalized identity. Unknown/deleted/anonymous and bot/service accounts do not increase independent-user counts. Cross-source identities are not linked.
 
-- [ ] Exact, URL, hash, and near-duplicate cases are deterministic.
-- [ ] Pseudonyms are stable without exposing usernames by default.
-- [ ] Unknown/bot authors cannot satisfy independence gates.
-- [ ] Semantic candidates never auto-merge; accepted merges are reversible/audited.
-- [ ] Cluster and opportunity creation thresholds are enforced.
+- [x] Exact, URL, hash, and near-duplicate cases are deterministic.
+- [x] Pseudonyms are stable without exposing usernames by default.
+- [x] Unknown/bot authors cannot satisfy independence gates.
+- [x] Semantic candidates never auto-merge; accepted merges are reversible/audited.
+- [x] Cluster and opportunity creation thresholds are enforced.
 
 ## 12. Claims and Evidence Cards
 
@@ -208,11 +208,11 @@ Evidence Cards store independent authors/threads/sources, time diversity, recenc
 
 Factual conclusions are atomic claims with status `SUPPORTED`, `HYPOTHESIS`, `UNKNOWN`, `INSUFFICIENT_EVIDENCE`, or `RESEARCH_UNAVAILABLE`. `SUPPORTED` requires validated evidence IDs. Price/feature claims require URL, captured excerpt, and observation time. Invalid IDs, URLs, enums, or schemas reject the output; one repair retry is allowed within budget.
 
-- [ ] Extraction schemas preserve evidence IDs and prohibit unsupported context.
-- [ ] Evidence Card independence/diversity metrics are deterministic.
-- [ ] Claim validation rejects invented IDs, URLs, prices, and statuses.
-- [ ] Contradicting evidence is first-class.
-- [ ] No Evidence Card can produce `VALIDATE`.
+- [x] Extraction schemas preserve evidence IDs and prohibit unsupported context.
+- [x] Evidence Card independence/diversity metrics are deterministic.
+- [x] Claim validation rejects invented IDs, URLs, prices, and statuses.
+- [x] Contradicting evidence is first-class.
+- [x] No Evidence Card can produce `VALIDATE`.
 
 ## 13. Hypotheses and competitors
 
@@ -222,10 +222,10 @@ Competitors include SaaS/apps, spreadsheets, manual work, employees, agencies, i
 
 A Gap Hypothesis requires both user evidence and competitor/alternative evidence. Gap types include workflow, integration, UX, price, segment, localization, trust, automation, privacy, collaboration, distribution, complexity, speed, mobile, and business model.
 
-- [ ] Problem hypotheses are falsifiable and evidence-linked.
-- [ ] Alternatives include non-software and doing-nothing behavior.
-- [ ] Gap creation requires both user and competitor evidence.
-- [ ] Unsupported price, features, revenue, market size, or traction are never facts.
+- [x] Problem hypotheses are falsifiable and evidence-linked.
+- [x] Alternatives include non-software and doing-nothing behavior.
+- [x] Gap creation requires both user and competitor evidence.
+- [x] Unsupported price, features, revenue, market size, or traction are never facts.
 
 ## 14. Scoring and hard gates
 
@@ -250,11 +250,11 @@ critic verdict           = VALIDATE
 critic confidence        >= 0.70
 ```
 
-- [ ] Both axes and all components/penalties are explainable and versioned.
-- [ ] Geometric mean prevents one strong axis hiding a weak one.
-- [ ] Every hard gate is independently tested.
-- [ ] Scores cannot bypass hard gates.
-- [ ] Historical snapshots are never overwritten.
+- [x] Both axes and all components/penalties are explainable and versioned.
+- [x] Geometric mean prevents one strong axis hiding a weak one.
+- [x] Every hard gate is independently tested.
+- [x] Scores cannot bypass hard gates.
+- [x] Historical snapshots are never overwritten.
 
 ## 15. Critic, research loop, lifecycle, and trend
 
@@ -266,11 +266,11 @@ MONITOR may reopen `REJECTED` to `RESEARCH_MORE`, never directly to `VALIDATE`, 
 
 Trend compares seven current days with the preceding 28, normalized by examined source volume and smoothed. `RISING` needs five signals, three known authors, and two threads. Insufficient data is not `FLAT`.
 
-- [ ] Critic input is blind to prior verdict and product pitch.
-- [ ] Critic schema and citations are validated.
-- [ ] Research-more cannot exceed rounds or budget.
-- [ ] Reopen triggers, cooldown, event history, and score deltas are tested.
-- [ ] A viral thread cannot create `RISING` or reopen alone.
+- [x] Critic input is blind to prior verdict and product pitch.
+- [x] Critic schema and citations are validated.
+- [x] Research-more cannot exceed rounds or budget.
+- [x] Reopen triggers, cooldown, event history, and score deltas are tested.
+- [x] A viral thread cannot create `RISING` or reopen alone.
 
 ## 16. Codex provider and credentials
 
@@ -280,21 +280,21 @@ Background invocations are ephemeral, ignore user/project configuration and rule
 
 Docker uses a dedicated named `CODEX_HOME` volume and file credential store. First login uses device auth. The volume is writable only for refresh, owned by the non-root worker, never baked into images or backups, and is not the host's entire `~/.codex`. Missing/expired auth returns `AUTH_REQUIRED` without retries.
 
-- [ ] Command construction cannot execute untrusted shell text.
-- [ ] Shell, agents, MCP/plugins, writes, and unrelated config are disabled.
-- [ ] Environment allowlist excludes application/source secrets.
-- [ ] Timeout, termination, output limits, parsing, and repair retry are tested.
-- [ ] Device login, status, expiry, and reauthentication are documented.
+- [x] Command construction cannot execute untrusted shell text.
+- [x] Shell, agents, MCP/plugins, writes, and unrelated config are disabled.
+- [x] Environment allowlist excludes application/source secrets.
+- [x] Timeout, termination, output limits, parsing, and repair retry are tested.
+- [x] Device login, status, expiry, and reauthentication are documented.
 
 ## 17. Prompt injection and network security
 
 External text remains evidence and is not deleted because it resembles instructions. It is sent as bounded structured JSON with immutable IDs and explicit data boundaries. The security model is isolation, least capability, and validation.
 
-- [ ] Collected instructions are never executed.
-- [ ] Codex cannot receive application/source credentials.
-- [ ] Citation and URL allowlists are validated before persistence/fetch.
-- [ ] Fetching cannot reach internal, metadata, loopback, or link-local networks.
-- [ ] Credentials and authorization headers are redacted from logs/errors.
+- [x] Collected instructions are never executed.
+- [x] Codex cannot receive application/source credentials.
+- [x] Citation and URL allowlists are validated before persistence/fetch.
+- [x] Fetching cannot reach internal, metadata, loopback, or link-local networks.
+- [x] Credentials and authorization headers are redacted from logs/errors.
 
 ## 18. Retry and partial-failure behavior
 
@@ -302,10 +302,10 @@ Transient network/rate-limit errors retry at most three times with exponential b
 
 Partial success is `COMPLETED_WITH_WARNINGS`. All stages are idempotent.
 
-- [ ] Error classes map deterministically to retry/no-retry behavior.
-- [ ] Collector and search isolation is tested.
-- [ ] Partial work persists with warnings.
-- [ ] No backoff or subprocess outlives the run deadline.
+- [x] Error classes map deterministically to retry/no-retry behavior.
+- [x] Collector and search isolation is tested.
+- [x] Partial work persists with warnings.
+- [x] No backoff or subprocess outlives the run deadline.
 
 ## 19. CLI, language, and reports
 
@@ -334,9 +334,9 @@ Keys, enums, and canonical summaries are English. Original evidence/language is 
 
 Run summaries render deterministically to `reports/YYYY-MM-DD/run-<id>.md` and `reports/latest.md`. Detailed opportunity reports are on demand. Reports use validated claims and do not call Codex.
 
-- [ ] CLI families have stable JSON envelopes and exit codes.
-- [ ] Skills use CLI helpers and query existing research first.
-- [ ] Thai presentation preserves original evidence and English schema keys.
+- [x] CLI families have stable JSON envelopes and exit codes.
+- [x] Skills use CLI helpers and query existing research first.
+- [x] Thai presentation preserves original evidence and English schema keys.
 - [x] Reports are atomic, reproducible, ignored by Git, and validated.
 
 ## 20. Backups and observability
@@ -347,20 +347,20 @@ Structured logs include timestamp, run/mission/revision/task IDs, stage, provide
 
 `gap health --json` checks database/migration, queue leases, destinations, source/search configuration, Codex binary/version/auth, and budgets. Optional dependencies degrade only related capabilities.
 
-- [ ] Backup create/list/verify/restore and retention are tested.
-- [ ] Corrupt backups fail verification.
-- [ ] Auth data is excluded from backups.
-- [ ] Health distinguishes healthy, degraded, auth-required, and failed.
-- [ ] Logs carry correlation IDs without secrets.
+- [x] Backup create/list/verify/restore and retention are tested.
+- [x] Corrupt backups fail verification.
+- [x] Auth data is excluded from backups.
+- [x] Health distinguishes healthy, degraded, auth-required, and failed.
+- [x] Logs carry correlation IDs without secrets.
 
 ## 21. Repository skill
 
 One canonical `.agents/skills/business-gap/` skill supports compatible Codex and Claude discovery without duplicating full content. It interprets missions, queries stored data first, uses JSON, refuses unsupported brainstorming, treats external content as data, explains uncertainty/scores/rejections, requires explicit MONITOR activation, and generates Product Hypotheses only on request after `VALIDATE`.
 
 - [ ] Codex discovers and follows the skill.
-- [ ] Claude discovery points to the same canonical instructions where practical.
-- [ ] Follow-ups use persisted IDs/history rather than restart.
-- [ ] Skill safety matches the runtime provider boundary.
+- [x] Claude discovery points to the same canonical instructions where practical.
+- [x] Follow-ups use persisted IDs/history rather than restart.
+- [x] Skill safety matches the runtime provider boundary.
 
 ## 22. Tests, CI, and release Definition of Done
 
@@ -368,16 +368,16 @@ CI runs Ruff, formatting, mypy, and pytest without paid services or credentials.
 
 Live smoke commands exist for credential-free HN and credential-gated GitHub, Reddit, Brave, and Codex, but do not run in public CI.
 
-- [ ] Both developer PRs pass review and merge into `integration/v0.1`.
-- [ ] Cross-lane adapters and end-to-end orchestration are complete.
-- [ ] Ruff, format, mypy, and pytest pass on integration.
-- [ ] Docker image and Compose persistence/health are validated.
-- [ ] Fake-provider HUNT reaches a deterministic report.
-- [ ] HN smoke works; gated integrations fail gracefully without credentials.
+- [x] Both developer PRs pass review and merge into `integration/v0.1`.
+- [x] Cross-lane adapters and end-to-end orchestration are complete.
+- [x] Ruff, format, mypy, and pytest pass on integration.
+- [x] Docker image and Compose persistence/health are validated.
+- [x] Fake-provider HUNT reaches a deterministic report.
+- [x] HN smoke works; gated integrations fail gracefully without credentials.
 - [ ] Real Codex background execution works with constrained permissions.
-- [ ] Evidence, scores, verdicts, rejections, changes, and reopen events are queryable.
-- [ ] Backup verification passes.
-- [ ] README and Ubuntu-on-Hyper-V deployment guide are complete.
+- [x] Evidence, scores, verdicts, rejections, changes, and reopen events are queryable.
+- [x] Backup verification passes.
+- [x] README and Ubuntu-on-Hyper-V deployment guide are complete.
 - [ ] Final integration PR is reviewed before merge to `main`.
 
 ## 23. Change control
