@@ -145,6 +145,11 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
             "ck_agent_calls_output_schema_sha256_length",
             "ck_agent_calls_valid_operation",
             "ck_agent_calls_nonempty_output_schema_name",
+            "ck_agent_calls_request_sha256_length",
+            "ck_agent_calls_completed_output_sha256_length",
+            "ck_provider_call_leases_schema_hash_length",
+            "ck_provider_call_leases_request_hash_length",
+            "ck_provider_call_leases_canonical_call_key",
             "ck_raw_signal_revisions_duplicate_group_key_format",
             "ck_opportunity_score_snapshots_evidence_strength_range",
             "ck_opportunity_score_snapshots_opportunity_fit_range",
@@ -160,6 +165,13 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
             "REFERENCES opportunities(id, canonical_problem_id) ON DELETE RESTRICT"
             in constraint_definitions["fk_evidence_cards_opportunity_id_opportunities"]
         )
+        output_hash_constraint = constraint_definitions[
+            "ck_agent_calls_completed_output_sha256_length"
+        ]
+        assert "(output_json IS NULL) = (output_sha256 IS NULL)" in output_hash_constraint
+        assert "octet_length(output_sha256) = 32" in output_hash_constraint
+        bounded_output_constraint = constraint_definitions["ck_agent_calls_bounded_object_output"]
+        assert "octet_length((output_json)::text) <= 32768" in bounded_output_constraint
         assert columns["pain_signals"]["severity"]["nullable"] is False
         assert columns["pain_signals"]["frequency"]["nullable"] is False
         assert columns["raw_signal_revisions"]["domain_revision_id"]["nullable"] is False
@@ -410,12 +422,42 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
                                 operation=operation,
                                 output_schema_name=schema_name,
                                 output_schema_sha256=b"s" * 32,
+                                request_sha256=b"r" * 32,
                                 requested_model="",
                                 effort="medium",
-                                status="SUCCESS",
+                                status="COMPLETED",
                                 duration_ms=1,
                                 repair_attempts=0,
                                 usage={},
+                                output_json={"ok": True},
+                                output_sha256=b"o" * 32,
+                            )
+                        )
+                        await session.flush()
+
+            for status, output_json, output_sha256 in (
+                ("FAILED", None, b"x" * 32),
+                ("COMPLETED", {"ok": True}, None),
+                ("COMPLETED", {"ok": True}, b"short"),
+            ):
+                with pytest.raises(IntegrityError):
+                    async with session.begin_nested():
+                        session.add(
+                            AgentCall(
+                                run_id=run.id,
+                                provider="fake",
+                                operation="extract",
+                                output_schema_name="schema-v1",
+                                output_schema_sha256=b"s" * 32,
+                                request_sha256=b"r" * 32,
+                                requested_model="",
+                                effort="medium",
+                                status=status,
+                                duration_ms=1,
+                                repair_attempts=0,
+                                usage={},
+                                output_json=output_json,
+                                output_sha256=output_sha256,
                             )
                         )
                         await session.flush()
@@ -634,7 +676,7 @@ async def test_reconciliation_migration_transforms_supported_legacy_rows(
             )
         await database.dispose()
 
-        await asyncio.to_thread(command.upgrade, config, "head")
+        await asyncio.to_thread(command.upgrade, config, "4d8f8a2c7b31")
 
         database = Database.from_url(postgres_url)
         async with database.engine.connect() as connection:
@@ -698,6 +740,14 @@ async def test_reconciliation_migration_transforms_supported_legacy_rows(
         assert assessment["competitor_research_status"] == "INCOMPLETE"
         assert card_opportunity == ids["opportunity"]
         await database.dispose()
+
+        with pytest.raises(DBAPIError, match="legacy agent calls lack replay output"):
+            await asyncio.to_thread(command.upgrade, config, "head")
+        database = Database.from_url(postgres_url)
+        async with database.engine.begin() as connection:
+            await connection.execute(text("TRUNCATE agent_calls CASCADE"))
+        await database.dispose()
+        await asyncio.to_thread(command.upgrade, config, "head")
 
         await asyncio.to_thread(command.downgrade, config, "132931969d6b")
         await asyncio.to_thread(command.upgrade, config, "head")

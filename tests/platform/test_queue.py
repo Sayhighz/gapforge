@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import func, select
 
-from gapforge.queue.control import AgentCallLimiter, DurableAgentCallAdmission, RunController
+from gapforge.queue.control import (
+    AgentCallLimiter,
+    DurableAgentCallAdmission,
+    ProviderCallJournal,
+    RunController,
+)
 from gapforge.queue.repository import DurableQueue
 from gapforge.queue.retry import ErrorKind, classify_error, retry_delay_seconds
 from gapforge.storage.database import Database
-from gapforge.storage.models import ResearchRun, ResearchTask
+from gapforge.storage.models import ProviderCallLease, ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
 
 
@@ -51,6 +58,42 @@ async def _finish_run(database: Database, run_id: UUID) -> None:
             run.status = "CANCELLED"
             run.completed_at = datetime.now(UTC)
             await session.commit()
+
+
+async def _provider_call_identity(
+    database: Database,
+    run_id: UUID,
+    *,
+    lease_owner: str,
+) -> ProviderCallJournal:
+    async with database.session() as session:
+        task = ResearchTask(
+            run_id=run_id,
+            task_type="research.run",
+            status="LEASED",
+            priority=1,
+            idempotency_key=f"provider:{run_id}",
+            payload={},
+            checkpoint={},
+            attempt_count=1,
+            max_attempts=3,
+            available_at=datetime.now(UTC),
+            lease_owner=lease_owner,
+            lease_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        session.add(task)
+        await session.commit()
+        return ProviderCallJournal(
+            task_id=task.id,
+            call_id=uuid4(),
+            operation="extract",
+            output_schema_name="provider-test-v1",
+            output_schema_sha256=b"s" * 32,
+            request_sha256=b"r" * 32,
+            provider="fake",
+            requested_model="",
+            effort="low",
+        )
 
 
 async def _create_queued_run(
@@ -612,15 +655,21 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
 ) -> None:
     database = Database.from_url(migrated_postgres_url)
     run = await _create_running_run(database)
+    journal = await _provider_call_identity(
+        database,
+        run.id,
+        lease_owner="worker-provider",
+    )
     started = datetime.now(UTC)
     lease_ids: list[UUID] = []
+    call_ids = [str(uuid4()) for _ in range(3)]
     try:
         for number in (1, 2):
             async with database.session() as session:
                 lease = await DurableAgentCallAdmission(session).acquire(
                     run.id,
-                    call_key=f"call-{number}",
-                    lease_owner=f"worker-{number}",
+                    journal=replace(journal, call_id=UUID(call_ids[number - 1])),
+                    lease_owner="worker-provider",
                     lease_duration=timedelta(seconds=30),
                     now=started,
                 )
@@ -631,8 +680,8 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
         async with database.session() as session:
             denied = await DurableAgentCallAdmission(session).acquire(
                 run.id,
-                call_key="call-3",
-                lease_owner="worker-3",
+                journal=replace(journal, call_id=UUID(call_ids[2])),
+                lease_owner="worker-provider",
                 lease_duration=timedelta(seconds=30),
                 now=started,
             )
@@ -641,13 +690,15 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
         async with database.session() as session:
             reclaimed = await DurableAgentCallAdmission(session).acquire(
                 run.id,
-                call_key="call-3",
-                lease_owner="worker-3",
+                journal=replace(journal, call_id=UUID(call_ids[2])),
+                lease_owner="worker-provider",
                 lease_duration=timedelta(seconds=30),
                 now=started + timedelta(seconds=31),
             )
             assert reclaimed is not None
-            await DurableAgentCallAdmission(session).release(reclaimed.id, lease_owner="worker-3")
+            await DurableAgentCallAdmission(session).release(
+                reclaimed.id, lease_owner="worker-provider"
+            )
             await session.commit()
     finally:
         await _finish_run(database, run.id)
@@ -662,11 +713,12 @@ async def test_provider_call_lease_never_extends_past_run_deadline(
     deadline = started + timedelta(seconds=10)
     database = Database.from_url(migrated_postgres_url)
     run = await _create_running_run(database, deadline_at=deadline)
+    journal = await _provider_call_identity(database, run.id, lease_owner="worker-a")
     try:
         async with database.session() as session:
             lease = await DurableAgentCallAdmission(session).acquire(
                 run.id,
-                call_key="bounded-call",
+                journal=replace(journal, call_id=uuid4()),
                 lease_owner="worker-a",
                 lease_duration=timedelta(minutes=5),
                 now=started,
@@ -677,6 +729,88 @@ async def test_provider_call_lease_never_extends_past_run_deadline(
     finally:
         await _finish_run(database, run.id)
         await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_provider_admission_rejects_foreign_run_and_foreign_owner_tasks(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database)
+    other_run = await _create_queued_run(
+        database,
+        queued_deadline=datetime.now(UTC),
+    )
+    journal = await _provider_call_identity(database, run.id, lease_owner="worker-a")
+    foreign_run_journal = await _provider_call_identity(
+        database,
+        other_run.id,
+        lease_owner="worker-a",
+    )
+    try:
+        async with database.session() as session:
+            with pytest.raises(PermissionError, match="worker-owned leased task"):
+                await DurableAgentCallAdmission(session).acquire(
+                    run.id,
+                    journal=replace(journal, call_id=uuid4()),
+                    lease_owner="worker-b",
+                    lease_duration=timedelta(seconds=30),
+                )
+            await session.rollback()
+        async with database.session() as session:
+            with pytest.raises(PermissionError, match="same run"):
+                await DurableAgentCallAdmission(session).acquire(
+                    run.id,
+                    journal=replace(foreign_run_journal, call_id=uuid4()),
+                    lease_owner="worker-a",
+                    lease_duration=timedelta(seconds=30),
+                )
+            await session.rollback()
+        async with database.session() as session:
+            lease_count = await session.scalar(
+                select(func.count())
+                .select_from(ProviderCallLease)
+                .where(
+                    ProviderCallLease.task_id.in_((journal.task_id, foreign_run_journal.task_id))
+                )
+            )
+        assert int(lease_count or 0) == 0
+    finally:
+        await _finish_run(database, run.id)
+        await _finish_run(database, other_run.id)
+        await database.dispose()
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"operation": ""},
+        {"output_schema_name": "x" * 201},
+        {"output_schema_sha256": b"short"},
+        {"request_sha256": b"short"},
+        {"provider": ""},
+        {"requested_model": "x" * 161},
+        {"effort": ""},
+        {"repair_attempt": 2},
+    ],
+)
+def test_provider_call_journal_rejects_unreconcilable_identity(
+    updates: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "task_id": uuid4(),
+        "call_id": uuid4(),
+        "operation": "extract",
+        "output_schema_name": "provider-test-v1",
+        "output_schema_sha256": b"s" * 32,
+        "request_sha256": b"r" * 32,
+        "provider": "fake",
+        "requested_model": "",
+        "effort": "low",
+    }
+    values.update(updates)
+    with pytest.raises(ValueError, match="provider journal"):
+        ProviderCallJournal(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.postgres

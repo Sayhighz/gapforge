@@ -66,12 +66,19 @@ may correctly return zero `VALIDATE` opportunities.
 
 ## I4 — Provider admission and audit
 
-- [ ] Adapt Lane B agent requests/results to the stable Lane A provider boundary.
-- [ ] Reserve persisted call budget and a durable provider-call lease before every Codex invocation.
-- [ ] Persist one `AgentCall` audit record per subprocess, including explicit repair calls.
-- [ ] Persist semantic operation and request/output schema identity for every agent call.
-- [ ] Enforce remaining run time, output schema, permitted evidence IDs, and no-retry auth failures.
-- [ ] Test repair, malformed output, parallel-call cap, stale lease, and secret exclusion end to end.
+- [x] Adapt Lane B agent requests/results to the stable Lane A provider boundary.
+- [x] Reserve persisted call budget and a durable provider-call lease before every Codex invocation.
+- [x] Persist one `AgentCall` audit record per subprocess, including explicit repair calls.
+- [x] Persist semantic operation and request/output schema identity for every agent call.
+- [x] Enforce remaining run time, output schema, permitted evidence IDs, and no-retry auth failures.
+- [x] Test repair, malformed output, parallel-call cap, stale lease, and secret exclusion end to end.
+
+  Progress: I4 completed and pushed at `c71e087` in draft PR #10. Exact validation:
+  `pytest` 285 passed/1 skipped; Ruff check and format, mypy `src`, Alembic check, and
+  `git diff --check` passed. The replay migration fails closed when pre-release
+  `agent_calls` or `provider_call_leases` exist because their missing request/output identity
+  cannot be reconstructed safely; stop workers, export if needed, and reset those pre-release
+  tables before upgrading.
 
 Acceptance: semantic work cannot bypass durable budgets, concurrency, deadlines, schema validation,
 or provider audit history.

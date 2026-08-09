@@ -41,32 +41,47 @@ class AsyncProcessRunner:
             env=env,
             start_new_session=True,
         )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
-        stdout_task = asyncio.create_task(self._read_bounded(process.stdout, max_output_bytes))
-        stderr_task = asyncio.create_task(self._read_bounded(process.stderr, max_output_bytes))
-        with suppress(BrokenPipeError, ConnectionResetError):
-            process.stdin.write(stdin)
-            await process.stdin.drain()
-        with suppress(BrokenPipeError, ConnectionResetError):
-            process.stdin.close()
-        timed_out = False
+        stdout_task: asyncio.Task[tuple[bytes, bool]] | None = None
+        stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
         try:
-            await asyncio.wait_for(process.wait(), timeout_seconds)
-        except TimeoutError:
-            timed_out = True
-            await self._terminate_group(process, termination_grace_seconds)
-        stdout, stdout_truncated = await stdout_task
-        stderr, stderr_truncated = await stderr_task
-        return ProcessResult(
-            returncode=process.returncode or 0,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
-            timed_out=timed_out,
-        )
+            assert process.stdin is not None
+            assert process.stdout is not None
+            assert process.stderr is not None
+            stdout_task = asyncio.create_task(self._read_bounded(process.stdout, max_output_bytes))
+            stderr_task = asyncio.create_task(self._read_bounded(process.stderr, max_output_bytes))
+            with suppress(BrokenPipeError, ConnectionResetError):
+                process.stdin.write(stdin)
+                await process.stdin.drain()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                process.stdin.close()
+            timed_out = False
+            try:
+                await asyncio.wait_for(process.wait(), timeout_seconds)
+            except TimeoutError:
+                timed_out = True
+                await self._terminate_group(process, termination_grace_seconds)
+            stdout, stdout_truncated = await stdout_task
+            stderr, stderr_truncated = await stderr_task
+            return ProcessResult(
+                returncode=process.returncode or 0,
+                stdout=stdout,
+                stderr=stderr,
+                stdout_truncated=stdout_truncated,
+                stderr_truncated=stderr_truncated,
+                timed_out=timed_out,
+            )
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(self._terminate_group(process, termination_grace_seconds))
+            finally:
+                for reader_task in (stdout_task, stderr_task):
+                    if reader_task is not None and not reader_task.done():
+                        reader_task.cancel()
+                await asyncio.gather(
+                    *(task for task in (stdout_task, stderr_task) if task is not None),
+                    return_exceptions=True,
+                )
+            raise
 
     @staticmethod
     async def _read_bounded(

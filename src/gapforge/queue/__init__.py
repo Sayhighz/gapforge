@@ -4,6 +4,7 @@ from gapforge.queue.control import (
     AgentCallLimiter,
     BudgetDecision,
     DurableAgentCallAdmission,
+    ProviderCallJournal,
     RunController,
 )
 from gapforge.queue.repository import DurableQueue
@@ -15,6 +16,7 @@ __all__ = [
     "DurableAgentCallAdmission",
     "DurableQueue",
     "ErrorKind",
+    "ProviderCallJournal",
     "RetryDecision",
     "RunController",
     "classify_error",
