@@ -58,7 +58,7 @@ from gapforge.storage.models import (
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
 from gapforge.worker import TaskHandlerRegistry, Worker
 
-OBSERVED_AT = datetime(2025, 1, 15, 12, tzinfo=UTC)
+OBSERVED_AT = datetime(2026, 1, 15, 12, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -709,6 +709,25 @@ async def test_production_hunt_is_durable_queryable_and_fail_closed(
         assert len(first["data"]["report"]["opportunities"]) == (0 if empty else 1)
         if not empty:
             opportunity_id = first["data"]["report"]["opportunities"][0]["opportunity_id"]
+            opportunity_show = await _run_cli(
+                "opportunity",
+                "show",
+                opportunity_id,
+                database_url=migrated_postgres_url,
+                reports_dir=reports_dir,
+            )
+            evidence_show = await _run_cli(
+                "evidence",
+                "show",
+                fixture.raw_revision_id,
+                database_url=migrated_postgres_url,
+                reports_dir=reports_dir,
+            )
+            changes = await _run_cli(
+                "changes",
+                database_url=migrated_postgres_url,
+                reports_dir=reports_dir,
+            )
             opportunity_report = await _run_cli(
                 "report",
                 "opportunity",
@@ -720,6 +739,9 @@ async def test_production_hunt_is_durable_queryable_and_fail_closed(
                 opportunity_report["data"]["report"]["opportunity"]["opportunity_id"]
                 == opportunity_id
             )
+            assert opportunity_show["data"]["id"] == opportunity_id
+            assert evidence_show["data"]["id"] == fixture.raw_revision_id
+            assert any(item["run_id"] == str(run_id) for item in changes["data"])
     finally:
         await _terminalize_if_needed(database, run_id, task_id)
         await database.dispose()
