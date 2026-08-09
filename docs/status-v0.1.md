@@ -26,9 +26,13 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `14fe4a2` |
+| Integration | `integration/v0.1` | #4 | active draft | `26859dc` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
+| I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
+| I2 runtime | `agent/integration-runtime` | #9 | reviewed and squash-merged | `4f4fcaf` |
+| I3 evidence pipeline | `agent/integration-evidence-pipeline` | #11 | active draft | `eb2953e` |
+| I4 provider audit | `agent/integration-provider-audit` | #10 | reviewed and squash-merged | `5df58b4` |
 
 GitHub issues:
 
@@ -53,17 +57,24 @@ Completed:
   backup/restore, CI, and independent review passing; PR #5 squash-merged as `14fe4a2`.
 - Post-merge integration baseline passes Ruff, format, strict mypy, diff hygiene, and
   172 tests with one host-only PostgreSQL-client skip at checkpoint `03713c7`.
+- I1 contract/schema reconciliation was independently reviewed and squash-merged as `a5b36b1`.
+- I2 run admission, durable task graph, and finalization were independently reviewed and
+  squash-merged as `f30fc7b`; real `research.run` registration remains deliberately owned by I3.
+- I4 durable provider admission, audit, replay, stale-attempt handling, heartbeat cancellation,
+  repair accounting, and reference/output gates were independently reproduced with 285 passed,
+  1 environment-gated skip, all quality checks, and green CI; PR #10 was squash-merged as
+  `26859dc`.
 
 In progress:
 
-- Cross-lane I1 contract/schema reconciliation and I2 durable runtime assembly are next.
-- Cross-lane recovery work is decomposed in `docs/tasks/integration.md` and issue #7.
+- I3 evidence-pipeline orchestration is active in draft PR #11 and is refreshing onto merged I4.
+- Production handler/adapters, bounded follow-up behavior, and I3 acceptance cases remain open.
 
 Exact next action:
 
-1. Implement/review I1 contract and migration reconciliation.
-2. Implement/review I2 run admission, initial task, worker finalization, and status semantics.
-3. Wire I3-I6 pipeline/adapters/reports, then run I7 verification.
+1. Complete and review I3 orchestration, production handler/adapters, and crash-safe acceptance.
+2. Implement/review I5 persistence/query surfaces and I6 reports/repository skill.
+3. Run I7 integrated verification and I8 release handoff.
 
 ## Recovery rules
 
