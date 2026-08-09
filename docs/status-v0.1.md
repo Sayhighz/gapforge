@@ -26,13 +26,14 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `26859dc` |
+| Integration | `integration/v0.1` | #4 | active draft | `a491d40` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
 | I2 runtime | `agent/integration-runtime` | #9 | reviewed and squash-merged | `4f4fcaf` |
-| I3 evidence pipeline | `agent/integration-evidence-pipeline` | #11 | active draft | `eb2953e` |
+| I3 evidence pipeline | `agent/integration-evidence-pipeline` | #11 | reviewed and squash-merged | `b026074` |
 | I4 provider audit | `agent/integration-provider-audit` | #10 | reviewed and squash-merged | `5df58b4` |
+| I5 persistence surfaces | `agent/integration-persistence-surfaces` | #12 | active draft | `c0d4ea7` |
 
 GitHub issues:
 
@@ -64,16 +65,21 @@ Completed:
   repair accounting, and reference/output gates were independently reproduced with 285 passed,
   1 environment-gated skip, all quality checks, and green CI; PR #10 was squash-merged as
   `26859dc`.
+- I3 durable evidence orchestration, production handler registration, bounded R1/R2 execution,
+  exact target lineage, conservative external-call admission, per-source isolation, immutable
+  timestamps, and Python-owned capture identity were independently reproduced with 342 passed,
+  1 environment-gated skip and green container backup; PR #11 was squash-merged as `a491d40`.
 
 In progress:
 
-- I3 evidence-pipeline orchestration is active in draft PR #11 and is refreshing onto merged I4.
-- Production handler/adapters, bounded follow-up behavior, and I3 acceptance cases remain open.
+- I5 persistence/query surfaces are active in draft PR #12 and are refreshing onto merged I3.
+- Immutable per-run final snapshot/query semantics and the production artifact-writer seam are
+  under final review before I5 can merge.
 
 Exact next action:
 
-1. Complete and review I3 orchestration, production handler/adapters, and crash-safe acceptance.
-2. Implement/review I5 persistence/query surfaces and I6 reports/repository skill.
+1. Complete and review I5 persistence/query surfaces on the merged I3 seam.
+2. Implement/review I6 reports and repository skill.
 3. Run I7 integrated verification and I8 release handoff.
 
 ## Recovery rules
