@@ -59,6 +59,7 @@ class TaskStatus(StrEnum):
     LEASED = "LEASED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class EpistemicStatus(StrEnum):
@@ -688,6 +689,17 @@ class AgentEffort(StrEnum):
     HIGH = "high"
 
 
+class SemanticOperation(StrEnum):
+    QUERY_PLAN = "QUERY_PLAN"
+    EXTRACT = "EXTRACT"
+    RELEVANCE = "RELEVANCE"
+    CLUSTER = "CLUSTER"
+    HYPOTHESIS = "HYPOTHESIS"
+    GAP = "GAP"
+    CRITIC = "CRITIC"
+    DEEP_RESEARCH = "DEEP_RESEARCH"
+
+
 class AgentStatus(StrEnum):
     COMPLETED = "COMPLETED"
     INVALID_OUTPUT = "INVALID_OUTPUT"
@@ -698,15 +710,7 @@ class AgentStatus(StrEnum):
 
 class AgentRequest(Contract):
     call_id: Identifier
-    task: Literal[
-        "EXTRACT",
-        "RELEVANCE",
-        "CLUSTER",
-        "HYPOTHESIS",
-        "GAP",
-        "CRITIC",
-        "DEEP_RESEARCH",
-    ]
+    task: SemanticOperation
     effort: AgentEffort
     input_json: dict[str, Any] = Field(max_length=100)
     permitted_evidence_ids: tuple[Identifier, ...] = Field(max_length=500)
@@ -722,13 +726,14 @@ class AgentRequest(Contract):
     @model_validator(mode="after")
     def effort_matches_task(self) -> AgentRequest:
         expected = {
-            "EXTRACT": AgentEffort.LOW,
-            "RELEVANCE": AgentEffort.LOW,
-            "CLUSTER": AgentEffort.MEDIUM,
-            "HYPOTHESIS": AgentEffort.MEDIUM,
-            "GAP": AgentEffort.MEDIUM,
-            "CRITIC": AgentEffort.MEDIUM,
-            "DEEP_RESEARCH": AgentEffort.HIGH,
+            SemanticOperation.QUERY_PLAN: AgentEffort.MEDIUM,
+            SemanticOperation.EXTRACT: AgentEffort.LOW,
+            SemanticOperation.RELEVANCE: AgentEffort.LOW,
+            SemanticOperation.CLUSTER: AgentEffort.MEDIUM,
+            SemanticOperation.HYPOTHESIS: AgentEffort.MEDIUM,
+            SemanticOperation.GAP: AgentEffort.MEDIUM,
+            SemanticOperation.CRITIC: AgentEffort.MEDIUM,
+            SemanticOperation.DEEP_RESEARCH: AgentEffort.HIGH,
         }
         if self.effort is not expected[self.task]:
             raise ValueError("agent effort does not match the bounded task policy")
