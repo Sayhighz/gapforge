@@ -31,8 +31,10 @@ research module depends on a database session.
 
 - [ ] Make `gap hunt` and `gap monitor --once` atomically create an idempotent root task with each queued run.
 - [ ] Promote eligible queued runs through `RunController` while preserving global RUNNING exclusivity.
+- [ ] Start the configured run-duration clock at the `QUEUED` to `RUNNING` transition, not while waiting in the queue.
 - [ ] Register real worker handlers; remove the empty production handler registry.
 - [ ] Finalize runs only after their durable task graph is terminal, preserving warnings and checkpoints.
+- [ ] Map authentication and total/permanent handler failure to `AUTH_REQUIRED`/`FAILED`; use `COMPLETED_WITH_WARNINGS` only when useful partial work survived.
 - [ ] Test concurrent admission, duplicate scheduling, restart, lease loss, and deadline exhaustion.
 
 Acceptance: a queued HUNT is structurally reachable by a worker and resumes safely after process
@@ -90,6 +92,7 @@ can inspect it after a fresh process starts.
 - [ ] Test hard-gate refusal, zero-opportunity success, partial-source completion, and crash resume.
 - [ ] Build both target architectures where available and validate Compose migration, health, persistence, auth volume, and backup restore.
 - [ ] Run credential-free HN smoke; prove gated GitHub, Reddit, Brave, and Codex integrations fail gracefully without credentials.
+- [ ] Load manual-smoke credentials from a protected post-checkout source and execute bounded real calls from a trusted ref; do not rely on an untracked `.env` surviving checkout.
 
 Acceptance: all public CI checks are credential-free and every live integration remains an explicit,
 non-public smoke command.
