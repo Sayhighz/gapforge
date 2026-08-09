@@ -244,6 +244,39 @@ async def test_budget_exhaustion_checkpoints_without_incrementing(
 
 
 @pytest.mark.postgres
+async def test_budget_consumption_rejects_terminal_run_without_overwriting_status(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database)
+    terminal_time = datetime.now(UTC)
+    async with database.session() as session:
+        persisted = await session.get(ResearchRun, run.id)
+        assert persisted is not None
+        persisted.status = "CANCELLED"
+        persisted.completed_at = terminal_time
+        persisted.deadline_at = terminal_time - timedelta(seconds=1)
+        await session.commit()
+    try:
+        async with database.session() as session:
+            with pytest.raises(ValueError, match="status CANCELLED"):
+                await RunController(session).consume_budget(
+                    run.id,
+                    counter="agent_calls",
+                    limit_key="max_agent_calls_per_run",
+                    now=terminal_time,
+                )
+            await session.rollback()
+        async with database.session() as session:
+            persisted = await session.get(ResearchRun, run.id)
+            assert persisted is not None
+            assert persisted.status == "CANCELLED"
+            assert persisted.budget_used == {"agent_calls": 0}
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
 async def test_deadline_prevents_claim_and_marks_run_exhausted(
     migrated_postgres_url: str,
 ) -> None:
@@ -267,14 +300,11 @@ async def test_deadline_prevents_claim_and_marks_run_exhausted(
                 now=deadline + timedelta(seconds=1),
             )
             assert claimed is None
-            decision = await RunController(session).consume_budget(
-                run.id,
-                counter="agent_calls",
-                limit_key="max_agent_calls_per_run",
-                now=deadline + timedelta(seconds=1),
-            )
             await session.commit()
-        assert decision.allowed is False
+        async with database.session() as session:
+            persisted = await session.get(ResearchRun, run.id)
+            assert persisted is not None
+            assert persisted.status == "BUDGET_EXHAUSTED"
     finally:
         await database.dispose()
 
@@ -406,6 +436,55 @@ async def test_completion_one_millisecond_after_deadline_cannot_succeed(
             assert persisted_task.status == "PENDING"
             assert persisted_task.result is None
             assert persisted_task.completed_at is None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_cancelled_run_rejects_stale_heartbeat_without_status_overwrite(
+    migrated_postgres_url: str,
+) -> None:
+    started = datetime.now(UTC)
+    deadline = started + timedelta(seconds=10)
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database, deadline_at=deadline)
+    try:
+        async with database.session() as session:
+            task, _ = await DurableQueue(session).enqueue(
+                run_id=run.id,
+                task_type="extract",
+                idempotency_key="cancelled-run-heartbeat",
+                payload={},
+                available_at=started,
+            )
+            await session.commit()
+        async with database.session() as session:
+            claimed = await DurableQueue(session).claim(
+                worker_id="worker-a",
+                lease_duration=timedelta(minutes=5),
+                now=started,
+            )
+            assert claimed is not None
+            await session.commit()
+        async with database.session() as session:
+            persisted_run = await session.get(ResearchRun, run.id)
+            assert persisted_run is not None
+            persisted_run.status = "CANCELLED"
+            persisted_run.completed_at = started + timedelta(seconds=1)
+            await session.commit()
+        async with database.session() as session:
+            with pytest.raises(PermissionError, match="no longer active"):
+                await DurableQueue(session).renew_lease(
+                    task.id,
+                    worker_id="worker-a",
+                    lease_duration=timedelta(minutes=5),
+                    now=deadline + timedelta(milliseconds=1),
+                )
+            await session.rollback()
+        async with database.session() as session:
+            persisted_run = await session.get(ResearchRun, run.id)
+            assert persisted_run is not None
+            assert persisted_run.status == "CANCELLED"
     finally:
         await database.dispose()
 

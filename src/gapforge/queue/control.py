@@ -53,6 +53,8 @@ class RunController:
             raise ValueError("budget amount must be positive")
         run = await self._locked_run(run_id)
         current_time = now or datetime.now(UTC)
+        if run.status != "RUNNING":
+            raise ValueError(f"cannot consume budget for run in status {run.status}")
         limit = int(run.budget_limits[limit_key])
         used = int(run.budget_used.get(counter, 0))
         if run.deadline_at <= current_time or used + amount > limit:

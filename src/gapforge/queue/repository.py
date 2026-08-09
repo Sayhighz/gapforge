@@ -204,6 +204,8 @@ class DurableQueue:
         )
         if run is None:
             raise RuntimeError("task run disappeared during renewal")
+        if run.status != "RUNNING":
+            raise PermissionError("task run is no longer active")
         if run.deadline_at <= now:
             run.status = "BUDGET_EXHAUSTED"
             run.completed_at = now
@@ -217,8 +219,6 @@ class DurableQueue:
             task.lease_expires_at = None
             await self.session.flush()
             return False
-        if run.status != "RUNNING":
-            raise PermissionError("task run is no longer active")
         if task.lease_expires_at is None or task.lease_expires_at <= now:
             raise PermissionError("task lease has expired")
         task.lease_expires_at = min(now + lease_duration, run.deadline_at)
