@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from gapforge.cli import app
 from gapforge.storage.database import Database
-from gapforge.storage.models import ResearchRun
+from gapforge.storage.models import ResearchRun, ResearchTask
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
 
 runner = CliRunner()
@@ -106,7 +106,9 @@ def test_hunt_and_run_inspection_use_stable_json(cli_database_url: str) -> None:
 
     shown, exit_code, _ = _invoke_json(["run", "show", str(hunt["data"]["id"])])
     assert exit_code == 0
-    assert shown["data"]["tasks"] == []
+    assert len(shown["data"]["tasks"]) == 1
+    assert shown["data"]["tasks"][0]["task_type"] == "research.run"
+    assert shown["data"]["tasks"][0]["status"] == "PENDING"
 
 
 @pytest.mark.postgres
@@ -157,7 +159,17 @@ async def test_monitor_conflict_uses_savepoint_and_reports_real_queues(
                 .select_from(ResearchRun)
                 .where(ResearchRun.mission_revision_id.in_(revision_ids))
             )
+            root_tasks = await session.scalar(
+                select(func.count())
+                .select_from(ResearchTask)
+                .join(ResearchRun, ResearchRun.id == ResearchTask.run_id)
+                .where(
+                    ResearchRun.mission_revision_id.in_((revision_ids[0], revision_ids[2])),
+                    ResearchTask.task_type == "research.run",
+                )
+            )
         assert persisted == 3
+        assert root_tasks == 2
     finally:
         await database.dispose()
 

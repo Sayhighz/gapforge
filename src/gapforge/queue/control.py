@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gapforge.storage.models import ProviderCallLease, ResearchRun, ResearchTask
+
+_RUN_ADMISSION_LOCK_KEY = 0x474150464F524745  # "GAPFORGE", stable signed bigint
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,46 @@ class RunController:
             run.completed_at = start_time
         await self.session.flush()
         return run
+
+    async def admit_next(
+        self,
+        *,
+        allowed_task_types: frozenset[str],
+        now: datetime | None = None,
+    ) -> ResearchRun | None:
+        """Serialize global admission and start only a supported pending root graph."""
+
+        if not allowed_task_types:
+            return None
+        admission_time = now or datetime.now(UTC)
+        lock_acquired = await self.session.scalar(
+            select(func.pg_try_advisory_xact_lock(_RUN_ADMISSION_LOCK_KEY))
+        )
+        if not lock_acquired:
+            return None
+        active_run_id = await self.session.scalar(
+            select(ResearchRun.id).where(ResearchRun.status == "RUNNING").limit(1)
+        )
+        if active_run_id is not None:
+            return None
+        supported_work_exists = exists(
+            select(ResearchTask.id).where(
+                ResearchTask.run_id == ResearchRun.id,
+                ResearchTask.status == "PENDING",
+                ResearchTask.available_at <= admission_time,
+                ResearchTask.task_type.in_(allowed_task_types),
+            )
+        )
+        candidate = await self.session.scalar(
+            select(ResearchRun)
+            .where(ResearchRun.status == "QUEUED", supported_work_exists)
+            .order_by(ResearchRun.priority, ResearchRun.created_at, ResearchRun.id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if candidate is None:
+            return None
+        return await self.start(candidate.id, now=admission_time)
 
     async def consume_budget(
         self,

@@ -7,7 +7,7 @@ import json
 import socket
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any
@@ -22,6 +22,7 @@ from gapforge.backup import BackupError, BackupService
 from gapforge.config import AgentProviderName, Settings
 from gapforge.health import HealthService
 from gapforge.providers.codex_cli import CodexCliProvider
+from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.storage.admin import execute_read_only_sql
 from gapforge.storage.database import Database
 from gapforge.storage.models import (
@@ -393,21 +394,18 @@ def hunt(
                     raise CliError("NOT_FOUND", "mission not found", exit_code=3)
                 if mission.status == "ARCHIVED":
                     raise CliError("INVALID_STATE", "archived mission cannot hunt", exit_code=4)
-                run = ResearchRun(
-                    mission_revision_id=revision.id,
-                    mode="HUNT",
-                    status="QUEUED",
-                    priority=0,
-                    deadline_at=datetime.now(UTC)
-                    + timedelta(minutes=settings.max_run_duration_minutes),
-                    budget_limits=settings.budget_snapshot(),
-                    budget_used={},
-                    warnings=[],
-                    last_checkpoint={},
+                if uow.session is None:
+                    raise RuntimeError("unit of work session unavailable")
+                scheduled = await RunScheduler(uow.session).schedule(
+                    request=RunScheduleRequest(
+                        mission_revision_id=revision.id,
+                        mode="HUNT",
+                        priority=0,
+                        budget_limits=settings.budget_snapshot(),
+                    ),
                 )
-                await uow.runs.add(run)
                 await uow.commit()
-                return _run_data(run)
+                return _run_data(scheduled.run)
         finally:
             await database.dispose()
 
@@ -438,26 +436,18 @@ def monitor(
                     revision = await uow.missions.latest_revision(mission.id)
                     if revision is None:
                         continue
-                    run = ResearchRun(
-                        mission_revision_id=revision.id,
-                        mode="MONITOR",
-                        status="QUEUED",
-                        priority=100,
-                        deadline_at=datetime.now(UTC)
-                        + timedelta(minutes=settings.max_run_duration_minutes),
-                        budget_limits=settings.budget_snapshot(),
-                        budget_used={},
-                        warnings=[],
-                        last_checkpoint={},
+                    scheduled = await RunScheduler(session).schedule(
+                        request=RunScheduleRequest(
+                            mission_revision_id=revision.id,
+                            mode="MONITOR",
+                            priority=100,
+                            budget_limits=settings.budget_snapshot(),
+                        ),
                     )
-                    try:
-                        async with session.begin_nested():
-                            session.add(run)
-                            await session.flush()
-                    except IntegrityError:
+                    if not scheduled.created:
                         warnings.append(f"mission {mission.id} already has an active revision run")
                         continue
-                    queued.append(_run_data(run))
+                    queued.append(_run_data(scheduled.run))
                 await uow.commit()
             return CommandOutcome({"queued": queued}, tuple(warnings))
         finally:
