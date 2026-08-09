@@ -127,3 +127,96 @@ async def test_worker_classifies_handler_exception_and_releases_lease(
     finally:
         await _cancel_run(database, run.id)
         await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_deadline_cancels_handler_and_preserves_pending_task(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    run, task = await _create_worker_task(database)
+    async with database.session() as session:
+        persisted_run = await session.get(ResearchRun, run.id)
+        assert persisted_run is not None
+        persisted_run.deadline_at = datetime.now(UTC) + timedelta(seconds=0.08)
+        await session.commit()
+    cancelled = asyncio.Event()
+
+    async def handler(_task: ResearchTask) -> dict[str, object]:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"unexpected": True}
+
+    worker = Worker(
+        database,
+        worker_id="worker-deadline",
+        handlers={"slow": handler},
+        lease_duration=timedelta(seconds=1),
+        heartbeat_interval_seconds=0.02,
+    )
+    try:
+        assert await worker.run_once() is True
+        assert cancelled.is_set()
+        async with database.session() as session:
+            persisted_run = await session.get(ResearchRun, run.id)
+            persisted_task = await session.get(ResearchTask, task.id)
+            assert persisted_run is not None
+            assert persisted_task is not None
+            assert persisted_run.status == "BUDGET_EXHAUSTED"
+            assert persisted_run.last_checkpoint["expired_by"] == "worker_heartbeat"
+            assert persisted_task.status == "PENDING"
+            assert persisted_task.lease_owner is None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_worker_lost_lease_does_not_mutate_as_stale_owner(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    run, task = await _create_worker_task(database)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def handler(_task: ResearchTask) -> dict[str, object]:
+        started.set()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"unexpected": True}
+
+    worker = Worker(
+        database,
+        worker_id="worker-a",
+        handlers={"slow": handler},
+        lease_duration=timedelta(seconds=1),
+        heartbeat_interval_seconds=0.05,
+    )
+    try:
+        work = asyncio.create_task(worker.run_once())
+        await started.wait()
+        async with database.session() as session:
+            persisted = await session.get(ResearchTask, task.id)
+            assert persisted is not None
+            persisted.lease_owner = "worker-b"
+            await session.commit()
+        assert await work is True
+        assert cancelled.is_set()
+        async with database.session() as session:
+            persisted = await session.get(ResearchTask, task.id)
+            assert persisted is not None
+            assert persisted.status == "LEASED"
+            assert persisted.lease_owner == "worker-b"
+            persisted.status = "PENDING"
+            persisted.lease_owner = None
+            persisted.lease_expires_at = None
+            await session.commit()
+    finally:
+        await _cancel_run(database, run.id)
+        await database.dispose()

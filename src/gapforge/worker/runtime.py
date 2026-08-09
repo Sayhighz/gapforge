@@ -58,13 +58,24 @@ class Worker:
                 )
                 if done:
                     break
-                async with self.database.session() as session:
-                    await DurableQueue(session).renew_lease(
-                        task.id,
-                        worker_id=self.worker_id,
-                        lease_duration=self.lease_duration,
-                    )
-                    await session.commit()
+                try:
+                    async with self.database.session() as session:
+                        renewed = await DurableQueue(session).renew_lease(
+                            task.id,
+                            worker_id=self.worker_id,
+                            lease_duration=self.lease_duration,
+                        )
+                        await session.commit()
+                except PermissionError:
+                    handler_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await handler_task
+                    return True
+                if renewed is None:
+                    handler_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await handler_task
+                    return True
             result = await handler_task
         except Exception as error:
             if not handler_task.done():

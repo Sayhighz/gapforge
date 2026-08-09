@@ -13,6 +13,8 @@ from gapforge.storage.database import Database
         "SELECT 1; SELECT 2",
         "SELECT 1 -- hidden mutation",
         "SELECT pg_terminate_backend(pg_backend_pid())",
+        'SELECT "pg_terminate_backend"(pg_backend_pid())',
+        "SELECT $$SELECT pg_terminate_backend(1)$$",
         "SELECT nextval('dangerous_sequence')",
         "SELECT lo_unlink(1)",
         "SELECT public.user_defined_function()",

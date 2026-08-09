@@ -63,6 +63,8 @@ def validate_read_only_sql(query: str) -> str:
         raise ValueError("query cannot be empty")
     if len(normalized.encode()) > 10_000:
         raise ValueError("query exceeds 10 KB")
+    if '"' in normalized or "$" in normalized:
+        raise ValueError("quoted identifiers and dollar syntax are not allowed")
     if ";" in normalized or "--" in normalized or "/*" in normalized or "*/" in normalized:
         raise ValueError("comments and multiple statements are not allowed")
     if not re.match(r"^select\b", normalized, re.IGNORECASE):

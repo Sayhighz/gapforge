@@ -123,7 +123,12 @@ class DurableQueue:
             return None
         task.status = "LEASED"
         task.lease_owner = worker_id
-        task.lease_expires_at = claim_time + lease_duration
+        run_deadline = await self.session.scalar(
+            select(ResearchRun.deadline_at).where(ResearchRun.id == task.run_id)
+        )
+        if run_deadline is None:
+            raise RuntimeError("task run disappeared during claim")
+        task.lease_expires_at = min(claim_time + lease_duration, run_deadline)
         task.attempt_count += 1
         await self.session.flush()
         return task
@@ -167,9 +172,28 @@ class DurableQueue:
         worker_id: str,
         lease_duration: timedelta,
         now: datetime | None = None,
-    ) -> ResearchTask:
+    ) -> ResearchTask | None:
         task = await self._leased_by(task_id, worker_id)
-        task.lease_expires_at = (now or datetime.now(UTC)) + lease_duration
+        renewal_time = now or datetime.now(UTC)
+        run = await self.session.scalar(
+            select(ResearchRun).where(ResearchRun.id == task.run_id).with_for_update()
+        )
+        if run is None:
+            raise RuntimeError("task run disappeared during renewal")
+        if run.deadline_at <= renewal_time:
+            run.status = "BUDGET_EXHAUSTED"
+            run.completed_at = renewal_time
+            run.last_checkpoint = {
+                **run.last_checkpoint,
+                "reason": "deadline",
+                "expired_by": "worker_heartbeat",
+            }
+            task.status = "PENDING"
+            task.lease_owner = None
+            task.lease_expires_at = None
+            await self.session.flush()
+            return None
+        task.lease_expires_at = min(renewal_time + lease_duration, run.deadline_at)
         await self.session.flush()
         return task
 

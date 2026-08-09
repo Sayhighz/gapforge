@@ -280,6 +280,38 @@ async def test_deadline_prevents_claim_and_marks_run_exhausted(
 
 
 @pytest.mark.postgres
+async def test_task_lease_never_extends_past_run_deadline(
+    migrated_postgres_url: str,
+) -> None:
+    started = datetime.now(UTC)
+    deadline = started + timedelta(seconds=10)
+    database = Database.from_url(migrated_postgres_url)
+    run = await _create_running_run(database, deadline_at=deadline)
+    try:
+        async with database.session() as session:
+            await DurableQueue(session).enqueue(
+                run_id=run.id,
+                task_type="collect",
+                idempotency_key="bounded-lease",
+                payload={},
+                available_at=started,
+            )
+            await session.commit()
+        async with database.session() as session:
+            task = await DurableQueue(session).claim(
+                worker_id="worker-a",
+                lease_duration=timedelta(minutes=5),
+                now=started,
+            )
+            assert task is not None
+            assert task.lease_expires_at == deadline
+            await session.rollback()
+    finally:
+        await _finish_run(database, run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
 async def test_queue_poll_expires_overdue_run_with_pending_work(
     migrated_postgres_url: str,
 ) -> None:
