@@ -19,14 +19,14 @@ This is the first file to read after interruption. It records only reviewed/push
 - [x] Lane B PR reviewed and merged to integration.
 - [x] Cross-lane integration complete.
 - [x] Full CI and Docker validation complete.
-- [ ] Final integration PR reviewed and merged to `main`.
+- [x] Final integration PR reviewed and merged to `main`.
 
 ## Active branches and PRs
 
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | full-diff review complete | `e93791f` |
+| Integration | `integration/v0.1` | #4 | reviewed and squash-merged | `2767627` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
@@ -40,9 +40,9 @@ This is the first file to read after interruption. It records only reviewed/push
 
 GitHub issues:
 
-- Lane A: #2 — platform, persistence, Codex provider, and operations.
+- Lane A: #2 — platform, persistence, Codex provider, and operations (closed after merge).
 - Lane B: #3 — collectors, evidence pipeline, scoring, critic, and reports (closed after merge).
-- Integration: #7 — end-to-end research runtime and release verification.
+- Integration: #7 — end-to-end research runtime and release verification (closed after release).
 
 ## Current checkpoint
 
@@ -103,21 +103,24 @@ Completed:
   provider/network boundaries, generated-file and secret hygiene, and full-range whitespace.
   No blocking finding remained. PR-event Quality run `31304612051` passed 414 tests with one
   environment-gated skip plus all required Python, container-backup, and native arm64 checks.
+- Final review checkpoint `2767627` passed PR-event Quality run `31304736066`: 414 tests with one
+  environment-gated skip plus all required Python, container-backup, and native arm64 checks. PR #4
+  was then marked ready and squash-merged through protected `main` as release commit `9d13a14`.
+  Integration issue #7 was closed after verifying the merge and retained branch protection.
 
-In progress:
+Post-release operational gates:
 
-- Final review checkpoint CI and merge of integration PR #4 into protected `main`.
-- The protected credentialed smoke remains a post-`main` operational gate because the trusted
-  workflow intentionally hard-checks out protected `main`; no self-hosted runner or
-  `platform-smoke` environment exists yet.
+- The protected credentialed smoke has not run because no self-hosted runner or `platform-smoke`
+  environment exists yet.
+- Trusted live Codex discovery/following of the repository skill has not been demonstrated.
 
 Exact next action:
 
-1. Wait for the final review-checkpoint required checks, then mark PR #4 ready.
-2. Merge the reviewed branch into protected `main` only if all required checks remain green.
-3. Provision the external runner/environment/auth prerequisites before dispatching the protected
+1. Provision the external runner/environment/auth prerequisites before dispatching the protected
    credentialed source/Codex smoke; record any real result in a follow-up PR without inventing an
    execution record.
+2. If a trusted live Codex session follows the repository skill, record that evidence in the same
+   follow-up process; keep both master gates open until their executions actually occur.
 
 ## Recovery rules
 

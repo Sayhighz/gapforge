@@ -181,7 +181,7 @@ non-public smoke command.
 - [x] Update `docs/status-v0.1.md`, this checklist, README, and Ubuntu-on-Hyper-V deployment guide.
 - [x] Record exact commands/results, remaining limitations, and security boundaries in PR #4.
 - [x] Review the complete `integration/v0.1...main` diff before marking PR #4 ready.
-- [ ] Merge only after the final integration review is clean and close the lane issues.
+- [x] Merge only after the final integration review is clean and close the lane issues.
 
 Progress: PR #15 was independently reviewed and squash-merged as `21bef48`; docs-head Quality run
 `31304363528` is green with Ruff, formatting across 132 files, strict mypy across 66 source files,
@@ -190,18 +190,16 @@ native arm64. The integration lead updated the master checklist, status, PR #4 e
 strict `main` branch protection. The final audit covered 148 changed files, linear Alembic history,
 the locked dependency/container/workflow surfaces, provider/network boundaries, generated/secret
 hygiene, and full-range whitespace; PR-event run `31304612051` passed all required jobs at
-`e93791f`. Live Codex skill-following, protected credentialed source/Codex execution, and merge
-remain deliberately open.
+`e93791f`. Final review checkpoint `2767627` passed run `31304736066`; PR #4 was squash-merged as
+protected `main` commit `9d13a14`, and integration issue #7 was closed. Live Codex skill-following
+and protected credentialed source/Codex execution remain deliberately open.
 
 ## Resume note
 
-Current state: I8 documentation PR #15 is reviewed and merged as `21bef48`; the integration lead has
-applied the evidence-backed master/status checkpoint and exact PR #4 handoff. `main` now has strict
-required Quality checks and PR-only protection. The independent full-diff review is complete with
-no blocking finding. The protected credentialed live-call execution record and final merge remain
-pending.
+Current state: GapForge v0.1 is released on protected `main` at `9d13a14`; PR #4 is merged and issues
+#2, #3, and #7 are closed. The protected credentialed live-call and trusted Codex skill-following
+records remain pending because the external runner/environment/auth prerequisites do not exist.
 
-Exact next action: wait for the final review-checkpoint Quality run, then mark PR #4 ready and merge
-only if all required checks stay green. Credentialed dispatch remains prohibited until the required
-self-hosted runner/environment/auth prerequisites exist; capture any later bounded smoke in a
-follow-up checkpoint/PR.
+Exact next action: deploy from reviewed `main` by following the Hyper-V/Ubuntu guide. Credentialed
+dispatch remains prohibited until the required self-hosted runner/environment/auth prerequisites
+exist; capture any later bounded smoke or trusted live skill-following evidence in a follow-up PR.
