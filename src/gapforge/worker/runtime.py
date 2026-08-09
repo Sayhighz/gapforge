@@ -3,19 +3,54 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import timedelta
 from types import MappingProxyType
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from gapforge.queue.control import RunController
 from gapforge.queue.repository import DurableQueue
 from gapforge.queue.retry import ErrorKind, classify_error, classify_exception
 from gapforge.storage.database import Database
 from gapforge.storage.models import ResearchTask
+
+_MAX_RESULT_BYTES = 1_000_000
+_MAX_RESULT_DEPTH = 32
+_MAX_RESULT_KEYS = 10_000
+
+
+def _validate_json_value(value: object, *, depth: int, key_count: list[int]) -> None:
+    if depth > _MAX_RESULT_DEPTH:
+        raise ValueError("task result exceeds maximum nesting depth")
+    if value is None or isinstance(value, (bool, str)):
+        return
+    if isinstance(value, int):
+        if not -(2**63) <= value < 2**63:
+            raise ValueError("task result integer is outside the signed 64-bit range")
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("task result numbers must be finite")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_json_value(item, depth=depth + 1, key_count=key_count)
+        return
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("task result object keys must be strings")
+        key_count[0] += len(value)
+        if key_count[0] > _MAX_RESULT_KEYS:
+            raise ValueError("task result exceeds maximum object key count")
+        for item in value.values():
+            _validate_json_value(item, depth=depth + 1, key_count=key_count)
+        return
+    raise ValueError(f"task result contains non-JSON value {type(value).__name__}")
 
 
 class ResearchTaskHandler(Protocol):
@@ -29,6 +64,22 @@ class TaskHandlerResult(BaseModel):
 
     payload: dict[str, object] = Field(default_factory=dict)
     useful_artifact: StrictBool = False
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def validate_payload(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise ValueError("task result payload must be an object")
+        _validate_json_value(value, depth=0, key_count=[0])
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        if len(encoded) > _MAX_RESULT_BYTES:
+            raise ValueError("task result exceeds maximum serialized size")
+        return value
 
 
 class TaskHandlerError(Exception):
@@ -49,6 +100,8 @@ class TaskHandlerRegistry:
         copied = dict(handlers or {})
         if any(not task_type.strip() for task_type in copied):
             raise ValueError("task handler types must be non-empty")
+        if any(not callable(handler) for handler in copied.values()):
+            raise ValueError("task handlers must be callable")
         self._handlers = MappingProxyType(copied)
 
     @property
@@ -127,6 +180,11 @@ class Worker:
                         await handler_task
                     return True
             raw_result = await handler_task
+            result = (
+                raw_result
+                if isinstance(raw_result, TaskHandlerResult)
+                else TaskHandlerResult.model_validate({"payload": raw_result})
+            )
         except Exception as error:
             if not handler_task.done():
                 handler_task.cancel()
@@ -152,11 +210,6 @@ class Worker:
                 await RunController(session).finalize_if_idle(task.run_id)
                 await session.commit()
             return True
-        result = (
-            raw_result
-            if isinstance(raw_result, TaskHandlerResult)
-            else TaskHandlerResult(payload=raw_result)
-        )
         async with self.database.session() as session:
             await DurableQueue(session).succeed(
                 task.id,

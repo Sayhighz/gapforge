@@ -6,13 +6,14 @@ from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from gapforge.queue.control import RunController
 from gapforge.queue.repository import DurableQueue
 from gapforge.queue.retry import ErrorKind
 from gapforge.runtime import (
     ROOT_TASK_TYPE,
+    InvalidRunGraphError,
     RunBudgetLimits,
     RunScheduler,
     RunScheduleRequest,
@@ -81,6 +82,9 @@ def test_run_budget_boundary_matches_settings_invariants(overrides: dict[str, in
     [
         {"payload": []},
         {"payload": {}, "useful_artifact": "yes"},
+        {"payload": {"unsupported": {"set"}}},
+        {"payload": {"not_finite": float("nan")}},
+        pytest.param({"payload": {"too_large": "x" * 1_000_001}}, id="oversized"),
     ],
 )
 def test_task_handler_result_enforces_payload_and_useful_signal(
@@ -88,6 +92,11 @@ def test_task_handler_result_enforces_payload_and_useful_signal(
 ) -> None:
     with pytest.raises(ValidationError):
         TaskHandlerResult.model_validate(invalid)
+
+
+def test_task_handler_registry_rejects_non_callable_handler() -> None:
+    with pytest.raises(ValueError, match="must be callable"):
+        TaskHandlerRegistry({ROOT_TASK_TYPE: 42})  # type: ignore[dict-item]
 
 
 @pytest.mark.postgres
@@ -176,6 +185,58 @@ async def test_duplicate_schedule_reuses_active_run_and_root_task(
         assert duplicate.created is False
         assert duplicate.run.id == first.run.id
         assert duplicate.task.id == first.task.id
+    finally:
+        await _cancel_run(database, run_id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+async def test_duplicate_schedule_does_not_fabricate_missing_root_task(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    run_id: UUID | None = None
+    try:
+        async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+            _, revision = await uow.missions.create_with_revision(
+                title="Corrupted scheduler graph mission",
+                mission_text="duplicate scheduling must fail closed",
+                original_language="en",
+                output_locale="en",
+            )
+            assert uow.session is not None
+            run = ResearchRun(
+                mission_revision_id=revision.id,
+                mode="HUNT",
+                status="QUEUED",
+                priority=0,
+                deadline_at=datetime.now(UTC),
+                budget_limits=RunBudgetLimits().model_dump(mode="json"),
+                budget_used={},
+                warnings=[],
+                last_checkpoint={},
+            )
+            uow.session.add(run)
+            await uow.commit()
+            run_id = run.id
+
+        async with database.session() as session:
+            with pytest.raises(InvalidRunGraphError):
+                await RunScheduler(session).schedule(
+                    request=RunScheduleRequest(
+                        mission_revision_id=revision.id,
+                        mode="HUNT",
+                        priority=0,
+                        budget_limits={"max_run_duration_minutes": 30},
+                    )
+                )
+            await session.rollback()
+
+        async with database.session() as session:
+            root_count = await session.scalar(
+                select(func.count()).select_from(ResearchTask).where(ResearchTask.run_id == run_id)
+            )
+            assert root_count == 0
     finally:
         await _cancel_run(database, run_id)
         await database.dispose()
@@ -518,6 +579,49 @@ async def test_worker_retries_transient_failure_then_finalizes_success(
             assert run.status == "COMPLETED"
             assert task.status == "SUCCEEDED"
             assert task.attempt_count == 2
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    "invalid_result",
+    [
+        pytest.param(["not", "an", "object"], id="list"),
+        pytest.param(object(), id="wrong-object"),
+        pytest.param({"unsupported": {"set"}}, id="set"),
+        pytest.param({"not_finite": float("nan")}, id="nan"),
+    ],
+)
+async def test_worker_terminalizes_invalid_handler_result_without_stranding_lease(
+    migrated_postgres_url: str,
+    invalid_result: object,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="Invalid handler output mission")
+
+    async def handler(_task: ResearchTask) -> object:
+        return invalid_result
+
+    try:
+        worker = Worker(
+            database,
+            worker_id="invalid-output-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),  # type: ignore[dict-item]
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None
+            assert task is not None
+            assert run.status == "FAILED"
+            assert task.status == "FAILED"
+            assert task.retry_class == "INVALID_OUTPUT"
+            assert task.lease_owner is None
+            assert task.lease_expires_at is None
     finally:
         await _cancel_run(database, scheduled.run.id)
         await database.dispose()

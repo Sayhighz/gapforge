@@ -513,11 +513,16 @@ def worker(
     async def operation() -> dict[str, Any]:
         registry = _build_task_handler_registry()
         registered_task_types = sorted(registry.task_types)
-        if not registered_task_types:
+        if not registered_task_types and once:
             raise CliError(
                 "WORKER_NOT_CONFIGURED",
                 "no research task handlers are registered",
                 exit_code=4,
+            )
+        if not registered_task_types:
+            typer.echo(
+                "warning: worker is idle because no research task handlers are registered",
+                err=True,
             )
         database = _database(_settings())
         try:

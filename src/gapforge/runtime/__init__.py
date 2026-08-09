@@ -2,6 +2,7 @@
 
 from gapforge.runtime.assembly import (
     ROOT_TASK_TYPE,
+    InvalidRunGraphError,
     RunBudgetLimits,
     RunScheduler,
     RunScheduleRequest,
@@ -10,6 +11,7 @@ from gapforge.runtime.assembly import (
 
 __all__ = [
     "ROOT_TASK_TYPE",
+    "InvalidRunGraphError",
     "RunBudgetLimits",
     "RunScheduleRequest",
     "RunScheduler",

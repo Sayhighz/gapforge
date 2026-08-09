@@ -64,6 +64,10 @@ class ScheduledRun:
     created: bool
 
 
+class InvalidRunGraphError(RuntimeError):
+    """An active run exists without the immutable root task it was created with."""
+
+
 class RunScheduler:
     """Create a run and its root task inside the caller's transaction."""
 
@@ -107,17 +111,28 @@ class RunScheduler:
                 raise
             run = existing
             created = False
-        task, _ = await DurableQueue(self.session).enqueue(
-            run_id=run.id,
-            task_type=ROOT_TASK_TYPE,
-            idempotency_key=_ROOT_IDEMPOTENCY_KEY,
-            priority=request.priority,
-            available_at=scheduled_at,
-            payload={
-                "schema_version": "1.0",
-                "run_id": str(run.id),
-                "mission_revision_id": str(request.mission_revision_id),
-                "mode": request.mode,
-            },
-        )
+        if created:
+            task, _ = await DurableQueue(self.session).enqueue(
+                run_id=run.id,
+                task_type=ROOT_TASK_TYPE,
+                idempotency_key=_ROOT_IDEMPOTENCY_KEY,
+                priority=request.priority,
+                available_at=scheduled_at,
+                payload={
+                    "schema_version": "1.0",
+                    "run_id": str(run.id),
+                    "mission_revision_id": str(request.mission_revision_id),
+                    "mode": request.mode,
+                },
+            )
+        else:
+            existing_task = await self.session.scalar(
+                select(ResearchTask).where(
+                    ResearchTask.run_id == run.id,
+                    ResearchTask.idempotency_key == _ROOT_IDEMPOTENCY_KEY,
+                )
+            )
+            if existing_task is None:
+                raise InvalidRunGraphError(f"active run {run.id} has no durable root task")
+            task = existing_task
         return ScheduledRun(run=run, task=task, created=created)
