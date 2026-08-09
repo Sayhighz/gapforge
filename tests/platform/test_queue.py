@@ -6,7 +6,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from gapforge.queue.control import AgentCallLimiter, DurableAgentCallAdmission, RunController
+from gapforge.queue.control import (
+    AgentCallLimiter,
+    DurableAgentCallAdmission,
+    ProviderCallJournal,
+    RunController,
+)
 from gapforge.queue.repository import DurableQueue
 from gapforge.queue.retry import ErrorKind, classify_error, retry_delay_seconds
 from gapforge.storage.database import Database
@@ -51,6 +56,39 @@ async def _finish_run(database: Database, run_id: UUID) -> None:
             run.status = "CANCELLED"
             run.completed_at = datetime.now(UTC)
             await session.commit()
+
+
+async def _provider_call_identity(
+    database: Database,
+    run_id: UUID,
+) -> tuple[ResearchTask, dict[str, object]]:
+    async with database.session() as session:
+        task = ResearchTask(
+            run_id=run_id,
+            task_type="research.run",
+            status="LEASED",
+            priority=1,
+            idempotency_key=f"provider:{run_id}",
+            payload={},
+            checkpoint={},
+            attempt_count=1,
+            max_attempts=3,
+            available_at=datetime.now(UTC),
+            lease_owner="worker-provider",
+            lease_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        session.add(task)
+        await session.commit()
+        return task, {
+            "task_id": task.id,
+            "operation": "extract",
+            "output_schema_name": "provider-test-v1",
+            "output_schema_sha256": b"s" * 32,
+            "request_sha256": b"r" * 32,
+            "provider": "fake",
+            "requested_model": "",
+            "effort": "low",
+        }
 
 
 async def _create_queued_run(
@@ -612,14 +650,18 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
 ) -> None:
     database = Database.from_url(migrated_postgres_url)
     run = await _create_running_run(database)
+    _, journal_values = await _provider_call_identity(database, run.id)
     started = datetime.now(UTC)
     lease_ids: list[UUID] = []
+    call_ids = [str(uuid4()) for _ in range(3)]
     try:
         for number in (1, 2):
             async with database.session() as session:
                 lease = await DurableAgentCallAdmission(session).acquire(
                     run.id,
-                    call_key=f"call-{number}",
+                    journal=ProviderCallJournal(
+                        call_id=UUID(call_ids[number - 1]), **journal_values
+                    ),
                     lease_owner=f"worker-{number}",
                     lease_duration=timedelta(seconds=30),
                     now=started,
@@ -631,7 +673,7 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
         async with database.session() as session:
             denied = await DurableAgentCallAdmission(session).acquire(
                 run.id,
-                call_key="call-3",
+                journal=ProviderCallJournal(call_id=UUID(call_ids[2]), **journal_values),
                 lease_owner="worker-3",
                 lease_duration=timedelta(seconds=30),
                 now=started,
@@ -641,7 +683,7 @@ async def test_durable_provider_admission_caps_and_reclaims_across_sessions(
         async with database.session() as session:
             reclaimed = await DurableAgentCallAdmission(session).acquire(
                 run.id,
-                call_key="call-3",
+                journal=ProviderCallJournal(call_id=UUID(call_ids[2]), **journal_values),
                 lease_owner="worker-3",
                 lease_duration=timedelta(seconds=30),
                 now=started + timedelta(seconds=31),
@@ -662,11 +704,12 @@ async def test_provider_call_lease_never_extends_past_run_deadline(
     deadline = started + timedelta(seconds=10)
     database = Database.from_url(migrated_postgres_url)
     run = await _create_running_run(database, deadline_at=deadline)
+    _, journal_values = await _provider_call_identity(database, run.id)
     try:
         async with database.session() as session:
             lease = await DurableAgentCallAdmission(session).acquire(
                 run.id,
-                call_key="bounded-call",
+                journal=ProviderCallJournal(call_id=uuid4(), **journal_values),
                 lease_owner="worker-a",
                 lease_duration=timedelta(minutes=5),
                 now=started,

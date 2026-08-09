@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -352,6 +353,43 @@ async def test_process_runner_tolerates_early_stdin_close(tmp_path: Path) -> Non
     )
 
     assert result.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_process_runner_terminates_process_group_when_cancelled(tmp_path: Path) -> None:
+    pid_file = tmp_path / "provider.pid"
+    execution = asyncio.create_task(
+        AsyncProcessRunner().run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, pathlib, time; "
+                    f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                    "time.sleep(30)"
+                ),
+            ],
+            stdin=b"",
+            env={"PATH": "/usr/bin"},
+            cwd=tmp_path,
+            timeout_seconds=30,
+            max_output_bytes=1024,
+            termination_grace_seconds=0.05,
+        )
+    )
+    for _ in range(100):
+        if pid_file.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_file.exists()
+    child_pid = int(pid_file.read_text())
+
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
 
 
 def test_generated_flags_parse_with_installed_codex_cli(tmp_path: Path) -> None:

@@ -338,6 +338,31 @@ def agent_schema_identity(
     return hashlib.sha256(payload).digest()
 
 
+def agent_request_identity(request: AgentRequest, *, schema_identity: bytes) -> bytes:
+    """Hash replay-relevant semantic input without timeout or secret-bearing runtime state."""
+
+    if len(schema_identity) != 32:
+        raise MappingError("agent schema identity must contain 32 bytes")
+    try:
+        payload = json.dumps(
+            {
+                "effort": request.effort.value,
+                "input_json": request.input_json,
+                "operation": request.task.value,
+                "permitted_evidence_ids": sorted(request.permitted_evidence_ids),
+                "permitted_urls": sorted(str(value) for value in request.permitted_urls),
+                "schema_identity": schema_identity.hex(),
+            },
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    except (TypeError, ValueError) as exc:
+        raise MappingError("agent request identity requires finite JSON values") from exc
+    return hashlib.sha256(payload).digest()
+
+
 def evidence_card_to_storage_values(
     card: domain.EvidenceCard,
     *,
@@ -1201,6 +1226,7 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "operation": "derived from the validated SemanticOperation request",
                 "output_schema_name": "derived from the versioned AgentRequest",
                 "output_schema_sha256": "derived from canonical finite schema JSON",
+                "request_sha256": "canonical semantic input and allowlist replay identity",
                 "effort": "derived from the bounded AgentRequest policy",
                 "status": "derived from AgentResult through explicit provider status mapping",
                 "duration_ms": "derived from AgentResult",

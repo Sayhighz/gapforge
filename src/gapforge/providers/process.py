@@ -57,6 +57,15 @@ class AsyncProcessRunner:
         except TimeoutError:
             timed_out = True
             await self._terminate_group(process, termination_grace_seconds)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(self._terminate_group(process, termination_grace_seconds))
+            finally:
+                for reader_task in (stdout_task, stderr_task):
+                    if not reader_task.done():
+                        reader_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            raise
         stdout, stdout_truncated = await stdout_task
         stderr, stderr_truncated = await stderr_task
         return ProcessResult(

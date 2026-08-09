@@ -47,6 +47,10 @@ def upgrade() -> None:
         sa.Column("output_schema_sha256", sa.LargeBinary(length=32), nullable=False),
     )
     op.add_column(
+        "provider_call_leases",
+        sa.Column("request_sha256", sa.LargeBinary(length=32), nullable=False),
+    )
+    op.add_column(
         "provider_call_leases", sa.Column("provider", sa.String(length=32), nullable=False)
     )
     op.add_column(
@@ -73,6 +77,16 @@ def upgrade() -> None:
         "octet_length(output_schema_sha256) = 32",
     )
     op.create_check_constraint(
+        op.f("ck_provider_call_leases_request_hash_length"),
+        "provider_call_leases",
+        "octet_length(request_sha256) = 32",
+    )
+    op.create_check_constraint(
+        op.f("ck_provider_call_leases_canonical_call_key"),
+        "provider_call_leases",
+        "call_key ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'",
+    )
+    op.create_check_constraint(
         op.f("ck_provider_call_leases_repair_attempt_range"),
         "provider_call_leases",
         "repair_attempt IN (0, 1)",
@@ -81,6 +95,15 @@ def upgrade() -> None:
     op.add_column(
         "agent_calls",
         sa.Column("output_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    )
+    op.add_column(
+        "agent_calls",
+        sa.Column("request_sha256", sa.LargeBinary(length=32), nullable=False),
+    )
+    op.create_check_constraint(
+        op.f("ck_agent_calls_request_sha256_length"),
+        "agent_calls",
+        "octet_length(request_sha256) = 32",
     )
     op.create_check_constraint(
         op.f("ck_agent_calls_valid_status"),
@@ -98,14 +121,29 @@ def upgrade() -> None:
         "output_json IS NULL OR (jsonb_typeof(output_json) = 'object' "
         "AND octet_length(output_json::text) <= 20000)",
     )
+    op.create_check_constraint(
+        op.f("ck_agent_calls_completed_output_sha256_length"),
+        "agent_calls",
+        "output_json IS NULL OR (output_sha256 IS NOT NULL "
+        "AND octet_length(output_sha256) = 32)",
+    )
 
 
 def downgrade() -> None:
+    op.drop_constraint(
+        op.f("ck_agent_calls_completed_output_sha256_length"),
+        "agent_calls",
+        type_="check",
+    )
     op.drop_constraint(op.f("ck_agent_calls_bounded_object_output"), "agent_calls", type_="check")
     op.drop_constraint(
         op.f("ck_agent_calls_completed_output_presence"), "agent_calls", type_="check"
     )
     op.drop_constraint(op.f("ck_agent_calls_valid_status"), "agent_calls", type_="check")
+    op.drop_constraint(
+        op.f("ck_agent_calls_request_sha256_length"), "agent_calls", type_="check"
+    )
+    op.drop_column("agent_calls", "request_sha256")
     op.drop_column("agent_calls", "output_json")
     op.drop_constraint(
         op.f("ck_provider_call_leases_repair_attempt_range"),
@@ -113,7 +151,17 @@ def downgrade() -> None:
         type_="check",
     )
     op.drop_constraint(
+        op.f("ck_provider_call_leases_canonical_call_key"),
+        "provider_call_leases",
+        type_="check",
+    )
+    op.drop_constraint(
         op.f("ck_provider_call_leases_schema_hash_length"),
+        "provider_call_leases",
+        type_="check",
+    )
+    op.drop_constraint(
+        op.f("ck_provider_call_leases_request_hash_length"),
         "provider_call_leases",
         type_="check",
     )
@@ -127,6 +175,7 @@ def downgrade() -> None:
         "effort",
         "requested_model",
         "provider",
+        "request_sha256",
         "output_schema_sha256",
         "output_schema_name",
         "operation",
