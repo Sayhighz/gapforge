@@ -325,13 +325,7 @@ class DurableAgentCallAdmission:
         if lease_duration.total_seconds() <= 0:
             raise ValueError("lease_duration must be positive")
         current_time = now or datetime.now(UTC)
-        run = await self.session.scalar(
-            select(ResearchRun).where(ResearchRun.id == run_id).with_for_update()
-        )
-        if run is None:
-            raise LookupError(f"run {run_id} does not exist")
-        if run.status != "RUNNING" or run.deadline_at <= current_time:
-            return None
+        # Match worker heartbeats and stage commits: task row before run row.
         task = await self.session.scalar(
             select(ResearchTask).where(ResearchTask.id == journal.task_id).with_for_update()
         )
@@ -344,6 +338,13 @@ class DurableAgentCallAdmission:
             raise PermissionError(
                 "provider-call journal requires a worker-owned leased task in the same run"
             )
+        run = await self.session.scalar(
+            select(ResearchRun).where(ResearchRun.id == run_id).with_for_update()
+        )
+        if run is None:
+            raise LookupError(f"run {run_id} does not exist")
+        if run.status != "RUNNING" or run.deadline_at <= current_time:
+            return None
         active_count = await self.session.scalar(
             select(func.count())
             .select_from(ProviderCallLease)

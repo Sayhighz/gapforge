@@ -233,6 +233,12 @@ def _fake_scripts(fixture: HuntFixture) -> dict[str, list[dict[str, Any]]]:
         "MANUAL_WORK",
         None,
     )
+    doing_nothing_id = _stable_id(
+        "competitor",
+        normalize_text(f"Do nothing {fixture.slug}"),
+        "DO_NOTHING",
+        None,
+    )
     user_claim_id = _stable_id(
         "claim",
         normalize_text(f"Users manually reconcile invoice lines for {fixture.slug}"),
@@ -344,7 +350,12 @@ def _fake_scripts(fixture: HuntFixture) -> dict[str, list[dict[str, Any]]]:
                         "id": competitor_id,
                         "name": f"Manual work {fixture.slug}",
                         "kind": "MANUAL_WORK",
-                    }
+                    },
+                    {
+                        "id": doing_nothing_id,
+                        "name": f"Do nothing {fixture.slug}",
+                        "kind": "DO_NOTHING",
+                    },
                 ],
                 "competitor_evidence": [
                     {

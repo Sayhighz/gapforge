@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4, uuid5
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from gapforge.config import AgentProviderName, Settings
 from gapforge.domain import contracts as domain
@@ -25,6 +25,7 @@ from gapforge.integration.semantic import (
 from gapforge.providers import contracts as provider
 from gapforge.providers.codex_cli import CodexCliProvider
 from gapforge.providers.fake import FakeAgentProvider
+from gapforge.queue import DurableQueue
 from gapforge.queue.retry import ErrorKind
 from gapforge.storage.database import Database
 from gapforge.storage.models import AgentCall, ProviderCallLease, ResearchRun, ResearchTask
@@ -272,6 +273,30 @@ async def _finish_context(database: Database, context: SemanticContext) -> None:
             await session.commit()
 
 
+async def _wait_for_blocked_task_admission(database: Database) -> None:
+    for _ in range(200):
+        async with database.session() as session:
+            waiting = await session.scalar(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%FROM research_tasks%'
+                          AND query LIKE '%FOR UPDATE%'
+                    )
+                    """
+                )
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("semantic admission did not block on the task row")
+
+
 async def test_success_is_audited_once_and_replayed_without_provider_invocation(
     migrated_postgres_url: str,
 ) -> None:
@@ -315,6 +340,66 @@ async def test_success_is_audited_once_and_replayed_without_provider_invocation(
         assert lease_count == 0
         assert run.budget_used == {"agent_calls": 1}
     finally:
+        await _finish_context(database, context)
+        await database.dispose()
+
+
+async def test_semantic_admission_and_worker_heartbeat_use_task_then_run_lock_order(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context = await _running_context(database)
+    output = {"pain": "manual work is slow", "evidence_ids": ["evidence-1"]}
+    boundary = RecordingProvider([_provider_result(output)])
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="worker-i4",
+        provider_name="fake",
+    )
+    call = SemanticCall(
+        request=_domain_request(),
+        output_schema={
+            "type": "object",
+            "properties": {
+                "pain": {"type": "string"},
+                "evidence_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["pain", "evidence_ids"],
+            "additionalProperties": False,
+        },
+    )
+    admission: asyncio.Task[domain.AgentResult] | None = None
+
+    try:
+        async with database.session() as heartbeat_session, heartbeat_session.begin():
+            locked_task = await heartbeat_session.scalar(
+                select(ResearchTask).where(ResearchTask.id == context.task_id).with_for_update()
+            )
+            assert locked_task is not None
+            admission = asyncio.create_task(reasoner.run(context, call))
+            await _wait_for_blocked_task_admission(database)
+            assert boundary.requests == []
+
+            renewed = await DurableQueue(heartbeat_session).renew_lease(
+                context.task_id,
+                worker_id="worker-i4",
+                lease_duration=timedelta(minutes=5),
+            )
+            assert renewed is not None
+
+        result = await asyncio.wait_for(admission, timeout=2)
+        assert result.status is domain.AgentStatus.COMPLETED
+        assert len(boundary.requests) == 1
+        call_count, lease_count, run = await _counts(database, context.run_id)
+        assert call_count == 1
+        assert lease_count == 0
+        assert run.budget_used == {"agent_calls": 1}
+    finally:
+        if admission is not None and not admission.done():
+            admission.cancel()
+            with suppress(asyncio.CancelledError):
+                await admission
         await _finish_context(database, context)
         await database.dispose()
 

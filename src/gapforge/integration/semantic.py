@@ -365,11 +365,12 @@ class AuditedSemanticReasoner:
         denied: SemanticAdmissionError | None = None
         admitted: _Admission | None = None
         async with self._session_factory() as session, session.begin():
-            run = await session.scalar(
-                select(ResearchRun).where(ResearchRun.id == context.run_id).with_for_update()
-            )
+            # Match worker heartbeats and stage commits: task row before run row.
             task = await session.scalar(
                 select(ResearchTask).where(ResearchTask.id == context.task_id).with_for_update()
+            )
+            run = await session.scalar(
+                select(ResearchRun).where(ResearchRun.id == context.run_id).with_for_update()
             )
             if (
                 run is None

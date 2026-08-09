@@ -145,6 +145,9 @@ class Worker:
             await RunController(session).admit_next(
                 allowed_task_types=self.registry.task_types,
             )
+            # Release admission's run lock before claim acquires a task lock.
+            await session.commit()
+        async with self.database.session() as session:
             queue = DurableQueue(session)
             task = await queue.claim(
                 worker_id=self.worker_id,
