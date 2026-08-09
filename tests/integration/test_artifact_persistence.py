@@ -259,6 +259,46 @@ async def test_writer_rejects_unknown_lineage_atomically(
 
 
 @pytest.mark.postgres
+async def test_writer_fails_closed_on_conflicting_competitor_natural_identity(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context, ids = await _seed_pipeline_context(database)
+    writer = ResearchArtifactWriter()
+    stages = dict(_stage_payloads(context, ids))
+    conflicting_id = uuid4()
+    try:
+        for stage in ("EXTRACT", "CLUSTER"):
+            async with database.session() as session:
+                await writer.persist_stage(session, context, FakeCommit(stage, stages[stage]))
+                await session.commit()
+        async with database.session() as session:
+            session.add(
+                models.Competitor(
+                    id=conflicting_id,
+                    name="Ledger Tool",
+                    normalized_name="ledger tool",
+                    canonical_url=f"https://vendor-{ids['competitor']}.example/",
+                    alternative_type="SAAS",
+                )
+            )
+            await session.commit()
+        async with database.session() as session:
+            with pytest.raises(ValueError, match="conflicting stored ID"):
+                await writer.persist_stage(
+                    session,
+                    context,
+                    FakeCommit("GAP", stages["GAP"]),
+                )
+            await session.rollback()
+        async with database.session() as session:
+            assert await session.get(models.Competitor, ids["competitor"]) is None
+            assert await session.get(models.Competitor, conflicting_id) is not None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.postgres
 async def test_writer_ignores_only_reserved_input_bounds_and_rejects_unknown_stage_keys(
     migrated_postgres_url: str,
 ) -> None:

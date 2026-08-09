@@ -394,16 +394,31 @@ class ResearchArtifactWriter:
             } - evidence_ids:
                 raise ValueError("gap references unknown competitor evidence")
 
+        competitor_identity_ids: dict[tuple[str, str], UUID] = {}
         for competitor in competitors:
             identifier = _uuid_text(competitor.id, "competitor")
+            normalized_name = normalize_text(competitor.name)
+            canonical_url = str(competitor.canonical_url or "")
+            natural_identity = (normalized_name, canonical_url)
+            prior_id = competitor_identity_ids.setdefault(natural_identity, identifier)
+            if prior_id != identifier:
+                raise ValueError("competitor natural identity maps to conflicting IDs")
+            stored_id = await session.scalar(
+                select(models.Competitor.id).where(
+                    models.Competitor.normalized_name == normalized_name,
+                    models.Competitor.canonical_url == canonical_url,
+                )
+            )
+            if stored_id is not None and stored_id != identifier:
+                raise ValueError("competitor natural identity maps to a conflicting stored ID")
             await _add_or_verify(
                 session,
                 models.Competitor,
                 identifier,
                 {
                     "name": competitor.name,
-                    "normalized_name": normalize_text(competitor.name),
-                    "canonical_url": str(competitor.canonical_url or ""),
+                    "normalized_name": normalized_name,
+                    "canonical_url": canonical_url,
                     "alternative_type": competitor.kind.value,
                 },
                 "competitor",
