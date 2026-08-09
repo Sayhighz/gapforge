@@ -34,6 +34,7 @@ from gapforge.integration.mappers import (
     PERSISTED_ENTITY_MAPPINGS,
     MappingError,
     agent_operation,
+    agent_request_identity,
     agent_schema_identity,
     agent_status_from_provider,
     agent_status_to_provider,
@@ -311,6 +312,44 @@ def test_agent_schema_identity_is_canonical_and_operation_scoped() -> None:
         schema_name="query-plan-v1",
         output_schema={"type": "object", "required": ["intents"]},
     )
+
+
+def test_agent_request_identity_is_canonical_and_excludes_runtime_fields() -> None:
+    schema_identity = b"s" * 32
+    request = AgentRequest(
+        call_id=str(uuid4()),
+        task=SemanticOperation.EXTRACT,
+        effort=AgentEffort.LOW,
+        input_json={"z": 1, "items": [{"id": "evidence-1"}]},
+        permitted_evidence_ids=("evidence-2", "evidence-1"),
+        permitted_urls=("https://example.com/b", "https://example.com/a"),
+        output_schema_name="pain-v1",
+        timeout_seconds=30,
+    )
+    same_semantics = request.model_copy(
+        update={
+            "call_id": str(uuid4()),
+            "timeout_seconds": 1,
+            "input_json": {"items": [{"id": "evidence-1"}], "z": 1},
+            "permitted_evidence_ids": ("evidence-1", "evidence-2"),
+            "permitted_urls": ("https://example.com/a", "https://example.com/b"),
+        }
+    )
+
+    identity = agent_request_identity(request, schema_identity=schema_identity)
+
+    assert len(identity) == 32
+    assert identity == agent_request_identity(
+        same_semantics,
+        schema_identity=schema_identity,
+    )
+    assert identity != agent_request_identity(
+        request.model_copy(update={"input_json": {"items": []}}),
+        schema_identity=schema_identity,
+    )
+    assert identity != agent_request_identity(request, schema_identity=b"t" * 32)
+    with pytest.raises(MappingError, match="32 bytes"):
+        agent_request_identity(request, schema_identity=b"short")
 
 
 @pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])

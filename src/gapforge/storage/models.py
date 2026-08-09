@@ -187,15 +187,33 @@ class ProviderCallLease(IdMixin, UpdatedAtMixin, Base):
     __tablename__ = "provider_call_leases"
     __table_args__ = (
         UniqueConstraint("run_id", "call_key"),
+        CheckConstraint("octet_length(output_schema_sha256) = 32", name="schema_hash_length"),
+        CheckConstraint("octet_length(request_sha256) = 32", name="request_hash_length"),
+        CheckConstraint(
+            "call_key ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'",
+            name="canonical_call_key",
+        ),
+        CheckConstraint("repair_attempt IN (0, 1)", name="repair_attempt_range"),
         Index("ix_provider_call_leases_run_expiry", "run_id", "lease_expires_at"),
     )
 
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("research_runs.id", ondelete="CASCADE"), nullable=False
     )
+    task_id: Mapped[UUID] = mapped_column(
+        ForeignKey("research_tasks.id", ondelete="CASCADE"), nullable=False
+    )
     call_key: Mapped[str] = mapped_column(String(240), nullable=False)
     lease_owner: Mapped[str] = mapped_column(String(160), nullable=False)
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    output_schema_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    output_schema_sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    request_sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_model: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    effort: Mapped[str] = mapped_column(String(16), nullable=False)
+    repair_attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class SourceCheckpoint(IdMixin, UpdatedAtMixin, Base):
@@ -705,6 +723,7 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
             "octet_length(output_schema_sha256) = 32",
             name="output_schema_sha256_length",
         ),
+        CheckConstraint("octet_length(request_sha256) = 32", name="request_sha256_length"),
         CheckConstraint(
             "operation IN ('query_plan', 'extract', 'relevance', 'cluster', "
             "'hypothesis', 'gap', 'critic', 'deep_research', 'legacy_unknown')",
@@ -713,6 +732,24 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
         CheckConstraint(
             "length(btrim(output_schema_name)) > 0",
             name="nonempty_output_schema_name",
+        ),
+        CheckConstraint(
+            "status IN ('COMPLETED', 'INVALID_OUTPUT', 'AUTH_REQUIRED', 'TIMEOUT', 'FAILED')",
+            name="valid_status",
+        ),
+        CheckConstraint(
+            "(status = 'COMPLETED') = (output_json IS NOT NULL)",
+            name="completed_output_presence",
+        ),
+        CheckConstraint(
+            "output_json IS NULL OR (jsonb_typeof(output_json) = 'object' "
+            "AND octet_length(output_json::text) <= 32768)",
+            name="bounded_object_output",
+        ),
+        CheckConstraint(
+            "(output_json IS NULL) = (output_sha256 IS NULL) "
+            "AND (output_sha256 IS NULL OR octet_length(output_sha256) = 32)",
+            name="completed_output_sha256_length",
         ),
         Index("ix_agent_calls_run_created", "run_id", "created_at"),
     )
@@ -727,6 +764,7 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
     operation: Mapped[str] = mapped_column(String(80), nullable=False)
     output_schema_name: Mapped[str] = mapped_column(String(200), nullable=False)
     output_schema_sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    request_sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     requested_model: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     resolved_model: Mapped[str | None] = mapped_column(String(160))
     effort: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -736,6 +774,7 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
     repair_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     usage: Mapped[JSONValue] = mapped_column(JSONB, nullable=False, default=dict)
     error_class: Mapped[str | None] = mapped_column(String(80))
+    output_json: Mapped[JSONValue | None] = mapped_column(JSONB(none_as_null=True))
     output_sha256: Mapped[bytes | None] = mapped_column(LargeBinary(32))
 
 
