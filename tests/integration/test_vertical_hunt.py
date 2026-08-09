@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
@@ -22,8 +22,10 @@ from gapforge.domain.contracts import (
     FetchResult,
     FetchSnapshot,
     SearchResponse,
+    SemanticOperation,
     Source,
 )
+from gapforge.integration.evidence_store import SqlAlchemyEvidencePipelineStore
 from gapforge.integration.semantic import AuditedSemanticReasoner
 from gapforge.providers.fake import FakeAgentProvider
 from gapforge.runtime import RunScheduler, RunScheduleRequest
@@ -56,7 +58,7 @@ from gapforge.storage.models import (
 from gapforge.storage.uow import SqlAlchemyUnitOfWork
 from gapforge.worker import TaskHandlerRegistry, Worker
 
-OBSERVED_AT = datetime(2026, 8, 9, 12, tzinfo=UTC)
+OBSERVED_AT = datetime(2025, 1, 15, 12, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,8 +124,10 @@ class FixtureCollector:
     def __init__(self, fixture: HuntFixture, source: Source) -> None:
         self.fixture = fixture
         self.source = source
+        self.request_count = 0
 
     async def collect(self, request: CollectRequest) -> CollectResult:
+        self.request_count += 1
         if self.source is Source.GITHUB:
             return CollectResult(
                 source=self.source,
@@ -162,6 +166,7 @@ class FixtureCollector:
 class FixtureSearch:
     def __init__(self, fixture: HuntFixture) -> None:
         self.fixture = fixture
+        self.request_count = 0
 
     async def search(
         self,
@@ -170,6 +175,7 @@ class FixtureSearch:
         max_results: int,
         max_requests: int,
     ) -> SearchResponse:
+        self.request_count += 1
         del max_results, max_requests
         return SearchResponse.model_validate(
             {
@@ -193,8 +199,10 @@ class FixtureSearch:
 class FixtureFetcher:
     def __init__(self, fixture: HuntFixture) -> None:
         self.fixture = fixture
+        self.request_count = 0
 
     async def fetch(self, url: str, registry: object) -> FetchResult:
+        self.request_count += 1
         del registry
         assert url == self.fixture.competitor_url
         return FetchResult(availability=Availability.AVAILABLE, snapshot=self.fixture.snapshot)
@@ -411,32 +419,47 @@ def _query_plan(fixture: HuntFixture) -> dict[str, Any]:
     }
 
 
-def _install_external_fixtures(monkeypatch: pytest.MonkeyPatch, fixture: HuntFixture) -> None:
+def _install_external_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture: HuntFixture,
+) -> dict[str, FixtureCollector | FixtureSearch | FixtureFetcher]:
+    hacker_news = FixtureCollector(fixture, Source.HACKER_NEWS)
+    github = FixtureCollector(fixture, Source.GITHUB)
+    reddit = FixtureCollector(fixture, Source.REDDIT)
+    search = FixtureSearch(fixture)
+    fetcher = FixtureFetcher(fixture)
     monkeypatch.setattr(
         research_handler_module,
         "HackerNewsCollector",
-        lambda client: FixtureCollector(fixture, Source.HACKER_NEWS),
+        lambda client: hacker_news,
     )
     monkeypatch.setattr(
         research_handler_module,
         "GitHubCollector",
-        lambda client, token: FixtureCollector(fixture, Source.GITHUB),
+        lambda client, token: github,
     )
     monkeypatch.setattr(
         research_handler_module,
         "RedditCollector",
-        lambda client, client_id, client_secret: FixtureCollector(fixture, Source.REDDIT),
+        lambda client, client_id, client_secret: reddit,
     )
     monkeypatch.setattr(
         research_handler_module,
         "BraveSearchProvider",
-        lambda client, key: FixtureSearch(fixture),
+        lambda client, key: search,
     )
     monkeypatch.setattr(
         research_handler_module,
         "StaticFetcher",
-        lambda client: FixtureFetcher(fixture),
+        lambda client: fetcher,
     )
+    return {
+        "hacker_news": hacker_news,
+        "github": github,
+        "reddit": reddit,
+        "search": search,
+        "fetcher": fetcher,
+    }
 
 
 async def _schedule_hunt(database: Database, settings: Settings, slug: str) -> tuple[UUID, UUID]:
@@ -582,8 +605,13 @@ async def test_production_hunt_is_durable_queryable_and_fail_closed(
                     select(FinalAssessmentSnapshot).where(FinalAssessmentSnapshot.run_id == run_id)
                 )
             ).all()
-            assert run is not None and run.status == expected_status
-            assert task is not None and task.status == "SUCCEEDED"
+            assert run is not None and task is not None
+            assert run.status == expected_status, {
+                "run_checkpoint": run.last_checkpoint,
+                "task_error": task.last_error,
+                "task_checkpoint": task.checkpoint,
+            }
+            assert task.status == "SUCCEEDED"
             assert task.lease_owner is None and task.lease_expires_at is None
             assert call_count == expected_calls
             assert lease_count == 0
@@ -692,6 +720,221 @@ async def test_production_hunt_is_durable_queryable_and_fail_closed(
                 opportunity_report["data"]["report"]["opportunity"]["opportunity_id"]
                 == opportunity_id
             )
+    finally:
+        await _terminalize_if_needed(database, run_id, task_id)
+        await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_production_hunt_reclaims_crash_from_durable_stage_without_duplicates(
+    migrated_postgres_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    settings = Settings(
+        database_url=migrated_postgres_url,
+        agent_provider=AgentProviderName.FAKE,
+        author_hmac_key="vertical-crash-author-key-000000000000000",
+        max_research_rounds=1,
+        max_agent_calls_per_run=6,
+        max_parallel_agent_calls=1,
+        max_collector_requests_per_run=4,
+        max_search_calls_per_run=1,
+        max_raw_signals_per_run=4,
+    )
+    run_id, task_id = await _schedule_hunt(database, settings, "crash-reclaim")
+    fixture = HuntFixture(slug="crash-reclaim", run_id=run_id)
+    external_ports = _install_external_fixtures(monkeypatch, fixture)
+    stage_committed = asyncio.Event()
+    pause_first_attempt = True
+
+    class PausingProductionStore(SqlAlchemyEvidencePipelineStore):
+        async def commit_stage(self, context: object, commit: object) -> None:
+            await super().commit_stage(context, commit)  # type: ignore[arg-type]
+            if getattr(commit, "stage", None) == "CARD_SCORE":
+                stage_committed.set()
+                await asyncio.Event().wait()
+
+    def store_factory(*args: object, **kwargs: object) -> SqlAlchemyEvidencePipelineStore:
+        store_type = (
+            PausingProductionStore if pause_first_attempt else SqlAlchemyEvidencePipelineStore
+        )
+        return store_type(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        research_handler_module,
+        "SqlAlchemyEvidencePipelineStore",
+        store_factory,
+    )
+    first_worker_id = "vertical-worker-crashed"
+    first_provider = FakeAgentProvider(_fake_scripts(fixture))
+    first_handler = ResearchRunHandler(
+        database=database,
+        settings=settings,
+        reasoner=AuditedSemanticReasoner(
+            database.session_factory,
+            first_provider,
+            lease_owner=first_worker_id,
+            provider_name="fake",
+        ),
+    )
+    first_worker = Worker(
+        database,
+        worker_id=first_worker_id,
+        handlers=TaskHandlerRegistry({"research.run": first_handler}),
+        lease_duration=timedelta(seconds=0.3),
+        heartbeat_interval_seconds=0.05,
+    )
+
+    try:
+        interrupted = asyncio.create_task(first_worker.run_once())
+        await asyncio.wait_for(stage_committed.wait(), timeout=5)
+        async with database.session() as session, session.begin():
+            task = await session.get(ResearchTask, task_id, with_for_update=True)
+            assert task is not None
+            task.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        assert await asyncio.wait_for(interrupted, timeout=2) is True
+
+        async with database.session() as session:
+            task_after_crash = await session.get(ResearchTask, task_id)
+            pre_resume_calls = await session.scalar(
+                select(func.count()).select_from(AgentCall).where(AgentCall.run_id == run_id)
+            )
+            pre_resume_cards = await session.scalar(
+                select(func.count()).select_from(EvidenceCard).where(EvidenceCard.run_id == run_id)
+            )
+        assert task_after_crash is not None
+        assert task_after_crash.status == "LEASED"
+        assert task_after_crash.attempt_count == 1
+        assert "CARD_SCORE" in task_after_crash.checkpoint["pipeline"]["stages"]
+        assert pre_resume_calls == 4
+        assert pre_resume_cards == 1
+        assert first_provider._indexes == {
+            "query_plan": 1,
+            "extract": 1,
+            "cluster": 1,
+            "gap": 1,
+        }
+        external_counts_before_resume = {
+            name: port.request_count for name, port in external_ports.items()
+        }
+        assert external_counts_before_resume == {
+            "hacker_news": 1,
+            "github": 0,
+            "reddit": 0,
+            "search": 1,
+            "fetcher": 1,
+        }
+
+        pause_first_attempt = False
+        second_worker_id = "vertical-worker-replacement"
+        second_provider = FakeAgentProvider(_fake_scripts(fixture))
+        second_handler = ResearchRunHandler(
+            database=database,
+            settings=settings,
+            reasoner=AuditedSemanticReasoner(
+                database.session_factory,
+                second_provider,
+                lease_owner=second_worker_id,
+                provider_name="fake",
+            ),
+        )
+        replacement = Worker(
+            database,
+            worker_id=second_worker_id,
+            handlers=TaskHandlerRegistry({"research.run": second_handler}),
+            lease_duration=timedelta(seconds=1),
+            heartbeat_interval_seconds=0.1,
+        )
+        assert await replacement.run_once() is True
+        assert await replacement.run_once() is False
+
+        async with database.session() as session:
+            run = await session.get(ResearchRun, run_id)
+            task = await session.get(ResearchTask, task_id)
+            calls = (
+                await session.scalars(select(AgentCall).where(AgentCall.run_id == run_id))
+            ).all()
+            cards = (
+                await session.scalars(select(EvidenceCard).where(EvidenceCard.run_id == run_id))
+            ).all()
+            raw = (
+                await session.scalars(
+                    select(RawSignalRevision).where(
+                        RawSignalRevision.domain_revision_id == fixture.raw_revision_id
+                    )
+                )
+            ).all()
+            final = (
+                await session.scalars(
+                    select(FinalAssessmentSnapshot).where(FinalAssessmentSnapshot.run_id == run_id)
+                )
+            ).all()
+            leases = await session.scalar(
+                select(func.count())
+                .select_from(ProviderCallLease)
+                .where(ProviderCallLease.run_id == run_id)
+            )
+        assert run is not None and run.status == "COMPLETED"
+        assert task is not None and task.status == "SUCCEEDED"
+        assert task.attempt_count == 2
+        assert len(calls) == 6
+        assert len({call.id for call in calls}) == 6
+        assert len(cards) == 1
+        assert len(raw) == 1
+        assert len(final) == 1
+        assert leases == 0
+        expected_call_ids = {
+            uuid5(
+                run_id,
+                f"{task_id}:{operation.value}:1:{attempt}",
+            )
+            for operation, attempt in (
+                (SemanticOperation.QUERY_PLAN, 1),
+                (SemanticOperation.EXTRACT, 1),
+                (SemanticOperation.CLUSTER, 1),
+                (SemanticOperation.GAP, 1),
+                (SemanticOperation.HYPOTHESIS, 2),
+                (SemanticOperation.CRITIC, 2),
+            )
+        }
+        assert {call.id for call in calls} == expected_call_ids
+        assert second_provider._indexes == {
+            "hypothesis": 1,
+            "critic": 1,
+        }
+        assert {
+            name: port.request_count for name, port in external_ports.items()
+        } == external_counts_before_resume
+
+        reports_dir = tmp_path / "crash-reclaim-reports"
+        reports_dir.parent.mkdir(parents=True, exist_ok=True)
+        report = await _run_cli(
+            "report",
+            "run",
+            str(run_id),
+            database_url=migrated_postgres_url,
+            reports_dir=reports_dir,
+        )
+        assert report["data"]["report"]["status"] == "COMPLETED"
+        assert len(report["data"]["report"]["opportunities"]) == 1
+        first_report_bytes = await asyncio.to_thread(
+            Path(report["data"]["artifact"]["run_path"]).read_bytes
+        )
+        replayed_report = await _run_cli(
+            "report",
+            "run",
+            str(run_id),
+            database_url=migrated_postgres_url,
+            reports_dir=reports_dir,
+        )
+        replayed_report_bytes = await asyncio.to_thread(
+            Path(replayed_report["data"]["artifact"]["run_path"]).read_bytes
+        )
+        assert replayed_report_bytes == first_report_bytes
+        assert await asyncio.to_thread((reports_dir / "latest.md").read_bytes) == first_report_bytes
     finally:
         await _terminalize_if_needed(database, run_id, task_id)
         await database.dispose()
