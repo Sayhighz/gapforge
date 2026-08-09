@@ -26,7 +26,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | Role | Branch | PR | State | Last reviewed commit |
 |---|---|---:|---|---|
 | Specification | `agent/spec-v0.1` | #1 | merged | `6591aeb` |
-| Integration | `integration/v0.1` | #4 | active draft | `55d546d` |
+| Integration | `integration/v0.1` | #4 | active draft | `fb44e06` |
 | Lane A | `agent/platform-foundation` | #5 | reviewed and squash-merged | `2f4febc` |
 | Lane B | `agent/research-engine` | #6 | reviewed and squash-merged | `16ad7b9` |
 | I1 contracts/schema | `agent/integration-contracts` | #8 | reviewed and squash-merged | `482c3f4` |
@@ -35,7 +35,7 @@ This is the first file to read after interruption. It records only reviewed/push
 | I4 provider audit | `agent/integration-provider-audit` | #10 | reviewed and squash-merged | `5df58b4` |
 | I5 persistence surfaces | `agent/integration-persistence-surfaces` | #12 | reviewed and squash-merged | `6e9f56e` |
 | I6 reports and skill | `agent/integration-reports-skill` | #13 | reviewed and squash-merged | `957a824` |
-| I7 integrated verification | `agent/integration-verification` | #14 | active draft | `df6ba41` |
+| I7 integrated verification | `agent/integration-verification` | #14 | reviewed and squash-merged | `a9b8112` |
 
 GitHub issues:
 
@@ -78,21 +78,29 @@ Completed:
 - I6 deterministic Thai/English run and opportunity reports, crash-safe immutable artifact storage,
   explicit post-`VALIDATE` Product Hypotheses, and parser-valid canonical skill commands were
   independently reproduced with 377 passed, 1 environment-gated skip and green container backup;
-  PR #13 was squash-merged as `55d546d`. The fresh-process skill acceptance remains deliberately
+  PR #13 was squash-merged as `55d546d`. The fresh-process skill acceptance was deliberately left
   open for I7 rather than being claimed from synthetic fixtures.
+- I7 production-wired fake-provider HUNT, hard-gate/zero/partial/crash variants, fresh-process
+  persisted-ID/report inspection, bounded live-smoke commands, protected credential loading,
+  task/run lock-order hardening, native arm64, auth-volume isolation, restart persistence, and
+  backup/restore were independently reviewed. Quality run `31303536318` passed 414 tests with one
+  environment-gated skip plus all three Python/container/arm64 jobs; PR #14 was squash-merged as
+  `fb44e06`. Credential-free HN and missing-credential smokes passed. The protected credentialed
+  source/Codex execution record remains deliberately open until the reviewed workflow reaches
+  `main`.
 
 In progress:
 
-- I7 integrated verification and bounded smoke surfaces are active in draft PR #14.
-- Its next vertical slice refreshes onto merged I6, then runs a fake-provider HUNT through the
-  production scheduler, controller, worker, evidence pipeline, persistence writer, and fresh report
-  CLI process.
+- I8 release audit and handoff are next on the reviewed integration branch.
+- The protected credentialed smoke remains a post-`main` operational gate because the trusted
+  workflow intentionally hard-checks out protected `main`.
 
 Exact next action:
 
-1. Merge the latest `integration/v0.1` into PR #14 without rebasing its published branch.
-2. Add the production-wired fake-provider/report regression and failure/resume variants.
-3. Complete I7 integrated verification, then run the I8 release audit and handoff.
+1. Audit every master-spec checkbox and release artifact against reviewed implementation evidence.
+2. Complete I8 handoff, review integration PR #4, and merge the reviewed branch into `main`.
+3. Dispatch the protected credentialed source/Codex smoke from `main` and record its result in a
+   follow-up checkpoint/PR without inventing an execution record.
 
 ## Recovery rules
 

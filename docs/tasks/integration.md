@@ -169,6 +169,8 @@ the expected zero-request GitHub CREDENTIAL_MISSING, Reddit SOURCE_UNAVAILABLE, 
 RESEARCH_UNAVAILABLE, and isolated Codex AUTH_REQUIRED outcomes. Protected post-checkout credential
 loading and bounded real source/Codex commands are implemented, but no trusted credentialed
 execution record exists yet, so the final manual-smoke item remains deliberately unchecked.
+The integration lead independently reviewed the full diff and green head `a9b8112`; PR #14 was
+squash-merged into `integration/v0.1` as `fb44e06`.
 
 Acceptance: all public CI checks are credential-free and every live integration remains an explicit,
 non-public smoke command.
@@ -183,11 +185,11 @@ non-public smoke command.
 
 ## Resume note
 
-Current state: I1-I6 are reviewed and merged. I7 code and credential-free verification are complete
-on draft PR #14 at implementation checkpoint `c9f47cb`, with GitHub Quality run `31303250007`
-green. The protected credentialed live-call execution record and I8 remain pending.
+Current state: I1-I7 are reviewed and merged. I7 landed as `fb44e06` after GitHub Quality run
+`31303536318` passed all Python, container-backup, and native arm64 jobs. The protected credentialed
+live-call execution record and I8 remain pending.
 
-Exact next action: integration lead reviews and merges PR #14 into `integration/v0.1`, then completes
-the I8 release audit and merges reviewed integration PR #4 into `main`. Only then can the protected
-workflow's hard checkout of `main` dispatch the bounded credentialed source/Codex smoke; capture that
-execution in a follow-up checkpoint/PR and keep its I7 box unchecked until the record exists.
+Exact next action: complete the I8 release audit and merge reviewed integration PR #4 into `main`.
+Only then can the protected workflow's hard checkout of `main` dispatch the bounded credentialed
+source/Codex smoke; capture that execution in a follow-up checkpoint/PR and keep its I7 box unchecked
+until the record exists.
