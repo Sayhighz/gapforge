@@ -46,7 +46,13 @@ from gapforge.domain.contracts import (
     SourceCheckpoint,
     Verdict,
 )
-from gapforge.integration.semantic import SemanticCall, SemanticContext, SemanticReasoner
+from gapforge.integration.semantic import (
+    SemanticAdmissionError,
+    SemanticAdmissionKind,
+    SemanticCall,
+    SemanticContext,
+    SemanticReasoner,
+)
 from gapforge.queue.retry import ErrorKind
 from gapforge.research.query_planning import (
     TimeWindow,
@@ -177,6 +183,12 @@ class EvidencePipeline:
         self.clock = clock
 
     async def __call__(self, task: ResearchTask) -> TaskHandlerResult:
+        try:
+            return await self._run(task)
+        except SemanticAdmissionError as error:
+            raise _semantic_task_error(error) from error
+
+    async def _run(self, task: ResearchTask) -> TaskHandlerResult:
         context = await self.store.load_context(task)
         existing_payload = await self.store.load_stage(context, "EXISTING")
         if existing_payload is None:
@@ -863,7 +875,7 @@ class EvidencePipeline:
             SemanticCall(request, schema),
         )
         if result.status is not AgentStatus.COMPLETED or result.output_json is None:
-            raise RuntimeError(f"{stage} failed: {result.status.value}")
+            raise _agent_result_error(result.status, stage)
         return result.output_json, True
 
     async def _query_plan(
@@ -902,7 +914,7 @@ class EvidencePipeline:
             SemanticCall(request=request, output_schema=schema),
         )
         if result.status is not AgentStatus.COMPLETED or result.output_json is None:
-            raise RuntimeError(f"query planning failed: {result.status.value}")
+            raise _agent_result_error(result.status, "QUERY_PLAN")
         return QueryPlan.model_validate(result.output_json)
 
     async def _collect(
@@ -1022,6 +1034,29 @@ def _collection_warning_codes(results: tuple[CollectResult, ...]) -> list[str]:
         if result.availability is not Availability.AVAILABLE
     )
     return sorted(warnings)
+
+
+def _semantic_task_error(error: SemanticAdmissionError) -> TaskHandlerError:
+    kind = {
+        SemanticAdmissionKind.BUDGET_EXHAUSTED: ErrorKind.BUDGET_EXHAUSTED,
+        SemanticAdmissionKind.DEADLINE_EXCEEDED: ErrorKind.DEADLINE_EXCEEDED,
+        SemanticAdmissionKind.PARALLEL_LIMIT: ErrorKind.RATE_LIMITED,
+        SemanticAdmissionKind.TASK_CONTEXT_INVALID: ErrorKind.INTEGRITY,
+        SemanticAdmissionKind.REPLAY_UNAVAILABLE: ErrorKind.INTEGRITY,
+        SemanticAdmissionKind.INDETERMINATE_ATTEMPT: ErrorKind.TIMEOUT,
+    }[error.kind]
+    return TaskHandlerError(kind, error_class=f"Semantic{error.kind.value.title()}")
+
+
+def _agent_result_error(status: AgentStatus, stage: str) -> TaskHandlerError:
+    kind = {
+        AgentStatus.AUTH_REQUIRED: ErrorKind.AUTH_REQUIRED,
+        AgentStatus.TIMEOUT: ErrorKind.TIMEOUT,
+        AgentStatus.INVALID_OUTPUT: ErrorKind.INVALID_OUTPUT,
+        AgentStatus.FAILED: ErrorKind.PERMANENT,
+        AgentStatus.COMPLETED: ErrorKind.INTEGRITY,
+    }[status]
+    return TaskHandlerError(kind, error_class=f"{stage.title()}SemanticFailure")
 
 
 def _integer_field(payload: Mapping[str, object], name: str) -> int:
