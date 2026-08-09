@@ -22,7 +22,6 @@ from gapforge.analysis.hypotheses import (
     validate_gap_hypothesis,
     validate_problem_hypothesis,
 )
-from gapforge.analysis.lifecycle import TrendObservation, classify_trend
 from gapforge.analysis.normalization import normalize_text, normalize_url
 from gapforge.collectors.base import Collector, collect_isolated
 from gapforge.domain.contracts import (
@@ -33,6 +32,7 @@ from gapforge.domain.contracts import (
     CollectRequest,
     CollectResult,
     CompetitorResearchStatus,
+    CriticResult,
     EvidenceCard,
     FetchResult,
     FetchSnapshot,
@@ -40,6 +40,7 @@ from gapforge.domain.contracts import (
     OpportunityScoreSnapshot,
     QueryPlan,
     RunMode,
+    RunWarning,
     SearchResponse,
     SemanticOperation,
     Source,
@@ -128,6 +129,38 @@ class CapturedEvidence:
     thread_id: str
 
 
+@dataclass(slots=True)
+class PipelineExecution:
+    omissions: dict[str, int] = field(default_factory=dict)
+
+    def record_input(self, stage: str, input_json: Mapping[str, Any]) -> None:
+        bounds = input_json.get("input_bounds")
+        if not isinstance(bounds, dict):
+            return
+        counts = bounds.get("omitted_counts")
+        if not isinstance(counts, dict):
+            return
+        for section, count in counts.items():
+            if isinstance(section, str) and isinstance(count, int) and count > 0:
+                self.omissions[f"{stage}.{section}"] = count
+
+    def record_checkpoint(self, stage: str, payload: Mapping[str, Any]) -> None:
+        bounds = payload.get("_input_bounds")
+        if isinstance(bounds, dict):
+            self.record_input(stage, {"input_bounds": bounds})
+
+    def checkpoint_payload(self, stage: str, artifact: dict[str, Any]) -> dict[str, Any]:
+        counts = {
+            key.removeprefix(f"{stage}."): value
+            for key, value in self.omissions.items()
+            if key.startswith(f"{stage}.")
+        }
+        return {
+            **artifact,
+            "_input_bounds": {"omitted_counts": counts},
+        }
+
+
 class EvidencePipelineStore(Protocol):
     async def load_context(self, task: ResearchTask) -> PipelineContext: ...
 
@@ -150,6 +183,8 @@ class EvidencePipelineStore(Protocol):
         context: PipelineContext,
         commit: PipelineStageCommit,
     ) -> None: ...
+
+    async def remaining_agent_calls(self, context: PipelineContext) -> int: ...
 
 
 class CompetitorSearchPort(Protocol):
@@ -190,6 +225,7 @@ class EvidencePipeline:
 
     async def _run(self, task: ResearchTask) -> TaskHandlerResult:
         context = await self.store.load_context(task)
+        execution = PipelineExecution()
         existing_payload = await self.store.load_stage(context, "EXISTING")
         if existing_payload is None:
             existing = await self.store.query_existing(context)
@@ -221,7 +257,7 @@ class EvidencePipeline:
 
         plan_payload = await self.store.load_stage(context, "QUERY_PLAN")
         if plan_payload is None:
-            plan = await self._query_plan(context, existing)
+            plan = await self._query_plan(context, existing, execution)
             plan_payload = plan.model_dump(mode="json")
             await self._commit(context, "QUERY_PLAN", plan_payload)
         plan = QueryPlan.model_validate(plan_payload)
@@ -259,6 +295,7 @@ class EvidencePipeline:
                     "completed_stage": "COLLECT",
                 },
                 useful_artifact=False,
+                warnings=_run_warnings(warning_codes),
             )
 
         evidence_ids = _string_tuple_field(collect_payload, "evidence_ids")
@@ -273,7 +310,8 @@ class EvidencePipeline:
             )
             for item in evidence
         }
-        extraction = await self._extract(context, evidence, records)
+        extraction = await self._extract(context, evidence, records, execution)
+        _append_omission_warning(warning_codes, execution)
         if not extraction.pain_signals:
             return TaskHandlerResult(
                 payload={
@@ -283,8 +321,12 @@ class EvidencePipeline:
                     "completed_stage": "EXTRACT",
                 },
                 useful_artifact=True,
+                warnings=_run_warnings(
+                    warning_codes,
+                    omissions=execution.omissions,
+                ),
             )
-        clusters = await self._cluster(context, extraction)
+        clusters = await self._cluster(context, extraction, execution)
         try:
             competitor_research = await self._competitor_research(context, clusters)
         except CollectionBudgetExhaustedError as error:
@@ -294,10 +336,18 @@ class EvidencePipeline:
             ) from error
         warning_codes.extend(competitor_research.warning_codes)
         warning_codes = sorted(set(warning_codes))
-        gap = await self._research_gap(context, evidence, records, clusters, competitor_research)
+        gap = await self._research_gap(
+            context,
+            evidence,
+            records,
+            clusters,
+            competitor_research,
+            execution,
+        )
         cards, scores = await self._cards_and_scores(context, evidence, extraction, clusters, gap)
-        hypotheses = await self._hypotheses(context, gap, cards, clusters)
-        critics = await self._critic(context, gap, cards, hypotheses)
+        hypotheses = await self._hypotheses(context, gap, cards, clusters, execution)
+        critics = await self._critic(context, gap, cards, hypotheses, execution)
+        _append_omission_warning(warning_codes, execution)
         decisions = []
         score_by_opportunity = {score.opportunity_id: score for score in scores}
         card_by_opportunity = {card.opportunity_id: card for card in cards}
@@ -326,6 +376,10 @@ class EvidencePipeline:
                 "completed_stage": "FINAL",
             },
             useful_artifact=True,
+            warnings=_run_warnings(
+                warning_codes,
+                omissions=execution.omissions,
+            ),
         )
 
     async def _extract(
@@ -333,13 +387,14 @@ class EvidencePipeline:
         context: PipelineContext,
         evidence: tuple[CapturedEvidence, ...],
         records: dict[str, EvidenceRecord],
+        execution: PipelineExecution,
     ) -> PainExtractionBatch:
         evidence_input = _bounded_evidence_input(evidence)
-        permitted = tuple(item["id"] for item in evidence_input)
         input_json = _bounded_stage_input(
             (("evidence", evidence_input),),
             total_counts={"evidence": len(evidence)},
         )
+        permitted = _selected_ids(input_json, "evidence")
         payload, is_new = await self._load_or_reason(
             context,
             stage="EXTRACT",
@@ -348,6 +403,7 @@ class EvidencePipeline:
             schema_type=PainExtractionBatch,
             input_json=input_json,
             permitted_evidence_ids=permitted,
+            execution=execution,
         )
         provider_batch = PainExtractionBatch.model_validate(payload)
         normalized = []
@@ -374,7 +430,11 @@ class EvidencePipeline:
             )
         batch = PainExtractionBatch(pain_signals=tuple(normalized))
         if is_new:
-            await self._commit(context, "EXTRACT", batch.model_dump(mode="json"))
+            await self._commit(
+                context,
+                "EXTRACT",
+                execution.checkpoint_payload("EXTRACT", batch.model_dump(mode="json")),
+            )
         return batch
 
     async def _competitor_research(
@@ -434,6 +494,7 @@ class EvidencePipeline:
         self,
         context: PipelineContext,
         extraction: PainExtractionBatch,
+        execution: PipelineExecution,
     ) -> ClusterBatch:
         payload, is_new = await self._load_or_reason(
             context,
@@ -445,6 +506,7 @@ class EvidencePipeline:
             permitted_evidence_ids=tuple(
                 signal.raw_signal_revision_id for signal in extraction.pain_signals
             ),
+            execution=execution,
         )
         batch = _normalize_clusters(context, ClusterBatch.model_validate(payload), extraction)
         problem_ids = {problem.id for problem in batch.problems}
@@ -459,7 +521,11 @@ class EvidencePipeline:
         ):
             raise ValueError("cluster membership references unknown artifact")
         if is_new:
-            await self._commit(context, "CLUSTER", batch.model_dump(mode="json"))
+            await self._commit(
+                context,
+                "CLUSTER",
+                execution.checkpoint_payload("CLUSTER", batch.model_dump(mode="json")),
+            )
         return batch
 
     async def _research_gap(
@@ -469,10 +535,12 @@ class EvidencePipeline:
         records: dict[str, EvidenceRecord],
         clusters: ClusterBatch,
         competitor_research: CompetitorResearchCheckpoint,
+        execution: PipelineExecution,
     ) -> GapResearchBatch:
         existing = await self.store.load_stage(context, "GAP")
         if existing is not None:
-            return GapResearchBatch.model_validate(existing)
+            execution.record_checkpoint("GAP", existing)
+            return GapResearchBatch.model_validate(_artifact_payload(existing))
         if competitor_research.status is not CompetitorResearchStatus.COMPLETE:
             batch = GapResearchBatch(
                 claims=(),
@@ -507,6 +575,12 @@ class EvidencePipeline:
                 "evidence": len(evidence),
             },
         )
+        selected_evidence_ids = _selected_ids(input_json, "evidence")
+        selected_problem_ids = _selected_ids(input_json, "problems")
+        selected_snapshot_urls = _selected_urls(
+            input_json,
+            "competitor_snapshots",
+        )
         payload, is_new = await self._load_or_reason(
             context,
             stage="GAP",
@@ -514,12 +588,9 @@ class EvidencePipeline:
             effort=AgentEffort.MEDIUM,
             schema_type=GapResearchBatch,
             input_json=input_json,
-            permitted_evidence_ids=tuple(item["id"] for item in evidence_input),
-            permitted_urls=tuple(
-                str(url)
-                for snapshot in competitor_research.snapshots
-                for url in (snapshot.url, snapshot.final_url)
-            ),
+            permitted_evidence_ids=selected_evidence_ids,
+            permitted_urls=selected_snapshot_urls,
+            execution=execution,
         )
         batch = _normalize_gap(context, GapResearchBatch.model_validate(payload))
         _require_unique_ids("claims", batch.claims)
@@ -527,13 +598,14 @@ class EvidencePipeline:
         _require_unique_ids("competitor evidence", batch.competitor_evidence)
         _require_unique_ids("gaps", batch.gaps)
         _require_unique_ids("opportunities", batch.opportunities)
-        problem_ids = {problem.id for problem in clusters.problems}
+        problem_ids = set(selected_problem_ids)
         competitor_ids = {item.id for item in batch.competitors}
         claim_ids = frozenset(item.id for item in batch.claims)
         snapshots_by_url = {
             normalize_url(str(url)): snapshot
             for snapshot in competitor_research.snapshots
             for url in (snapshot.url, snapshot.final_url)
+            if normalize_url(str(url)) in {normalize_url(value) for value in selected_snapshot_urls}
         }
         competitor_records: dict[str, EvidenceRecord] = {}
         if (
@@ -560,7 +632,9 @@ class EvidencePipeline:
                 snapshot.text,
                 snapshot.observed_at,
             )
-        permitted_user_records = {item["id"]: records[item["id"]] for item in evidence_input}
+        permitted_user_records = {
+            evidence_id: records[evidence_id] for evidence_id in selected_evidence_ids
+        }
         all_records = {**permitted_user_records, **competitor_records}
         for claim in batch.claims:
             validate_atomic_claim(claim, all_records, known_claim_ids=claim_ids)
@@ -582,7 +656,11 @@ class EvidencePipeline:
         if len(fit_ids) != len(set(fit_ids)) or set(fit_ids) != opportunity_ids:
             raise ValueError("every opportunity requires exactly one opportunity-fit input")
         if is_new:
-            await self._commit(context, "GAP", batch.model_dump(mode="json"))
+            await self._commit(
+                context,
+                "GAP",
+                execution.checkpoint_payload("GAP", batch.model_dump(mode="json")),
+            )
         return batch
 
     async def _cards_and_scores(
@@ -663,28 +741,10 @@ class EvidencePipeline:
                 if representative_pains
                 else 0.0
             )
-            trend = classify_trend(
-                tuple(
-                    TrendObservation(
-                        signal_id=item.evidence_id,
-                        author_id=item.author_id,
-                        thread_id=item.thread_id,
-                        observed_at=item.observed_at,
-                        duplicate_group=item.duplicate_group,
-                    )
-                    for item in evidence
-                    if item.evidence_id in representative_ids
-                ),
-                as_of=context.collection_until,
-                current_examined_volume=max(1, len(evidence)),
-                previous_examined_volume=max(1, len(evidence)),
-            )
-            trend_score = {
-                "RISING": 100.0,
-                "FLAT": 50.0,
-                "FALLING": 0.0,
-                "INSUFFICIENT_DATA": 0.0,
-            }[trend.label.value]
+            # Collection checkpoints do not yet retain comparable current/prior
+            # examined-volume denominators. A fabricated equal denominator can
+            # promote viral/cross-posted activity, so v0.1 scores trend as unknown.
+            trend_score = 0.0
             diversity = 100 * min(
                 1.0,
                 (
@@ -733,47 +793,54 @@ class EvidencePipeline:
         gap: GapResearchBatch,
         cards: tuple[EvidenceCard, ...],
         clusters: ClusterBatch,
+        execution: PipelineExecution,
     ) -> HypothesisBatch:
         existing = await self.store.load_stage(context, "HYPOTHESIS")
         if existing is not None:
-            return HypothesisBatch.model_validate(existing)
+            execution.record_checkpoint("HYPOTHESIS", existing)
+            return HypothesisBatch.model_validate(_artifact_payload(existing))
         if not gap.opportunities:
             batch = HypothesisBatch(hypotheses=())
             await self._commit(context, "HYPOTHESIS", batch.model_dump(mode="json"))
             return batch
+        input_json = _bounded_stage_input(
+            (
+                (
+                    "problems",
+                    [item.model_dump(mode="json") for item in clusters.problems],
+                ),
+                ("cards", [_compact_card(item) for item in cards]),
+                ("claims", [item.model_dump(mode="json") for item in gap.claims]),
+            ),
+            total_counts={
+                "problems": len(clusters.problems),
+                "cards": len(cards),
+                "claims": len(gap.claims),
+            },
+        )
+        permitted_claims = frozenset(_selected_ids(input_json, "claims"))
+        permitted_problem_ids = frozenset(_selected_ids(input_json, "problems"))
         payload, is_new = await self._load_or_reason(
             context,
             stage="HYPOTHESIS",
             operation=SemanticOperation.HYPOTHESIS,
             effort=AgentEffort.MEDIUM,
             schema_type=HypothesisBatch,
-            input_json=_bounded_stage_input(
-                (
-                    (
-                        "problems",
-                        [item.model_dump(mode="json") for item in clusters.problems],
-                    ),
-                    ("cards", [_compact_card(item) for item in cards]),
-                    ("claims", [item.model_dump(mode="json") for item in gap.claims]),
-                ),
-                total_counts={
-                    "problems": len(clusters.problems),
-                    "cards": len(cards),
-                    "claims": len(gap.claims),
-                },
-            ),
-            permitted_evidence_ids=tuple(
-                sorted({value for item in gap.claims for value in item.evidence_ids})
-            ),
+            input_json=input_json,
+            permitted_evidence_ids=_selected_claim_evidence_ids(input_json),
+            execution=execution,
         )
         batch = _normalize_hypotheses(context, HypothesisBatch.model_validate(payload))
-        permitted_claims = frozenset(item.id for item in gap.claims)
         for hypothesis in batch.hypotheses:
             validate_problem_hypothesis(hypothesis, permitted_claims)
-            if hypothesis.canonical_problem_id not in {item.id for item in clusters.problems}:
+            if hypothesis.canonical_problem_id not in permitted_problem_ids:
                 raise ValueError("hypothesis references unknown canonical problem")
         if is_new:
-            await self._commit(context, "HYPOTHESIS", batch.model_dump(mode="json"))
+            await self._commit(
+                context,
+                "HYPOTHESIS",
+                execution.checkpoint_payload("HYPOTHESIS", batch.model_dump(mode="json")),
+            )
         return batch
 
     async def _critic(
@@ -782,56 +849,64 @@ class EvidencePipeline:
         gap: GapResearchBatch,
         cards: tuple[EvidenceCard, ...],
         hypotheses: HypothesisBatch,
+        execution: PipelineExecution,
     ) -> CriticBatch:
         existing = await self.store.load_stage(context, "CRITIC")
         if existing is not None:
-            return CriticBatch.model_validate(existing)
+            execution.record_checkpoint("CRITIC", existing)
+            return CriticBatch.model_validate(_artifact_payload(existing))
         if not gap.opportunities:
             batch = CriticBatch(results=())
             await self._commit(context, "CRITIC", batch.model_dump(mode="json"))
             return batch
-        payload, is_new = await self._load_or_reason(
-            context,
-            stage="CRITIC",
-            operation=SemanticOperation.CRITIC,
-            effort=AgentEffort.MEDIUM,
-            schema_type=CriticBatch,
-            input_json=_bounded_stage_input(
-                (
-                    (
-                        "opportunities",
-                        [item.model_dump(mode="json") for item in gap.opportunities],
-                    ),
-                    ("cards", [_compact_card(item) for item in cards]),
-                    (
-                        "hypotheses",
-                        [item.model_dump(mode="json") for item in hypotheses.hypotheses],
-                    ),
-                    ("gaps", [item.model_dump(mode="json") for item in gap.gaps]),
-                    ("claims", [item.model_dump(mode="json") for item in gap.claims]),
-                ),
-                total_counts={
-                    "opportunities": len(gap.opportunities),
-                    "cards": len(cards),
-                    "hypotheses": len(hypotheses.hypotheses),
-                    "gaps": len(gap.gaps),
-                    "claims": len(gap.claims),
-                },
-            ),
-            permitted_evidence_ids=tuple(
-                sorted({value for item in gap.claims for value in item.evidence_ids})
-            ),
+        critic_cases = _critic_cases(gap, cards, hypotheses)
+        input_json = _bounded_stage_input(
+            (("cases", critic_cases),),
+            total_counts={"cases": len(gap.opportunities)},
         )
-        batch = CriticBatch.model_validate(payload)
-        opportunity_ids = {item.id for item in gap.opportunities}
-        result_ids = [item.opportunity_id for item in batch.results]
+        opportunity_ids = set(_selected_case_opportunity_ids(input_json))
+        if opportunity_ids:
+            payload, is_new = await self._load_or_reason(
+                context,
+                stage="CRITIC",
+                operation=SemanticOperation.CRITIC,
+                effort=AgentEffort.MEDIUM,
+                schema_type=CriticBatch,
+                input_json=input_json,
+                permitted_evidence_ids=_selected_case_evidence_ids(input_json),
+                execution=execution,
+            )
+            provider_batch = CriticBatch.model_validate(payload)
+        else:
+            execution.record_input("CRITIC", input_json)
+            provider_batch = CriticBatch(results=())
+            is_new = True
+        result_ids = [item.opportunity_id for item in provider_batch.results]
         if len(result_ids) != len(set(result_ids)) or set(result_ids) != opportunity_ids:
             raise ValueError("critic must return one result per opportunity")
-        permitted_claims = frozenset(item.id for item in gap.claims)
-        for result in batch.results:
+        permitted_claims = frozenset(_selected_case_claim_ids(input_json))
+        for result in provider_batch.results:
             validate_critic_result(result, permitted_claims)
+        omitted_opportunities = sorted({item.id for item in gap.opportunities} - opportunity_ids)
+        batch = CriticBatch(
+            results=tuple(provider_batch.results)
+            + tuple(
+                CriticResult(
+                    opportunity_id=opportunity_id,
+                    verdict=Verdict.RESEARCH_MORE,
+                    confidence=0,
+                    missing_evidence=("coherent critic input bundle was omitted",),
+                    summary="Critic input omitted; validation is not permitted",
+                )
+                for opportunity_id in omitted_opportunities
+            )
+        )
         if is_new:
-            await self._commit(context, "CRITIC", batch.model_dump(mode="json"))
+            await self._commit(
+                context,
+                "CRITIC",
+                execution.checkpoint_payload("CRITIC", batch.model_dump(mode="json")),
+            )
         return batch
 
     async def _load_or_reason(
@@ -844,11 +919,14 @@ class EvidencePipeline:
         schema_type: type[Any],
         input_json: dict[str, Any],
         permitted_evidence_ids: tuple[str, ...],
+        execution: PipelineExecution,
         permitted_urls: tuple[str, ...] = (),
     ) -> tuple[dict[str, object], bool]:
         existing = await self.store.load_stage(context, stage)
         if existing is not None:
-            return existing, False
+            execution.record_checkpoint(stage, existing)
+            return {key: value for key, value in existing.items() if key != "_input_bounds"}, False
+        execution.record_input(stage, input_json)
         encoded_input = json.dumps(
             input_json,
             allow_nan=False,
@@ -882,6 +960,7 @@ class EvidencePipeline:
         self,
         context: PipelineContext,
         existing: ExistingIntelligence,
+        execution: PipelineExecution,
     ) -> QueryPlan:
         schema = QueryPlan.model_json_schema()
         schema["title"] = "GapForge QueryPlan v0.1"
@@ -1034,6 +1113,37 @@ def _collection_warning_codes(results: tuple[CollectResult, ...]) -> list[str]:
         if result.availability is not Availability.AVAILABLE
     )
     return sorted(warnings)
+
+
+def _run_warnings(
+    warning_codes: list[str],
+    *,
+    omissions: Mapping[str, int] | None = None,
+) -> tuple[RunWarning, ...]:
+    omitted = dict(sorted((omissions or {}).items()))
+    return tuple(
+        RunWarning(
+            code=code,
+            details=(
+                {
+                    "omitted_counts": omitted,
+                    "total_omitted": sum(omitted.values()),
+                }
+                if code == "SEMANTIC_INPUT_OMITTED"
+                else {}
+            ),
+        )
+        for code in sorted(set(warning_codes))
+    )
+
+
+def _append_omission_warning(warning_codes: list[str], execution: PipelineExecution) -> None:
+    if execution.omissions and "SEMANTIC_INPUT_OMITTED" not in warning_codes:
+        warning_codes.append("SEMANTIC_INPUT_OMITTED")
+
+
+def _artifact_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key != "_input_bounds"}
 
 
 def _semantic_task_error(error: SemanticAdmissionError) -> TaskHandlerError:
@@ -1403,6 +1513,134 @@ def _bounded_stage_input(
         omitted[name] = max(0, total_counts.get(name, len(values)) - len(selected))
     payload["input_bounds"] = {"omitted_counts": omitted}
     return payload
+
+
+def _selected_ids(payload: Mapping[str, Any], section: str) -> tuple[str, ...]:
+    values = payload.get(section)
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        value["id"]
+        for value in values
+        if isinstance(value, dict) and isinstance(value.get("id"), str)
+    )
+
+
+def _selected_urls(payload: Mapping[str, Any], section: str) -> tuple[str, ...]:
+    values = payload.get(section)
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        sorted(
+            {
+                url
+                for value in values
+                if isinstance(value, dict)
+                for name in ("url", "final_url")
+                if isinstance((url := value.get(name)), str)
+            }
+        )
+    )
+
+
+def _selected_claim_evidence_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    values = payload.get("claims")
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        sorted(
+            {
+                evidence_id
+                for value in values
+                if isinstance(value, dict)
+                for evidence_id in value.get("evidence_ids", [])
+                if isinstance(evidence_id, str)
+            }
+        )
+    )
+
+
+def _critic_cases(
+    gap: GapResearchBatch,
+    cards: tuple[EvidenceCard, ...],
+    hypotheses: HypothesisBatch,
+) -> list[dict[str, Any]]:
+    gap_by_id = {item.id: item for item in gap.gaps}
+    card_by_opportunity = {item.opportunity_id: item for item in cards}
+    hypotheses_by_problem: dict[str, list[Any]] = {}
+    for item in hypotheses.hypotheses:
+        hypotheses_by_problem.setdefault(item.canonical_problem_id, []).append(item)
+    claims = [item.model_dump(mode="json") for item in gap.claims]
+    claim_ids = [item.id for item in gap.claims]
+    cases = []
+    for opportunity in sorted(gap.opportunities, key=lambda item: item.id):
+        hypothesis_gap = gap_by_id[opportunity.gap_hypothesis_id]
+        problem_hypotheses = hypotheses_by_problem.get(
+            hypothesis_gap.canonical_problem_id,
+            [],
+        )
+        card = card_by_opportunity.get(opportunity.id)
+        if card is None or not problem_hypotheses:
+            continue
+        cases.append(
+            {
+                "opportunity_id": opportunity.id,
+                "problem_hypothesis": problem_hypotheses[0].model_dump(mode="json"),
+                "evidence_card": card.model_dump(mode="json"),
+                "gap_hypothesis": hypothesis_gap.model_dump(mode="json"),
+                "competitor_claims": claims,
+                "permitted_claim_ids": claim_ids,
+            }
+        )
+    return cases
+
+
+def _selected_case_opportunity_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        return ()
+    return tuple(
+        value
+        for case in cases
+        if isinstance(case, dict)
+        if isinstance((value := case.get("opportunity_id")), str)
+    )
+
+
+def _selected_case_claim_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        return ()
+    return tuple(
+        sorted(
+            {
+                claim_id
+                for case in cases
+                if isinstance(case, dict)
+                for claim_id in case.get("permitted_claim_ids", [])
+                if isinstance(claim_id, str)
+            }
+        )
+    )
+
+
+def _selected_case_evidence_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        return ()
+    return tuple(
+        sorted(
+            {
+                evidence_id
+                for case in cases
+                if isinstance(case, dict)
+                for claim in case.get("competitor_claims", [])
+                if isinstance(claim, dict)
+                for evidence_id in claim.get("evidence_ids", [])
+                if isinstance(evidence_id, str)
+            }
+        )
+    )
 
 
 class CollectionBudgetExhaustedError(RuntimeError):

@@ -449,8 +449,8 @@ class FullReasoner:
                 call.request.input_json["claims"][0]["id"]
             ]
         elif operation is SemanticOperation.CRITIC:
-            output["results"][0]["opportunity_id"] = call.request.input_json["opportunities"][0][
-                "id"
+            output["results"][0]["opportunity_id"] = call.request.input_json["cases"][0][
+                "opportunity_id"
             ]
         if self.reverse_outputs and operation is SemanticOperation.GAP:
             output["competitors"].reverse()
@@ -500,6 +500,21 @@ class BudgetStore(RecordingStore):
         if commit.stage == "COLLECT":
             raise CollectionBudgetExhaustedError("test budget")
         await super().commit_stage(context, commit)
+
+
+class RecordingArtifactWriter:
+    def __init__(self) -> None:
+        self.stages: list[str] = []
+
+    async def persist_stage(
+        self,
+        session: object,
+        context: PipelineContext,
+        commit: PipelineStageCommit,
+    ) -> None:
+        assert session is not None
+        assert context.run_id is not None
+        self.stages.append(commit.stage)
 
 
 def context(run_id: UUID, task_id: UUID) -> PipelineContext:
@@ -985,10 +1000,12 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
             scheduled.task.lease_expires_at = datetime(2026, 8, 9, 12, 5, tzinfo=UTC)
             await uow.commit()
 
+        artifact_writer = RecordingArtifactWriter()
         store = SqlAlchemyEvidencePipelineStore(
             database.session_factory,
             author_hmac_secret=b"a" * 32,
             clock=lambda: NOW,
+            artifact_writer=artifact_writer,  # type: ignore[arg-type]
         )
         pipeline_context = await store.load_context(scheduled.task)
         item = {
@@ -1166,6 +1183,11 @@ async def test_collection_commit_persists_lineage_checkpoint_and_budget_atomical
             "GITHUB:gh-99:r1",
         }
         assert len({row.duplicate_group_key for row in revisions}) == 1
+        assert artifact_writer.stages == [
+            "COLLECT",
+            "COMPETITOR_RESEARCH",
+            "COLLECT",
+        ]
     finally:
         await database.dispose()
 

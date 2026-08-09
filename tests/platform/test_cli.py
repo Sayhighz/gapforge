@@ -200,14 +200,14 @@ def test_invalid_identifier_uses_json_error_envelope(cli_database_url: str) -> N
     }
 
 
-def test_worker_refuses_to_claim_without_production_handlers() -> None:
+def test_worker_registers_production_research_handler(cli_database_url: str) -> None:
     envelope, exit_code, stderr = _invoke_json(["worker", "--once"])
 
-    assert exit_code == 4
+    assert exit_code == 0
     assert stderr == ""
-    assert envelope["error"] == {
-        "code": "WORKER_NOT_CONFIGURED",
-        "message": "no research task handlers are registered",
+    assert envelope["data"] == {
+        "processed": False,
+        "registered_task_types": ["research.run"],
     }
 
 
@@ -222,8 +222,11 @@ def test_continuous_worker_stays_idle_without_production_handlers(
     envelope, exit_code, stderr = _invoke_json(["worker", "--continuous"])
 
     assert exit_code == 0
-    assert envelope["data"] == {"processed": False, "registered_task_types": []}
-    assert stderr == "warning: worker is idle because no research task handlers are registered\n"
+    assert envelope["data"] == {
+        "processed": False,
+        "registered_task_types": ["research.run"],
+    }
+    assert stderr == ""
 
 
 def test_admin_sql_cli_requires_guard_and_keeps_stdout_clean(cli_database_url: str) -> None:

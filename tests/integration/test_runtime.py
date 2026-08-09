@@ -908,3 +908,59 @@ async def test_worker_only_preserves_useful_partial_success_as_warning(
     finally:
         await _cancel_run(database, scheduled.run.id)
         await database.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("useful_artifact", "warning", "expected_status"),
+    [
+        (True, RunWarning(code="GITHUB_SOURCE_UNAVAILABLE"), "COMPLETED_WITH_WARNINGS"),
+        (False, RunWarning(code="ALL_SOURCES_UNAVAILABLE"), "FAILED"),
+        (False, None, "COMPLETED"),
+    ],
+)
+async def test_success_warnings_drive_terminal_run_semantics_without_duplicates(
+    migrated_postgres_url: str,
+    useful_artifact: bool,
+    warning: RunWarning | None,
+    expected_status: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    scheduled = await _schedule_run(database, title="Success warning mission")
+    try:
+
+        async def handler(_task: ResearchTask) -> TaskHandlerResult:
+            return TaskHandlerResult(
+                payload={"completed_stage": "FINAL"},
+                useful_artifact=useful_artifact,
+                warnings=(warning,) if warning else (),
+            )
+
+        worker = Worker(
+            database,
+            worker_id="success-warning-worker",
+            handlers=TaskHandlerRegistry({ROOT_TASK_TYPE: handler}),
+        )
+        assert await worker.run_once() is True
+
+        async with database.session() as session:
+            controller = RunController(session)
+            await controller.finalize_if_idle(scheduled.run.id)
+            await controller.finalize_if_idle(scheduled.run.id)
+            await session.commit()
+        async with database.session() as session:
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+        assert run is not None
+        assert task is not None
+        assert run.status == expected_status
+        expected_warnings = [warning.model_dump(mode="json")] if useful_artifact else []
+        assert run.warnings == expected_warnings
+        assert task.checkpoint["runtime"]["warnings"] == (
+            [warning.model_dump(mode="json")] if warning else []
+        )
+        if warning and not useful_artifact:
+            assert run.last_checkpoint["reason"] == "no_useful_artifact"
+    finally:
+        await _cancel_run(database, scheduled.run.id)
+        await database.dispose()

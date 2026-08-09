@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gapforge.domain.contracts import RunWarning
 from gapforge.storage.models import ProviderCallLease, ResearchRun, ResearchTask
 
 _RUN_ADMISSION_LOCK_KEY = 0x474150464F524745  # "GAPFORGE", stable signed bigint
@@ -201,6 +203,21 @@ class RunController:
             and isinstance(checkpoint.get("runtime"), dict)
             and checkpoint["runtime"].get("useful_artifact") is True
         )
+        success_warnings: list[dict[str, object]] = []
+        seen_warnings: set[str] = set()
+        for status, _, checkpoint in tasks:
+            runtime = checkpoint.get("runtime")
+            if status != "SUCCEEDED" or not isinstance(runtime, dict):
+                continue
+            raw_warnings = runtime.get("warnings", [])
+            if not isinstance(raw_warnings, list):
+                continue
+            for raw_warning in raw_warnings:
+                warning = RunWarning.model_validate(raw_warning).model_dump(mode="json")
+                identity = json.dumps(warning, sort_keys=True, separators=(",", ":"))
+                if identity not in seen_warnings:
+                    seen_warnings.add(identity)
+                    success_warnings.append(warning)
         failure_classes = sorted(
             {retry_class for status, retry_class, _ in tasks if status == "FAILED" and retry_class}
         )
@@ -223,6 +240,7 @@ class RunController:
             run.status = "COMPLETED_WITH_WARNINGS"
             run.warnings = [
                 *run.warnings,
+                *success_warnings,
                 {
                     "code": "PARTIAL_TASK_FAILURE",
                     "details": {
@@ -232,6 +250,16 @@ class RunController:
                     },
                 },
             ]
+        elif success_warnings and useful_successes:
+            run.status = "COMPLETED_WITH_WARNINGS"
+            run.warnings = [*run.warnings, *success_warnings]
+        elif success_warnings:
+            run.status = "FAILED"
+            run.last_checkpoint = {
+                **run.last_checkpoint,
+                "reason": "no_useful_artifact",
+                "success_warnings": len(success_warnings),
+            }
         elif failed or not succeeded:
             run.status = "FAILED"
             run.last_checkpoint = {

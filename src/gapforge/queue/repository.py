@@ -231,6 +231,7 @@ class DurableQueue:
         worker_id: str,
         result: dict[str, object],
         useful_artifact: bool = False,
+        warnings: list[dict[str, object]] | None = None,
         now: datetime | None = None,
     ) -> ResearchTask:
         task = await self._leased_by(task_id, worker_id)
@@ -248,6 +249,7 @@ class DurableQueue:
             "runtime": {
                 **runtime_checkpoint,
                 "useful_artifact": useful_artifact,
+                "warnings": list(warnings or ()),
             },
         }
         task.completed_at = completion_time

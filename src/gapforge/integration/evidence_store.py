@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,6 +42,15 @@ class StageConflictError(RuntimeError):
     """A stage key was reused with different durable content."""
 
 
+class StageArtifactWriter(Protocol):
+    async def persist_stage(
+        self,
+        session: AsyncSession,
+        context: PipelineContext,
+        commit: PipelineStageCommit,
+    ) -> None: ...
+
+
 class SqlAlchemyEvidencePipelineStore:
     """Commit stage checkpoints, budgets, and raw lineage in one transaction."""
 
@@ -51,10 +60,12 @@ class SqlAlchemyEvidencePipelineStore:
         *,
         author_hmac_secret: bytes | None,
         clock: Callable[[], datetime],
+        artifact_writer: StageArtifactWriter | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.author_hmac_secret = author_hmac_secret
         self.clock = clock
+        self.artifact_writer = artifact_writer
 
     async def load_context(self, task: models.ResearchTask) -> PipelineContext:
         async with self.session_factory() as session:
@@ -96,6 +107,11 @@ class SqlAlchemyEvidencePipelineStore:
                 0,
                 limits.get("max_search_calls_per_run", 0)
                 - int(run.budget_used.get("search_calls", 0)),
+            )
+            limits["max_agent_calls_per_run"] = max(
+                0,
+                limits.get("max_agent_calls_per_run", 0)
+                - int(run.budget_used.get("agent_calls", 0)),
             )
             return PipelineContext(
                 run_id=run.id,
@@ -276,6 +292,16 @@ class SqlAlchemyEvidencePipelineStore:
                 except CollectionBudgetExhaustedError:
                     await session.rollback()
                     raise
+            if self.artifact_writer is not None:
+                await self.artifact_writer.persist_stage(
+                    session,
+                    context,
+                    PipelineStageCommit(
+                        stage=commit.stage,
+                        idempotency_key=commit.idempotency_key,
+                        payload=durable_payload,
+                    ),
+                )
             stages[commit.stage] = {
                 **expected_identity,
                 "payload": durable_payload,
@@ -289,6 +315,27 @@ class SqlAlchemyEvidencePipelineStore:
                 "idempotency_key": commit.idempotency_key,
             }
             await session.commit()
+
+    async def remaining_agent_calls(self, context: PipelineContext) -> int:
+        async with self.session_factory() as session:
+            task = await session.scalar(
+                select(models.ResearchTask)
+                .where(models.ResearchTask.id == context.task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(models.ResearchRun)
+                .where(models.ResearchRun.id == context.run_id)
+                .with_for_update()
+            )
+            if task is None or run is None:
+                raise LookupError("research task or run no longer exists")
+            _assert_stage_lease(task, run, context, self.clock())
+            return max(
+                0,
+                int(run.budget_limits.get("max_agent_calls_per_run", 0))
+                - int(run.budget_used.get("agent_calls", 0)),
+            )
 
     async def _persist_collection(
         self,

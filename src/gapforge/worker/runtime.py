@@ -13,6 +13,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
+from gapforge.domain.contracts import RunWarning
 from gapforge.queue.control import RunController
 from gapforge.queue.repository import DurableQueue
 from gapforge.queue.retry import ErrorKind, classify_error, classify_exception
@@ -64,6 +65,7 @@ class TaskHandlerResult(BaseModel):
 
     payload: dict[str, object] = Field(default_factory=dict)
     useful_artifact: StrictBool = False
+    warnings: tuple[RunWarning, ...] = Field(default_factory=tuple, max_length=50)
 
     @field_validator("payload", mode="before")
     @classmethod
@@ -216,6 +218,7 @@ class Worker:
                 worker_id=self.worker_id,
                 result=result.payload,
                 useful_artifact=result.useful_artifact,
+                warnings=[item.model_dump(mode="json") for item in result.warnings],
             )
             await RunController(session).finalize_if_idle(task.run_id)
             await session.commit()
