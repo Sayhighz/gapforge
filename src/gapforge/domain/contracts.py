@@ -164,6 +164,18 @@ class ResearchMission(Contract):
     created_at: datetime
 
 
+class RunWarning(Contract):
+    """Stable, lossless warning emitted while a run still produces useful evidence."""
+
+    code: Identifier
+    details: dict[str, Any] = Field(default_factory=dict, max_length=50)
+
+    @field_validator("details")
+    @classmethod
+    def details_are_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
+
+
 class ResearchRun(Contract):
     id: UUID
     mission_revision_id: UUID
@@ -172,7 +184,7 @@ class ResearchRun(Contract):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    warning_codes: tuple[Identifier, ...] = Field(default_factory=tuple, max_length=50)
+    warnings: tuple[RunWarning, ...] = Field(default_factory=tuple, max_length=50)
 
     @model_validator(mode="after")
     def timestamps_match_status(self) -> ResearchRun:
@@ -489,9 +501,12 @@ class MissionOpportunityAssessment(Contract):
     mission_revision_id: UUID
     opportunity_id: Identifier
     lifecycle_state: LifecycleState
-    verdict: Verdict
+    relevance: float = Field(ge=0, le=1)
+    verdict: Verdict | None = None
+    competitor_research_status: CompetitorResearchStatus = CompetitorResearchStatus.INCOMPLETE
     score_snapshot_id: Identifier | None = None
     evidence_card_id: Identifier | None = None
+    rejected_at: datetime | None = None
     assessed_at: datetime
 
     @model_validator(mode="after")
@@ -797,7 +812,13 @@ def _bounded_metadata(value: dict[str, Any]) -> dict[str, Any]:
     if len(value) > 50:
         raise ValueError("metadata may contain at most 50 keys")
     try:
-        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("metadata must be JSON serializable") from exc
     if len(encoded.encode("utf-8")) > 20_000:

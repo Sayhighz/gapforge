@@ -10,7 +10,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Numeric, inspect, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from gapforge.domain.contracts import (
     AtomicClaim as DomainAtomicClaim,
@@ -29,9 +29,14 @@ from gapforge.domain.contracts import (
     EvidenceCard as DomainEvidenceCard,
 )
 from gapforge.domain.contracts import (
+    MissionOpportunityAssessment as DomainMissionOpportunityAssessment,
+)
+from gapforge.domain.contracts import (
     OpportunityScoreSnapshot as DomainScoreSnapshot,
 )
 from gapforge.integration.mappers import (
+    assessment_from_storage,
+    assessment_to_storage_values,
     atomic_claim_from_storage,
     atomic_claim_to_storage_values,
     competitor_evidence_from_storage,
@@ -108,6 +113,13 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
                     )
                 )
             )
+            constraint_rows = await connection.execute(
+                text(
+                    "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE connamespace = current_schema()::regnamespace"
+                )
+            )
+            constraint_definitions = dict(constraint_rows.tuples().all())
             indexes = set(
                 await connection.scalars(
                     text("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()")
@@ -131,7 +143,11 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
             "ck_mission_opportunity_assessments_competitor_research_status",
             "ck_mission_opportunity_assessments_valid_verdict",
             "ck_agent_calls_output_schema_sha256_length",
+            "ck_agent_calls_valid_operation",
+            "ck_agent_calls_nonempty_output_schema_name",
             "ck_raw_signal_revisions_duplicate_group_key_format",
+            "ck_opportunity_score_snapshots_evidence_strength_range",
+            "ck_opportunity_score_snapshots_opportunity_fit_range",
         } <= constraints
         assert {
             "ix_raw_signals_canonical_url_trgm",
@@ -139,6 +155,11 @@ async def test_reconciled_schema_constraints_and_candidate_indexes_exist(
             "ix_raw_signal_revisions_search_text_trgm",
             "ix_raw_signal_revisions_duplicate_group",
         } <= indexes
+        assert (
+            "FOREIGN KEY (opportunity_id, canonical_problem_id) "
+            "REFERENCES opportunities(id, canonical_problem_id) ON DELETE RESTRICT"
+            in constraint_definitions["fk_evidence_cards_opportunity_id_opportunities"]
+        )
         assert columns["pain_signals"]["severity"]["nullable"] is False
         assert columns["pain_signals"]["frequency"]["nullable"] is False
         assert columns["raw_signal_revisions"]["domain_revision_id"]["nullable"] is False
@@ -156,15 +177,15 @@ def test_exact_numeric_model_values_do_not_round_through_binary_float() -> None:
         extraction_version="extract-v1",
         cluster_status="UNCLUSTERED",
         pain="Manual work",
-        severity=Decimal("0.12345"),
-        frequency=Decimal("0.98765"),
+        severity=Decimal("0.12345678901234567"),
+        frequency=Decimal("0.98765432109876543"),
         signals={},
-        confidence=Decimal("0.80000"),
+        confidence=Decimal("0.87654321098765432"),
         excerpt="manual work",
     )
 
-    assert pain.severity == Decimal("0.12345")
-    assert pain.frequency == Decimal("0.98765")
+    assert pain.severity == Decimal("0.12345678901234567")
+    assert pain.frequency == Decimal("0.98765432109876543")
 
 
 @pytest.mark.postgres
@@ -217,14 +238,19 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
         canonical_key="manual-reconciliation-workflow",
         title="Automate reconciliation",
     )
-    assessment = MissionOpportunityAssessment(
-        id=uuid4(),
+    domain_assessment = DomainMissionOpportunityAssessment(
+        id=str(uuid4()),
         mission_revision_id=revision.id,
-        opportunity_id=opportunity.id,
-        lifecycle_status="RESEARCHING",
-        relevance=Decimal("0.90000"),
+        opportunity_id=str(opportunity.id),
+        lifecycle_state="RESEARCHING",
+        relevance=0.8123456789012345,
         verdict="RESEARCH_MORE",
         competitor_research_status="COMPLETE",
+        assessed_at=NOW,
+    )
+    assessment = MissionOpportunityAssessment(
+        **assessment_to_storage_values(domain_assessment),
+        updated_at=NOW,
     )
     revision_storage_id = storage_uuid_for_identifier("raw-signal-revision", "raw-1:r1")
     claim_id = uuid4()
@@ -240,7 +266,7 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
         paid_or_wtp_signals=1,
         supporting_claim_ids=(str(claim_id),),
         representative_evidence_ids=("raw-1:r1",),
-        confidence=0.76543,
+        confidence=0.7654321098765432,
         missing_evidence=("more recent evidence",),
     )
     domain_claim = DomainAtomicClaim(
@@ -280,15 +306,17 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
         id=str(uuid4()),
         opportunity_id=str(opportunity.id),
         mission_revision_id=revision.id,
-        evidence_strength=ScoreComponents(values={"severity": 83.125}, weights={"severity": 1.0}),
+        evidence_strength=ScoreComponents(
+            values={"severity": 0.12345678901234567}, weights={"severity": 1.0}
+        ),
         opportunity_fit=ScoreComponents(
             values={"gap_strength": 71.875}, weights={"gap_strength": 1.0}
         ),
         raw_metrics={"authors": 5.0},
         penalties={"concentration": 2.125},
-        pre_penalty_score=77.28125,
-        final_score=75.15625,
-        evidence_confidence=0.8125,
+        pre_penalty_score=0.23456789012345678,
+        final_score=0.12345678901234567,
+        evidence_confidence=0.8765432109876543,
         explanation=("independent evidence",),
         created_at=NOW,
     )
@@ -298,6 +326,8 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
             canonical_problem_id=problem.id,
             run_id=run.id,
             algorithm_version="evidence-v1",
+            revision_ids={"raw-1:r1": revision_storage_id},
+            claim_ids={str(claim_id): claim_id},
         )
     )
     stored_claim = AtomicClaim(
@@ -335,16 +365,23 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
             card_row = await session.get(EvidenceCard, stored_card.id)
             claim_row = await session.get(AtomicClaim, stored_claim.id)
             score_row = await session.get(OpportunityScoreSnapshot, stored_score.id)
+            assessment_row = await session.get(MissionOpportunityAssessment, assessment.id)
             competitor_evidence_row = await session.get(
                 CompetitorEvidence, stored_competitor_evidence.id
             )
             assert card_row is not None
             assert claim_row is not None
             assert score_row is not None
+            assert assessment_row is not None
             assert competitor_evidence_row is not None
             revisions = {revision_storage_id: "raw-1:r1"}
             assert (
-                evidence_card_from_storage(card_row, revision_identifiers=revisions) == domain_card
+                evidence_card_from_storage(
+                    card_row,
+                    revision_identifiers=revisions,
+                    claim_identifiers={claim_id: str(claim_id)},
+                )
+                == domain_card
             )
             assert (
                 atomic_claim_from_storage(claim_row, revision_identifiers=revisions) == domain_claim
@@ -357,10 +394,43 @@ async def test_research_evidence_claim_and_score_round_trip_with_typed_mappers(
                 )
                 == domain_score
             )
+            assert assessment_from_storage(assessment_row) == domain_assessment
             assert (
                 competitor_evidence_from_storage(competitor_evidence_row)
                 == domain_competitor_evidence
             )
+
+            for operation, schema_name in (("UNKNOWN", "schema-v1"), ("query_plan", " ")):
+                with pytest.raises(IntegrityError):
+                    async with session.begin_nested():
+                        session.add(
+                            AgentCall(
+                                run_id=run.id,
+                                provider="fake",
+                                operation=operation,
+                                output_schema_name=schema_name,
+                                output_schema_sha256=b"s" * 32,
+                                requested_model="",
+                                effort="medium",
+                                status="SUCCESS",
+                                duration_ms=1,
+                                repair_attempts=0,
+                                usage={},
+                            )
+                        )
+                        await session.flush()
+
+            invalid_score_values = score_snapshot_to_storage_values(
+                domain_score,
+                assessment_id=assessment.id,
+                run_id=run.id,
+            )
+            invalid_score_values["id"] = uuid4()
+            invalid_score_values["evidence_strength"] = Decimal("-0.1")
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    session.add(OpportunityScoreSnapshot(**invalid_score_values))
+                    await session.flush()
     finally:
         await database.dispose()
 
@@ -572,7 +642,7 @@ async def test_reconciliation_migration_transforms_supported_legacy_rows(
                 (
                     await connection.execute(
                         text(
-                            "SELECT evidence_components, opportunity_fit_components, "
+                            "SELECT evidence_components, opportunity_fit_components, weights, "
                             "pre_penalty_score FROM opportunity_score_snapshots WHERE id = :id"
                         ),
                         {"id": ids["score"]},
@@ -617,12 +687,30 @@ async def test_reconciliation_migration_transforms_supported_legacy_rows(
             "weights": {"legacy_axis": 1},
         }
         assert score["opportunity_fit_components"]["values"] == {"legacy_axis": 75}
-        assert score["pre_penalty_score"] == Decimal("77.459667")
+        assert score["weights"] == {
+            "evidence": {"legacy_axis": 1},
+            "opportunity_fit": {"legacy_axis": 1},
+        }
+        assert score["pre_penalty_score"] == Decimal("77.45966692414830000")
         assert call["operation"] == "legacy_unknown"
         assert call["output_schema_name"] == "legacy-unknown-v0"
         assert len(call["output_schema_sha256"]) == 32
         assert assessment["competitor_research_status"] == "INCOMPLETE"
         assert card_opportunity == ids["opportunity"]
+        await database.dispose()
+
+        await asyncio.to_thread(command.downgrade, config, "132931969d6b")
+        await asyncio.to_thread(command.upgrade, config, "head")
+        database = Database.from_url(postgres_url)
+        async with database.engine.connect() as connection:
+            remigrated_weights = await connection.scalar(
+                text("SELECT weights FROM opportunity_score_snapshots WHERE id = :id"),
+                {"id": ids["score"]},
+            )
+        assert remigrated_weights == {
+            "evidence": {"legacy_axis": 1},
+            "opportunity_fit": {"legacy_axis": 1},
+        }
     finally:
         await database.dispose()
 

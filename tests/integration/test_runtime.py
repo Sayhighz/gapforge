@@ -8,6 +8,8 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
+from gapforge.domain.contracts import RunWarning
+from gapforge.integration.mappers import research_run_from_storage, run_warning_to_storage
 from gapforge.queue.control import RunController
 from gapforge.queue.repository import DurableQueue
 from gapforge.queue.retry import ErrorKind
@@ -880,11 +882,26 @@ async def test_worker_only_preserves_useful_partial_success_as_warning(
             if useful_artifact:
                 assert run.warnings == [
                     {
-                        "failed_tasks": 1,
-                        "failure_classes": ["PERMANENT"],
-                        "useful_successes": 1,
+                        "code": "PARTIAL_TASK_FAILURE",
+                        "details": {
+                            "failed_tasks": 1,
+                            "failure_classes": ["PERMANENT"],
+                            "useful_successes": 1,
+                        },
                     }
                 ]
+                mapped = research_run_from_storage(run)
+                assert mapped.warnings == (
+                    RunWarning(
+                        code="PARTIAL_TASK_FAILURE",
+                        details={
+                            "failed_tasks": 1,
+                            "failure_classes": ["PERMANENT"],
+                            "useful_successes": 1,
+                        },
+                    ),
+                )
+                assert run_warning_to_storage(mapped.warnings[0]) == run.warnings[0]
             else:
                 assert run.warnings == []
                 assert run.last_checkpoint["reason"] == "all_tasks_failed"

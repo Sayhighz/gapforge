@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -316,12 +317,12 @@ class PainSignal(IdMixin, CreatedAtMixin, Base):
     pain: Mapped[str] = mapped_column(Text, nullable=False)
     user_context: Mapped[str | None] = mapped_column(Text)
     jtbd: Mapped[str | None] = mapped_column(Text)
-    severity: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
-    frequency: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
+    severity: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
+    frequency: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
     workaround: Mapped[str | None] = mapped_column(Text)
     existing_solution: Mapped[str | None] = mapped_column(Text)
     signals: Mapped[JSONValue] = mapped_column(JSONB, nullable=False, default=dict)
-    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
     excerpt: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -398,6 +399,11 @@ class EvidenceCard(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "evidence_cards"
     __table_args__ = (
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence_range"),
+        ForeignKeyConstraint(
+            ["opportunity_id", "canonical_problem_id"],
+            ["opportunities.id", "opportunities.canonical_problem_id"],
+            ondelete="RESTRICT",
+        ),
         Index("ix_evidence_cards_problem_created", "canonical_problem_id", "created_at"),
         Index("ix_evidence_cards_opportunity_created", "opportunity_id", "created_at"),
     )
@@ -405,9 +411,7 @@ class EvidenceCard(IdMixin, CreatedAtMixin, Base):
     canonical_problem_id: Mapped[UUID] = mapped_column(
         ForeignKey("canonical_problems.id", ondelete="RESTRICT"), nullable=False
     )
-    opportunity_id: Mapped[UUID] = mapped_column(
-        ForeignKey("opportunities.id", ondelete="RESTRICT"), nullable=False
-    )
+    opportunity_id: Mapped[UUID] = mapped_column(nullable=False)
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("research_runs.id", ondelete="RESTRICT"), nullable=False
     )
@@ -425,7 +429,7 @@ class EvidenceCard(IdMixin, CreatedAtMixin, Base):
     representative_signal_ids: Mapped[list[UUID]] = mapped_column(
         ARRAY(PG_UUID(as_uuid=True)), nullable=False
     )
-    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
     missing_evidence: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
 
@@ -538,7 +542,10 @@ class GapHypothesis(IdMixin, CreatedAtMixin, Base):
 
 class Opportunity(IdMixin, UpdatedAtMixin, Base):
     __tablename__ = "opportunities"
-    __table_args__ = (Index("ix_opportunities_problem", "canonical_problem_id"),)
+    __table_args__ = (
+        UniqueConstraint("id", "canonical_problem_id"),
+        Index("ix_opportunities_problem", "canonical_problem_id"),
+    )
 
     canonical_problem_id: Mapped[UUID] = mapped_column(
         ForeignKey("canonical_problems.id", ondelete="RESTRICT"), nullable=False
@@ -582,7 +589,7 @@ class MissionOpportunityAssessment(IdMixin, UpdatedAtMixin, Base):
         ForeignKey("opportunities.id", ondelete="RESTRICT"), nullable=False
     )
     lifecycle_status: Mapped[str] = mapped_column(String(24), nullable=False, default="DISCOVERED")
-    relevance: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
+    relevance: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
     verdict: Mapped[str | None] = mapped_column(String(24))
     competitor_research_status: Mapped[str] = mapped_column(
         String(24), nullable=False, default="INCOMPLETE"
@@ -593,6 +600,14 @@ class MissionOpportunityAssessment(IdMixin, UpdatedAtMixin, Base):
 class OpportunityScoreSnapshot(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "opportunity_score_snapshots"
     __table_args__ = (
+        CheckConstraint(
+            "evidence_strength >= 0 AND evidence_strength <= 100",
+            name="evidence_strength_range",
+        ),
+        CheckConstraint(
+            "opportunity_fit >= 0 AND opportunity_fit <= 100",
+            name="opportunity_fit_range",
+        ),
         CheckConstraint("final_score >= 0 AND final_score <= 100", name="final_score_range"),
         CheckConstraint(
             "pre_penalty_score >= 0 AND pre_penalty_score <= 100",
@@ -610,15 +625,15 @@ class OpportunityScoreSnapshot(IdMixin, CreatedAtMixin, Base):
     )
     algorithm_version: Mapped[str] = mapped_column(String(32), nullable=False)
     raw_metrics: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
-    evidence_strength: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
-    opportunity_fit: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    evidence_strength: Mapped[Decimal] = mapped_column(Numeric(20, 17), nullable=False)
+    opportunity_fit: Mapped[Decimal] = mapped_column(Numeric(20, 17), nullable=False)
     evidence_components: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
     opportunity_fit_components: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
     weights: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
     penalties: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
-    pre_penalty_score: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
-    final_score: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
-    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 5), nullable=False)
+    pre_penalty_score: Mapped[Decimal] = mapped_column(Numeric(20, 17), nullable=False)
+    final_score: Mapped[Decimal] = mapped_column(Numeric(20, 17), nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
     explanation: Mapped[JSONValue] = mapped_column(JSONB, nullable=False)
 
 
@@ -640,7 +655,7 @@ class CriticResult(IdMixin, CreatedAtMixin, Base):
         ForeignKey("agent_calls.id", ondelete="RESTRICT"), nullable=False
     )
     verdict: Mapped[str] = mapped_column(String(24), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(18, 17), nullable=False)
     fatal_flags: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     weak_assumptions: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     contradictions: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
@@ -689,6 +704,15 @@ class AgentCall(IdMixin, CreatedAtMixin, Base):
         CheckConstraint(
             "octet_length(output_schema_sha256) = 32",
             name="output_schema_sha256_length",
+        ),
+        CheckConstraint(
+            "operation IN ('query_plan', 'extract', 'relevance', 'cluster', "
+            "'hypothesis', 'gap', 'critic', 'deep_research', 'legacy_unknown')",
+            name="valid_operation",
+        ),
+        CheckConstraint(
+            "length(btrim(output_schema_name)) > 0",
+            name="nonempty_output_schema_name",
         ),
         Index("ix_agent_calls_run_created", "run_id", "created_at"),
     )

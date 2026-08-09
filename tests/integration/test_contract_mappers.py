@@ -16,14 +16,19 @@ from gapforge.domain.contracts import (
     Citation,
     ClaimKind,
     CompetitorEvidence,
+    CompetitorResearchStatus,
     EpistemicStatus,
     EvidenceCard,
+    LifecycleState,
+    MissionOpportunityAssessment,
     OpportunityScoreSnapshot,
+    RunWarning,
     ScoreComponents,
     SemanticOperation,
     Source,
     SourceCheckpoint,
     TaskStatus,
+    Verdict,
 )
 from gapforge.integration.mappers import (
     PERSISTED_ENTITY_MAPPINGS,
@@ -32,6 +37,8 @@ from gapforge.integration.mappers import (
     agent_schema_identity,
     agent_status_from_provider,
     agent_status_to_provider,
+    assessment_from_storage,
+    assessment_to_storage_values,
     atomic_claim_from_storage,
     atomic_claim_to_storage_values,
     checkpoint_from_storage,
@@ -45,6 +52,7 @@ from gapforge.integration.mappers import (
     normalize_output_locale,
     research_run_from_storage,
     research_task_from_storage,
+    run_warning_to_storage,
     score_snapshot_from_storage,
     score_snapshot_to_storage_values,
     storage_uuid_for_identifier,
@@ -59,6 +67,9 @@ from gapforge.storage.models import (
 from gapforge.storage.models import CompetitorEvidence as StoredCompetitorEvidence
 from gapforge.storage.models import (
     EvidenceCard as StoredEvidenceCard,
+)
+from gapforge.storage.models import (
+    MissionOpportunityAssessment as StoredMissionOpportunityAssessment,
 )
 from gapforge.storage.models import MissionRevision as StoredMissionRevision
 from gapforge.storage.models import (
@@ -146,7 +157,16 @@ def test_mission_run_and_task_storage_names_map_to_domain_contracts() -> None:
         completed_at=NOW,
         budget_limits={},
         budget_used={},
-        warnings=["SOURCE_UNAVAILABLE"],
+        warnings=[
+            {
+                "code": "PARTIAL_TASK_FAILURE",
+                "details": {
+                    "failed_tasks": 1,
+                    "failure_classes": ["SOURCE_UNAVAILABLE"],
+                    "useful_successes": 2,
+                },
+            }
+        ],
         last_checkpoint={},
         created_at=NOW,
     )
@@ -166,8 +186,54 @@ def test_mission_run_and_task_storage_names_map_to_domain_contracts() -> None:
     )
 
     assert mission_revision_from_storage(mission).output_locale == "en-US"
-    assert research_run_from_storage(run).finished_at == NOW
+    mapped_run = research_run_from_storage(run)
+    assert mapped_run.finished_at == NOW
+    assert mapped_run.warnings == (
+        RunWarning(
+            code="PARTIAL_TASK_FAILURE",
+            details={
+                "failed_tasks": 1,
+                "failure_classes": ["SOURCE_UNAVAILABLE"],
+                "useful_successes": 2,
+            },
+        ),
+    )
+    assert run_warning_to_storage(mapped_run.warnings[0]) == run.warnings[0]
     assert research_task_from_storage(task).status is TaskStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        {"details": {}},
+        {"code": "PARTIAL_TASK_FAILURE"},
+        {"code": "PARTIAL_TASK_FAILURE", "details": {}, "extra": True},
+        {"code": "PARTIAL_TASK_FAILURE", "details": "not-an-object"},
+        {"code": "PARTIAL_TASK_FAILURE", "details": {str(index): index for index in range(51)}},
+        {"code": "PARTIAL_TASK_FAILURE", "details": {"ratio": float("nan")}},
+    ],
+)
+def test_research_run_mapping_rejects_noncanonical_structured_warnings(
+    warning: dict[str, object],
+) -> None:
+    row = StoredResearchRun(
+        id=uuid4(),
+        mission_revision_id=uuid4(),
+        mode="HUNT",
+        status="COMPLETED_WITH_WARNINGS",
+        priority=1,
+        deadline_at=NOW,
+        started_at=NOW,
+        completed_at=NOW,
+        budget_limits={},
+        budget_used={},
+        warnings=[warning],
+        last_checkpoint={},
+        created_at=NOW,
+    )
+
+    with pytest.raises(MappingError, match="run warning"):
+        research_run_from_storage(row)
 
 
 def test_checkpoint_mapping_preserves_none_cursor_and_watermark() -> None:
@@ -207,6 +273,23 @@ def test_string_identifiers_map_to_stable_uuid_without_losing_original() -> None
     )
     with pytest.raises(MappingError, match="does not match"):
         domain_identifier_from_storage("raw-signal-revision", uuid4(), "raw-1:r2")
+
+
+def test_uuid_storage_mapping_rejects_lexically_noncanonical_ids() -> None:
+    score = OpportunityScoreSnapshot(
+        id=str(uuid4()).upper(),
+        opportunity_id=str(uuid4()),
+        mission_revision_id=uuid4(),
+        evidence_strength=ScoreComponents(values={"severity": 80}, weights={"severity": 1}),
+        opportunity_fit=ScoreComponents(values={"fit": 70}, weights={"fit": 1}),
+        pre_penalty_score=75,
+        final_score=75,
+        evidence_confidence=0.8,
+        created_at=NOW,
+    )
+
+    with pytest.raises(MappingError, match="canonical UUID"):
+        score_snapshot_to_storage_values(score, assessment_id=uuid4(), run_id=uuid4())
 
 
 def test_agent_schema_identity_is_canonical_and_operation_scoped() -> None:
@@ -284,9 +367,22 @@ def test_every_persisted_research_entity_has_an_explicit_complete_mapping() -> N
 
     task_mapping = PERSISTED_ENTITY_MAPPINGS["ResearchTask"]
     assert task_mapping.field_routes["status"].transform == "task_status"
+    agent_call_mapping = PERSISTED_ENTITY_MAPPINGS["AgentCall"]
+    for field in ("request", "result"):
+        assert agent_call_mapping.field_routes[field].executable is False
+        assert agent_call_mapping.field_routes[field].transform == "provider_audit_projection"
     mission_mapping = PERSISTED_ENTITY_MAPPINGS["ResearchMission"]
     with pytest.raises(RuntimeError, match="required storage columns"):
-        validate_entity_mapping(replace(mission_mapping, storage_only_routes={}))
+        validate_entity_mapping(
+            replace(
+                mission_mapping,
+                storage_only_routes={
+                    key: route
+                    for key, route in mission_mapping.storage_only_routes.items()
+                    if key != "updated_at"
+                },
+            )
+        )
 
 
 def test_evidence_card_typed_mapping_round_trips_all_metrics() -> None:
@@ -317,14 +413,77 @@ def test_evidence_card_typed_mapping_round_trips_all_metrics() -> None:
             canonical_problem_id=canonical_problem_id,
             run_id=run_id,
             algorithm_version="evidence-v1",
+            revision_ids={"raw-1:r1": revision_storage_id},
+            claim_ids={
+                identifier: UUID(identifier)
+                for identifier in (
+                    *card.supporting_claim_ids,
+                    *card.contradicting_claim_ids,
+                )
+            },
         )
     )
 
     assert stored.metrics["severity"] == "0.81234"
+    claim_identifiers = {
+        UUID(identifier): identifier
+        for identifier in (*card.supporting_claim_ids, *card.contradicting_claim_ids)
+    }
     assert (
-        evidence_card_from_storage(stored, revision_identifiers={revision_storage_id: "raw-1:r1"})
+        evidence_card_from_storage(
+            stored,
+            revision_identifiers={revision_storage_id: "raw-1:r1"},
+            claim_identifiers=claim_identifiers,
+        )
         == card
     )
+    with pytest.raises(MappingError, match="unknown persisted claim"):
+        evidence_card_from_storage(
+            stored,
+            revision_identifiers={revision_storage_id: "raw-1:r1"},
+            claim_identifiers={},
+        )
+
+    with pytest.raises(MappingError, match="unknown raw revision"):
+        evidence_card_to_storage_values(
+            card,
+            canonical_problem_id=canonical_problem_id,
+            run_id=run_id,
+            algorithm_version="evidence-v1",
+            revision_ids={},
+            claim_ids={identifier: UUID(identifier) for identifier in card.supporting_claim_ids},
+        )
+
+
+def test_assessment_mapping_preserves_nullable_verdict_and_competitor_status() -> None:
+    assessment = MissionOpportunityAssessment(
+        id=str(uuid4()),
+        mission_revision_id=uuid4(),
+        opportunity_id=str(uuid4()),
+        lifecycle_state=LifecycleState.RESEARCHING,
+        relevance=0.8123456789012345,
+        verdict=None,
+        competitor_research_status=CompetitorResearchStatus.RESEARCH_UNAVAILABLE,
+        assessed_at=NOW,
+    )
+    row = StoredMissionOpportunityAssessment(
+        **assessment_to_storage_values(assessment),
+        updated_at=NOW,
+    )
+
+    assert assessment_from_storage(row) == assessment
+
+    completed = assessment.model_copy(
+        update={
+            "lifecycle_state": LifecycleState.RESEARCH_MORE,
+            "verdict": Verdict.RESEARCH_MORE,
+        }
+    )
+    completed_row = StoredMissionOpportunityAssessment(
+        **assessment_to_storage_values(completed),
+        updated_at=NOW,
+    )
+    assert assessment_from_storage(completed_row) == completed
 
 
 def test_score_snapshot_typed_mapping_round_trips_components_without_float_storage() -> None:
@@ -361,6 +520,17 @@ def test_score_snapshot_typed_mapping_round_trips_components_without_float_stora
         )
         == score
     )
+
+    stored.weights = {
+        "evidence": {"severity": "0.5"},
+        "opportunity_fit": {"gap_strength": "1.0"},
+    }
+    with pytest.raises(MappingError, match="weights disagree"):
+        score_snapshot_from_storage(
+            stored,
+            opportunity_id=opportunity_id,
+            mission_revision_id=mission_revision_id,
+        )
 
 
 def test_atomic_claim_typed_mapping_round_trips_and_rejects_bad_lineage() -> None:

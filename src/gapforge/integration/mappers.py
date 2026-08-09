@@ -155,6 +155,17 @@ class ScoreSnapshotValues(TypedDict):
     created_at: datetime
 
 
+class AssessmentValues(TypedDict):
+    id: UUID
+    mission_revision_id: UUID
+    opportunity_id: UUID
+    lifecycle_status: str
+    relevance: Decimal
+    verdict: str | None
+    competitor_research_status: str
+    rejected_at: datetime | None
+
+
 def task_status_to_storage(status: TaskStatus) -> str:
     """Translate canonical task lifecycle names to queue persistence names."""
 
@@ -207,10 +218,8 @@ def mission_revision_from_storage(row: storage.MissionRevision) -> domain.Missio
 
 
 def research_run_from_storage(row: storage.ResearchRun) -> domain.ResearchRun:
-    """Map completed_at and warnings to canonical run timestamps and warning codes."""
+    """Map completed_at and lossless structured warnings to the run contract."""
 
-    if not all(isinstance(value, str) for value in row.warnings):
-        raise MappingError("persisted run warnings must be string codes")
     return domain.ResearchRun(
         id=row.id,
         mission_revision_id=row.mission_revision_id,
@@ -219,8 +228,23 @@ def research_run_from_storage(row: storage.ResearchRun) -> domain.ResearchRun:
         created_at=row.created_at,
         started_at=row.started_at,
         finished_at=row.completed_at,
-        warning_codes=tuple(row.warnings),
+        warnings=tuple(_run_warning_from_storage(value) for value in row.warnings),
     )
+
+
+def _run_warning_from_storage(value: object) -> domain.RunWarning:
+    if not isinstance(value, dict) or set(value) != {"code", "details"}:
+        raise MappingError("persisted run warning must contain exactly code and details")
+    try:
+        return domain.RunWarning.model_validate(value)
+    except ValueError as exc:
+        raise MappingError("persisted run warning violates the canonical contract") from exc
+
+
+def run_warning_to_storage(warning: domain.RunWarning) -> dict[str, Any]:
+    """Return the exact JSON object accepted by the durable run controller."""
+
+    return {"code": warning.code, "details": warning.details}
 
 
 def research_task_from_storage(row: storage.ResearchTask) -> domain.ResearchTask:
@@ -320,11 +344,13 @@ def evidence_card_to_storage_values(
     canonical_problem_id: UUID,
     run_id: UUID,
     algorithm_version: str,
+    revision_ids: dict[str, UUID],
+    claim_ids: dict[str, UUID],
 ) -> EvidenceCardValues:
     """Map a complete Evidence Card without collapsing its independence metrics."""
 
     representative_ids = [
-        storage_uuid_for_identifier("raw-signal-revision", identifier)
+        _known_revision_id(identifier, revision_ids)
         for identifier in card.representative_evidence_ids
     ]
     return EvidenceCardValues(
@@ -346,11 +372,11 @@ def evidence_card_to_storage_values(
             "user_sources": [source.value for source in card.user_sources],
         },
         supporting_claim_ids=[
-            _uuid_text(identifier, "supporting claim ID")
+            _known_identifier(identifier, claim_ids, "supporting claim ID")
             for identifier in card.supporting_claim_ids
         ],
         contradicting_claim_ids=[
-            _uuid_text(identifier, "contradicting claim ID")
+            _known_identifier(identifier, claim_ids, "contradicting claim ID")
             for identifier in card.contradicting_claim_ids
         ],
         representative_signal_ids=representative_ids,
@@ -363,6 +389,7 @@ def evidence_card_from_storage(
     row: storage.EvidenceCard,
     *,
     revision_identifiers: dict[UUID, str],
+    claim_identifiers: dict[UUID, str],
 ) -> domain.EvidenceCard:
     """Restore and validate every Evidence Card metric from one persisted row."""
 
@@ -392,8 +419,12 @@ def evidence_card_from_storage(
         severity=float(metrics["severity"]),
         behavioral_workarounds=metrics["behavioral_workarounds"],
         paid_or_wtp_signals=metrics["paid_or_wtp_signals"],
-        supporting_claim_ids=tuple(str(value) for value in row.supporting_claim_ids),
-        contradicting_claim_ids=tuple(str(value) for value in row.contradicting_claim_ids),
+        supporting_claim_ids=tuple(
+            _claim_identifier(value, claim_identifiers) for value in row.supporting_claim_ids
+        ),
+        contradicting_claim_ids=tuple(
+            _claim_identifier(value, claim_identifiers) for value in row.contradicting_claim_ids
+        ),
         representative_evidence_ids=representatives,
         confidence=float(row.confidence),
         missing_evidence=tuple(row.missing_evidence),
@@ -525,17 +556,57 @@ def score_snapshot_to_storage_values(
         run_id=run_id,
         algorithm_version=score.algorithm_version,
         raw_metrics={key: _decimal_text(value) for key, value in score.raw_metrics.items()},
-        evidence_strength=_weighted_score(evidence),
-        opportunity_fit=_weighted_score(fit),
+        evidence_strength=_score_decimal(_weighted_score(evidence)),
+        opportunity_fit=_score_decimal(_weighted_score(fit)),
         evidence_components=evidence,
         opportunity_fit_components=fit,
         weights={"evidence": evidence["weights"], "opportunity_fit": fit["weights"]},
         penalties={key: _decimal_text(value) for key, value in score.penalties.items()},
-        pre_penalty_score=_decimal(score.pre_penalty_score),
-        final_score=_decimal(score.final_score),
-        confidence=_decimal(score.evidence_confidence),
+        pre_penalty_score=_score_decimal(score.pre_penalty_score),
+        final_score=_score_decimal(score.final_score),
+        confidence=_score_decimal(score.evidence_confidence),
         explanation=list(score.explanation),
         created_at=score.created_at,
+    )
+
+
+def assessment_to_storage_values(
+    assessment: domain.MissionOpportunityAssessment,
+) -> AssessmentValues:
+    """Persist the assessment-owned state; artifact IDs remain normalized child lookups."""
+
+    return AssessmentValues(
+        id=_uuid_text(assessment.id, "assessment ID"),
+        mission_revision_id=assessment.mission_revision_id,
+        opportunity_id=_uuid_text(assessment.opportunity_id, "opportunity ID"),
+        lifecycle_status=assessment.lifecycle_state.value,
+        relevance=_score_decimal(assessment.relevance),
+        verdict=assessment.verdict.value if assessment.verdict is not None else None,
+        competitor_research_status=assessment.competitor_research_status.value,
+        rejected_at=assessment.rejected_at,
+    )
+
+
+def assessment_from_storage(
+    row: storage.MissionOpportunityAssessment,
+    *,
+    score_snapshot_id: UUID | None = None,
+    evidence_card_id: UUID | None = None,
+) -> domain.MissionOpportunityAssessment:
+    """Restore assessment state plus explicitly resolved normalized artifact lineage."""
+
+    return domain.MissionOpportunityAssessment(
+        id=str(row.id),
+        mission_revision_id=row.mission_revision_id,
+        opportunity_id=str(row.opportunity_id),
+        lifecycle_state=row.lifecycle_status,
+        relevance=float(row.relevance),
+        verdict=row.verdict,
+        competitor_research_status=row.competitor_research_status,
+        score_snapshot_id=str(score_snapshot_id) if score_snapshot_id is not None else None,
+        evidence_card_id=str(evidence_card_id) if evidence_card_id is not None else None,
+        rejected_at=row.rejected_at,
+        assessed_at=row.updated_at,
     )
 
 
@@ -549,9 +620,27 @@ def score_snapshot_from_storage(
 
     evidence = _components_from_json(row.evidence_components)
     fit = _components_from_json(row.opportunity_fit_components)
-    if _decimal(row.evidence_strength) != _weighted_score(row.evidence_components):
+    expected_weights = {
+        "evidence": {key: _decimal(value) for key, value in evidence.weights.items()},
+        "opportunity_fit": {key: _decimal(value) for key, value in fit.weights.items()},
+    }
+    if not isinstance(row.weights, dict) or set(row.weights) != set(expected_weights):
+        raise MappingError("stored score weights disagree with component maps")
+    try:
+        stored_weights = {
+            axis: {key: _decimal(value) for key, value in values.items()}
+            for axis, values in row.weights.items()
+            if isinstance(values, dict)
+        }
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise MappingError("stored score weights disagree with component maps") from exc
+    if stored_weights != expected_weights:
+        raise MappingError("stored score weights disagree with component maps")
+    if _decimal(row.evidence_strength) != _score_decimal(_weighted_score(row.evidence_components)):
         raise MappingError("evidence strength scalar disagrees with stored components")
-    if _decimal(row.opportunity_fit) != _weighted_score(row.opportunity_fit_components):
+    if _decimal(row.opportunity_fit) != _score_decimal(
+        _weighted_score(row.opportunity_fit_components)
+    ):
         raise MappingError("opportunity fit scalar disagrees with stored components")
     return domain.OpportunityScoreSnapshot(
         id=str(row.id),
@@ -572,9 +661,12 @@ def score_snapshot_from_storage(
 
 def _uuid_text(value: str, label: str) -> UUID:
     try:
-        return UUID(value)
+        parsed = UUID(value)
     except (TypeError, ValueError) as exc:
         raise MappingError(f"{label} must be a canonical UUID string") from exc
+    if value != str(parsed):
+        raise MappingError(f"{label} must be a canonical UUID string")
+    return parsed
 
 
 def _decimal(value: float | Decimal) -> Decimal:
@@ -588,6 +680,12 @@ def _decimal_text(value: float | Decimal) -> str:
     return format(_decimal(value), "f")
 
 
+def _score_decimal(value: float | Decimal) -> Decimal:
+    """Quantize bounded score scalars to the schema's 17-decimal persistence policy."""
+
+    return _decimal(value).quantize(Decimal("0.00000000000000001"))
+
+
 def _known_revision_id(value: str, revision_ids: dict[str, UUID]) -> UUID:
     try:
         identifier = revision_ids[value]
@@ -597,12 +695,32 @@ def _known_revision_id(value: str, revision_ids: dict[str, UUID]) -> UUID:
     return identifier
 
 
+def _known_identifier(value: str, identifiers: dict[str, UUID], label: str) -> UUID:
+    try:
+        identifier = identifiers[value]
+    except KeyError as exc:
+        raise MappingError(f"unknown {label}: {value}") from exc
+    if value != str(identifier):
+        raise MappingError(f"{label} mapping is not canonical")
+    return identifier
+
+
 def _revision_identifier(identifier: UUID, revision_identifiers: dict[UUID, str]) -> str:
     try:
         domain_id = revision_identifiers[identifier]
     except KeyError as exc:
         raise MappingError(f"unknown persisted raw revision ID: {identifier}") from exc
     return domain_identifier_from_storage("raw-signal-revision", identifier, domain_id)
+
+
+def _claim_identifier(identifier: UUID, claim_identifiers: dict[UUID, str]) -> str:
+    try:
+        domain_id = claim_identifiers[identifier]
+    except KeyError as exc:
+        raise MappingError(f"unknown persisted claim ID: {identifier}") from exc
+    if _uuid_text(domain_id, "claim ID") != identifier:
+        raise MappingError("persisted claim ID does not match its domain identifier")
+    return domain_id
 
 
 def _components_to_json(components: domain.ScoreComponents) -> dict[str, dict[str, str]]:
@@ -659,6 +777,16 @@ def _entity_mapping(
             status_route.executable,
             "explicit QUEUED/COMPLETED to PENDING/SUCCEEDED translation",
         )
+    if domain_type is domain.AgentCall:
+        for field in ("request", "result"):
+            route = field_routes[field]
+            field_routes[field] = FieldRoute(
+                route.destination,
+                "provider_audit_projection",
+                False,
+                "deferred to the provider audit adapter, which projects the validated "
+                "request/result into the explicitly routed AgentCall audit columns",
+            )
     missing = domain_fields - frozenset(field_routes)
     extra = frozenset(field_routes) - domain_fields
     if missing or extra:
@@ -685,20 +813,13 @@ def _entity_mapping(
 
 
 def validate_entity_mapping(mapping: EntityMapping) -> None:
-    """Reject incomplete domain coverage and unrouted required storage columns."""
+    """Reject incomplete domain coverage and every implicit storage column."""
 
     domain_fields = frozenset(mapping.domain_type.model_fields) - {"schema_version"}
     if mapping.mapped_domain_fields != domain_fields:
         raise RuntimeError(f"{mapping.domain_type.__name__} has incomplete domain field routes")
-    required = {
-        column.name
-        for column in mapping.storage_type.__table__.c
-        if not column.nullable
-        and column.default is None
-        and column.server_default is None
-        and column.computed is None
-    }
-    uncovered = required - mapping.covered_storage_columns
+    storage_columns = frozenset(mapping.storage_type.__table__.c.keys())
+    uncovered = storage_columns - mapping.covered_storage_columns
     if uncovered:
         raise RuntimeError(
             f"{mapping.domain_type.__name__} has required storage columns without routes: "
@@ -723,6 +844,8 @@ def _field_route(
 
 
 def _field_transform(name: str, destination: str) -> str:
+    if name == "warnings":
+        return "typed_run_warning_json"
     if name == "status" and destination == "status":
         return "enum_value"
     if name == "status" and destination != "status":
@@ -766,37 +889,65 @@ PERSISTED_ENTITY_MAPPINGS = {
             domain.ResearchMission,
             storage.ResearchMission,
             routes={},
-            storage_only={"title": "mission title is supplied by mission admission context"},
+            storage_only={
+                "title": "mission title is supplied by mission admission context",
+                "activated_at": "mission lifecycle transition supplies activation time",
+                "paused_at": "mission lifecycle transition supplies pause time",
+                "archived_at": "mission lifecycle transition supplies archive time",
+                "updated_at": "database-managed mutable-row audit timestamp",
+            },
         ),
         _entity_mapping(
             domain.MissionRevision,
             storage.MissionRevision,
             routes={"revision": "revision_number", "prompt": "mission_text"},
             storage_only={
-                "original_language": "detected mission language is supplied by admission context"
+                "original_language": "detected mission language is supplied by admission context",
+                "interpretation": "mission admission stores bounded interpretation metadata",
             },
         ),
         _entity_mapping(
             domain.ResearchRun,
             storage.ResearchRun,
-            routes={"finished_at": "completed_at", "warning_codes": "warnings"},
+            routes={"finished_at": "completed_at"},
             storage_only={
                 "deadline_at": "run controller derives the persisted deadline",
                 "budget_limits": "validated run budgets are supplied by admission context",
+                "priority": "run admission supplies bounded scheduling priority",
+                "budget_used": "run controller owns durable budget accounting",
+                "last_checkpoint": "run controller owns durable workflow checkpoint state",
+                "updated_at": "database-managed mutable-row audit timestamp",
             },
         ),
         _entity_mapping(
             domain.ResearchTask,
             storage.ResearchTask,
             routes={"attempt": "attempt_count"},
-            storage_only={"idempotency_key": "durable task graph supplies the deterministic key"},
+            storage_only={
+                "idempotency_key": "durable task graph supplies the deterministic key",
+                "priority": "task graph supplies scheduling priority",
+                "payload": "task graph supplies bounded operation payload",
+                "checkpoint": "worker owns resumable task checkpoint state",
+                "max_attempts": "retry policy supplies the attempt bound",
+                "available_at": "queue policy supplies retry availability",
+                "retry_class": "retry classifier supplies the stable failure class",
+                "last_error": "worker supplies sanitized diagnostic text",
+                "result": "worker supplies bounded task result metadata",
+                "completed_at": "queue transition supplies completion time",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
+            },
         ),
         _entity_mapping(
             domain.SourceCheckpoint,
             storage.SourceCheckpoint,
             routes={"watermark": "watermark_at"},
             storage_only={
-                "mission_revision_id": "checkpoint ownership is supplied by collection context"
+                "id": "checkpoint repository supplies the storage UUID",
+                "mission_revision_id": "checkpoint ownership is supplied by collection context",
+                "last_successful_run_id": "collector success context supplies run lineage",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
             },
         ),
         _entity_mapping(
@@ -813,6 +964,12 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "content_hash": "raw_signal_revisions.content_hash",
                 "normalization_version": "raw_signal_revisions.normalization_version",
             },
+            storage_only={
+                "author_kind": "normalizer classifies known versus unknown author identity",
+                "is_tombstone": "collector deletion semantics supply tombstone state",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
+            },
         ),
         _entity_mapping(
             domain.RawSignalRevision,
@@ -828,6 +985,11 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "original_language": "copied from the normalized raw signal",
                 "normalization_version": "copied from the normalized raw signal",
                 "duplicate_group_key": "deduplication supplies a deterministic SHA-256 group key",
+                "engagement": "copied from the normalized raw signal revision payload",
+                "source_metadata": "copied from bounded normalized source metadata",
+                "search_text": "database-generated title/body similarity document",
+                "search_document": "database-generated full-text search vector",
+                "created_at": "database-managed creation timestamp",
             },
         ),
         _entity_mapping(
@@ -841,7 +1003,9 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "emotion_signal": "signals.emotion",
             },
             storage_only={
-                "extraction_version": "versioned extraction stage supplies its algorithm identity"
+                "extraction_version": "versioned extraction stage supplies its algorithm identity",
+                "cluster_status": "clustering workflow owns persisted membership state",
+                "created_at": "database-managed creation timestamp",
             },
         ),
         _entity_mapping(
@@ -851,13 +1015,20 @@ PERSISTED_ENTITY_MAPPINGS = {
             storage_only={
                 "canonical_key": "deterministic clustering identity is supplied by clustering",
                 "title": "canonical presentation title is supplied by clustering",
+                "status": "canonicalization workflow owns global problem status",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
             },
         ),
         _entity_mapping(
             domain.ProblemCluster,
             storage.ProblemCluster,
             routes={"state": "status"},
-            storage_only={"summary": "cluster summary is supplied by clustering output"},
+            storage_only={
+                "summary": "cluster summary is supplied by clustering output",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
+            },
         ),
         _entity_mapping(
             domain.ProblemClusterMembership,
@@ -866,9 +1037,23 @@ PERSISTED_ENTITY_MAPPINGS = {
             storage_only={
                 "similarity": "clustering supplies the bounded similarity",
                 "rationale": "clustering supplies the evidence-linked rationale",
+                "id": "membership repository supplies the storage UUID",
+                "removed_at": "membership transition supplies removal time",
+                "removed_reason": "membership transition supplies removal rationale",
             },
         ),
-        _entity_mapping(domain.MergeCandidate, storage.MergeCandidate, routes={}),
+        _entity_mapping(
+            domain.MergeCandidate,
+            storage.MergeCandidate,
+            routes={},
+            storage_only={
+                "decided_at": "merge decision workflow supplies decision time",
+                "decision_reason": "merge decision workflow supplies rationale",
+                "lifecycle_event_id": "merge decision workflow supplies audit event lineage",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
+            },
+        ),
         _entity_mapping(
             domain.EvidenceCard,
             storage.EvidenceCard,
@@ -889,6 +1074,7 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "independent_authors": "derived from typed known_author_ids",
                 "independent_threads": "derived from typed thread_ids",
                 "source_count": "derived from typed user_sources",
+                "created_at": "database-managed creation timestamp",
             },
         ),
         _entity_mapping(
@@ -898,6 +1084,8 @@ PERSISTED_ENTITY_MAPPINGS = {
             storage_only={
                 "subject_type": "claim persistence context supplies the typed subject kind",
                 "subject_id": "claim persistence context supplies the subject UUID",
+                "observed_at": "claim extraction context supplies evidence observation time",
+                "created_at": "database-managed creation timestamp",
             },
         ),
         _entity_mapping(
@@ -905,25 +1093,34 @@ PERSISTED_ENTITY_MAPPINGS = {
             storage.ProblemHypothesis,
             routes={"job_to_be_done": "jtbd", "falsification_test": "falsifier"},
             storage_only={
-                "evidence_card_id": "hypothesis stage supplies the validated Evidence Card"
+                "evidence_card_id": "hypothesis stage supplies the validated Evidence Card",
+                "created_at": "database-managed creation timestamp",
             },
         ),
         _entity_mapping(
             domain.Competitor,
             storage.Competitor,
             routes={"kind": "alternative_type"},
-            storage_only={"normalized_name": "normalizer derives the stable competitor name"},
+            storage_only={
+                "normalized_name": "normalizer derives the stable competitor name",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
+            },
         ),
         _entity_mapping(
             domain.CompetitorEvidence,
             storage.CompetitorEvidence,
             routes={"content_hash": "content_hash:hex-bytes"},
+            storage_only={"created_at": "database-managed creation timestamp"},
         ),
         _entity_mapping(
             domain.GapHypothesis,
             storage.GapHypothesis,
             routes={},
-            storage_only={"contradicting_claim_ids": "gap stage supplies explicit contradictions"},
+            storage_only={
+                "contradicting_claim_ids": "gap stage supplies explicit contradictions",
+                "created_at": "database-managed creation timestamp",
+            },
         ),
         _entity_mapping(
             domain.Opportunity,
@@ -932,6 +1129,8 @@ PERSISTED_ENTITY_MAPPINGS = {
             storage_only={
                 "canonical_problem_id": "resolved through the Gap Hypothesis lineage",
                 "canonical_key": "opportunity stage derives a deterministic global key",
+                "created_at": "database-managed creation timestamp",
+                "updated_at": "database-managed mutable-row audit timestamp",
             },
         ),
         _entity_mapping(
@@ -943,7 +1142,7 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "evidence_card_id": "evidence_cards.id",
                 "assessed_at": "updated_at",
             },
-            storage_only={"relevance": "mission relevance stage supplies a bounded exact decimal"},
+            storage_only={"created_at": "database-managed creation timestamp"},
         ),
         _entity_mapping(
             domain.OpportunityScoreSnapshot,
@@ -971,6 +1170,8 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "assessment_id": "critic stage context supplies the assessment",
                 "run_id": "critic stage context supplies the research run",
                 "agent_call_id": "provider audit context supplies the exact call",
+                "id": "critic persistence context supplies the result UUID",
+                "created_at": "database-managed creation timestamp",
             },
         ),
         _entity_mapping(
@@ -989,6 +1190,7 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "to_state": "to_status",
                 "evidence_ids": "details.evidence_ids",
             },
+            storage_only={"run_id": "lifecycle transition context supplies optional run lineage"},
         ),
         _entity_mapping(
             domain.AgentCall,
@@ -1002,6 +1204,13 @@ PERSISTED_ENTITY_MAPPINGS = {
                 "effort": "derived from the bounded AgentRequest policy",
                 "status": "derived from AgentResult through explicit provider status mapping",
                 "duration_ms": "derived from AgentResult",
+                "requested_model": "provider request context supplies requested model identity",
+                "resolved_model": "provider result context supplies resolved model identity",
+                "cli_version": "provider result context supplies Codex CLI identity",
+                "repair_attempts": "provider execution maps the bounded repair flag to count",
+                "usage": "provider result context supplies bounded usage metadata",
+                "error_class": "provider result supplies sanitized stable error class",
+                "output_sha256": "provider execution hashes retained validated output",
             },
         ),
     )
