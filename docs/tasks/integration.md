@@ -177,19 +177,33 @@ non-public smoke command.
 
 ## I8 — Release handoff
 
-- [ ] Re-read `docs/spec-v0.1.md` and audit every master acceptance item against code and test evidence.
+- [x] Re-read `docs/spec-v0.1.md` and audit every master acceptance item against code and test evidence.
 - [ ] Update `docs/status-v0.1.md`, this checklist, README, and Ubuntu-on-Hyper-V deployment guide.
+  Progress: README and the deployment guide are complete at `378f2c1`; master/status changes remain
+  integration-lead owned and are proposed in draft PR #15 rather than changed on this branch.
 - [ ] Record exact commands/results, remaining limitations, and security boundaries in PR #4.
+  Progress: draft PR #15 records the exact proposed PR #4 evidence, security gates, and migration
+  boundaries. The integration lead must transfer the reviewed text to PR #4.
 - [ ] Review the complete `integration/v0.1...main` diff before marking PR #4 ready.
+  Progress: developer audit and `git diff --check origin/main...HEAD` are clean. Independent
+  integration-lead review of PR #4 remains required.
 - [ ] Merge only after the final integration review is clean and close the lane issues.
+
+Progress: I8 documentation commit `378f2c1` and Quality run `31304254345` are green: Ruff, formatting
+across 132 files, strict mypy across 66 source files, 414 tests with 1 environment-gated skip,
+Compose migration/health/persistence/backup/restore, and native arm64. Local non-PostgreSQL pytest
+passed with 269 tests, 38 skips, and 108 deselections. Live Codex skill-following, protected
+credentialed source/Codex execution, and final PR review/merge remain deliberately open.
 
 ## Resume note
 
-Current state: I1-I7 are reviewed and merged. I7 landed as `fb44e06` after GitHub Quality run
-`31303536318` passed all Python, container-backup, and native arm64 jobs. The protected credentialed
-live-call execution record and I8 remain pending.
+Current state: I8 release documentation and the master acceptance audit are complete on draft PR
+#15 at `378f2c1`; Quality run `31304254345` passed all Python, container-backup, and native arm64
+jobs. The branch deliberately leaves lead-owned master/status changes untouched. The protected
+credentialed live-call execution record and final integration review/merge remain pending.
 
-Exact next action: complete the I8 release audit and merge reviewed integration PR #4 into `main`.
-Only then can the protected workflow's hard checkout of `main` dispatch the bounded credentialed
-source/Codex smoke; capture that execution in a follow-up checkpoint/PR and keep its I7 box unchecked
-until the record exists.
+Exact next action: integration lead independently reviews PR #15 and the complete PR #4 diff,
+applies the proposed master/status/PR #4 evidence, and merges only after the release gates are clean.
+Credentialed dispatch is prohibited while `main` is unprotected and until the required self-hosted
+runner/environment/auth prerequisites exist. After protected `main` is reviewed, dispatch the
+bounded smoke and capture the execution in a follow-up checkpoint/PR.
