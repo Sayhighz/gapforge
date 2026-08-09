@@ -426,6 +426,7 @@ async def test_invalid_output_gets_one_separately_admitted_audited_repair(
             assert run is not None
         assert [row.id for row in rows] == [UUID(request.call_id), repair_id]
         assert [row.status for row in rows] == ["INVALID_OUTPUT", "COMPLETED"]
+        assert rows[0].request_sha256 == rows[1].request_sha256
         assert rows[1].repair_attempts == 1
         assert run.budget_used == {"agent_calls": 2}
     finally:
@@ -511,6 +512,68 @@ async def test_invented_evidence_and_urls_are_rejected_before_repair(
         assert rows[0].error_class == "PermittedEvidenceViolation"
         assert rows[0].output_json is None
         assert rows[1].status == "COMPLETED"
+    finally:
+        await _finish_context(database, context)
+        await database.dispose()
+
+
+async def test_nondefault_repair_policy_is_bounded_and_replay_safe(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context = await _running_context(database)
+    boundary = RecordingProvider(
+        [
+            provider.AgentResult(
+                status=provider.AgentStatus.INVALID_OUTPUT,
+                provider="fake",
+                effort=provider.ReasoningEffort.LOW,
+                duration_ms=1,
+                error_class="SchemaValidationError",
+            ),
+            _provider_result({"pain": "repaired"}),
+        ]
+    )
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="worker-i4",
+        provider_name="fake",
+    )
+    output_schema = {
+        "type": "object",
+        "properties": {"pain": {"type": "string"}},
+        "required": ["pain"],
+        "additionalProperties": False,
+    }
+    call = SemanticCall(_domain_request(), output_schema, max_output_bytes=4096)
+
+    try:
+        first = await reasoner.run(context, call)
+        replay = await reasoner.run(context, call)
+
+        assert first == replay
+        assert [request.max_output_bytes for request in boundary.requests] == [4096, 4096]
+        assert [request.allow_repair for request in boundary.requests] == [True, False]
+        async with database.session() as session:
+            rows = (
+                await session.scalars(
+                    select(AgentCall)
+                    .where(AgentCall.run_id == context.run_id)
+                    .order_by(AgentCall.created_at)
+                )
+            ).all()
+        assert len(rows) == 2
+        assert rows[0].request_sha256 != rows[1].request_sha256
+        assert len(boundary.requests) == 2
+
+        with pytest.raises(SemanticAdmissionError) as changed_cap:
+            await reasoner.run(
+                context,
+                SemanticCall(call.request, output_schema, max_output_bytes=8192),
+            )
+        assert changed_cap.value.kind is SemanticAdmissionKind.REPLAY_UNAVAILABLE
+        assert len(boundary.requests) == 2
     finally:
         await _finish_context(database, context)
         await database.dispose()
@@ -976,6 +1039,71 @@ async def test_replay_rejects_same_call_id_with_changed_input_or_provider_model(
         with pytest.raises(SemanticAdmissionError) as model_mismatch:
             await changed_model.run(context, call)
         assert model_mismatch.value.kind is SemanticAdmissionKind.REPLAY_UNAVAILABLE
+
+        for changed_policy in (
+            SemanticCall(request, output_schema, max_output_bytes=4096),
+            SemanticCall(request, output_schema, allow_repair=False),
+        ):
+            with pytest.raises(SemanticAdmissionError) as policy_mismatch:
+                await reasoner.run(context, changed_policy)
+            assert policy_mismatch.value.kind is SemanticAdmissionKind.REPLAY_UNAVAILABLE
+        assert len(boundary.requests) == 1
+    finally:
+        await _finish_context(database, context)
+        await database.dispose()
+
+
+async def test_nondefault_execution_policy_replays_only_with_exact_identity(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    context = await _running_context(database)
+    boundary = RecordingProvider([_provider_result({"pain": "bounded"})])
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="worker-i4",
+        provider_name="fake",
+    )
+    output_schema = {
+        "type": "object",
+        "properties": {"pain": {"type": "string"}},
+        "required": ["pain"],
+        "additionalProperties": False,
+    }
+    call = SemanticCall(
+        _domain_request(),
+        output_schema,
+        max_output_bytes=4096,
+        allow_repair=False,
+    )
+
+    try:
+        first = await reasoner.run(context, call)
+        replay = await reasoner.run(context, call)
+
+        assert first == replay
+        assert len(boundary.requests) == 1
+        assert boundary.requests[0].max_output_bytes == 4096
+        assert boundary.requests[0].allow_repair is False
+
+        for changed_policy in (
+            SemanticCall(
+                call.request,
+                output_schema,
+                max_output_bytes=8192,
+                allow_repair=False,
+            ),
+            SemanticCall(
+                call.request,
+                output_schema,
+                max_output_bytes=4096,
+                allow_repair=True,
+            ),
+        ):
+            with pytest.raises(SemanticAdmissionError) as mismatch:
+                await reasoner.run(context, changed_policy)
+            assert mismatch.value.kind is SemanticAdmissionKind.REPLAY_UNAVAILABLE
         assert len(boundary.requests) == 1
     finally:
         await _finish_context(database, context)

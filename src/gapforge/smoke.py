@@ -8,24 +8,45 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 import typer
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select
 
 from gapforge.collectors.github import GitHubCollector
 from gapforge.collectors.hacker_news import HackerNewsCollector
 from gapforge.collectors.reddit import RedditCollector
+from gapforge.config import AgentProviderName, Settings
 from gapforge.domain.contracts import (
+    AgentEffort,
     CollectRequest,
     QueryIntent,
     QueryIntentKind,
+    SemanticOperation,
     Source,
 )
+from gapforge.domain.contracts import (
+    AgentRequest as DomainAgentRequest,
+)
+from gapforge.domain.contracts import (
+    AgentStatus as DomainAgentStatus,
+)
+from gapforge.integration.semantic import (
+    SemanticCall,
+    SemanticContext,
+    SemanticReasoner,
+    build_semantic_reasoner,
+)
 from gapforge.providers.codex_cli import CodexCliProvider
-from gapforge.providers.contracts import AgentRequest, AgentStatus, ReasoningEffort
+from gapforge.queue.retry import ErrorKind
+from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.search.brave import BraveSearchProvider
+from gapforge.storage.database import Database
+from gapforge.storage.models import AgentCall, ProviderCallLease, ResearchRun, ResearchTask
+from gapforge.storage.uow import SqlAlchemyUnitOfWork
+from gapforge.worker import TaskHandlerError, TaskHandlerRegistry, TaskHandlerResult, Worker
 
 app = typer.Typer(no_args_is_help=True, help="Run explicit bounded GapForge integration smokes.")
 
@@ -312,10 +333,12 @@ async def run_credentialed_source_smoke(
 
 async def run_codex_live_smoke(
     *,
-    provider: CodexCliProvider,
     confirmed: bool,
+    database: Database | None = None,
+    reasoner: SemanticReasoner | None = None,
+    worker_id: str = "platform-smoke",
 ) -> SmokeReport:
-    """Run one separately confirmed, bounded Codex semantic smoke."""
+    """Run one separately confirmed semantic call through durable production admission."""
 
     if not confirmed:
         return SmokeReport(
@@ -331,30 +354,136 @@ async def run_codex_live_smoke(
                 ),
             ),
         )
-    result = await provider.run(
-        AgentRequest(
-            operation="integration_smoke",
-            instructions='Return exactly one JSON object with the value {"ok": true}.',
-            evidence={},
-            output_schema={
-                "type": "object",
-                "properties": {"ok": {"const": True}},
-                "required": ["ok"],
-                "additionalProperties": False,
-            },
-            effort=ReasoningEffort.LOW,
-            timeout_seconds=30,
-            max_output_bytes=4096,
-            allow_repair=False,
+    if database is None or reasoner is None:
+        raise ValueError("confirmed Codex smoke requires durable database and reasoner")
+
+    async with database.session() as session:
+        running = await session.scalar(
+            select(ResearchRun.id).where(ResearchRun.status == "RUNNING").limit(1)
         )
+        prior_smoke = await session.scalar(
+            select(ResearchTask.id)
+            .join(ResearchRun, ResearchRun.id == ResearchTask.run_id)
+            .where(
+                ResearchTask.task_type == "platform.codex-smoke",
+                ResearchTask.status.in_(("PENDING", "LEASED")),
+                ResearchRun.status.in_(("QUEUED", "RUNNING")),
+            )
+            .limit(1)
+        )
+    if running is not None or prior_smoke is not None:
+        return _codex_smoke_failure("PLATFORM_SMOKE_BUSY")
+
+    async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+        _, revision = await uow.missions.create_with_revision(
+            title="Bounded Codex provider smoke",
+            mission_text="Verify one audited bounded Codex semantic call.",
+            original_language="en",
+            output_locale="en",
+        )
+        if uow.session is None:  # pragma: no cover - unit-of-work invariant
+            raise RuntimeError("smoke scheduling requires an open database session")
+        scheduled = await RunScheduler(uow.session).schedule(
+            request=RunScheduleRequest.model_validate(
+                {
+                    "mission_revision_id": revision.id,
+                    "mode": "HUNT",
+                    "priority": 0,
+                    "budget_limits": {
+                        "max_agent_calls_per_run": 1,
+                        "max_parallel_agent_calls": 1,
+                        "max_run_duration_minutes": 1,
+                    },
+                }
+            )
+        )
+        scheduled.task.task_type = "platform.codex-smoke"
+        scheduled.task.max_attempts = 1
+        await uow.commit()
+
+    call_id = str(uuid5(scheduled.run.id, "platform-codex-smoke:v1"))
+    captured_result: object | None = None
+
+    async def execute_smoke(task: ResearchTask) -> TaskHandlerResult:
+        nonlocal captured_result
+        result = await reasoner.run(
+            SemanticContext(run_id=task.run_id, task_id=task.id),
+            SemanticCall(
+                request=DomainAgentRequest(
+                    call_id=call_id,
+                    task=SemanticOperation.RELEVANCE,
+                    effort=AgentEffort.LOW,
+                    input_json={"smoke": "return the fixed schema value"},
+                    permitted_evidence_ids=(),
+                    output_schema_name="platform-codex-smoke-v1",
+                    timeout_seconds=30,
+                ),
+                output_schema={
+                    "type": "object",
+                    "properties": {"ok": {"const": True}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                max_output_bytes=4096,
+                allow_repair=False,
+            ),
+        )
+        captured_result = result
+        if result.status is DomainAgentStatus.COMPLETED and result.output_json == {"ok": True}:
+            return TaskHandlerResult(
+                payload={"semantic_call": "completed"},
+                useful_artifact=True,
+            )
+        failure_kind = {
+            DomainAgentStatus.AUTH_REQUIRED: ErrorKind.AUTH_REQUIRED,
+            DomainAgentStatus.TIMEOUT: ErrorKind.TIMEOUT,
+            DomainAgentStatus.INVALID_OUTPUT: ErrorKind.INVALID_OUTPUT,
+            DomainAgentStatus.FAILED: ErrorKind.PERMANENT,
+            DomainAgentStatus.COMPLETED: ErrorKind.INVALID_OUTPUT,
+        }[result.status]
+        raise TaskHandlerError(failure_kind, error_class=result.error_class or "SmokeCallFailed")
+
+    processed = await Worker(
+        database,
+        worker_id=worker_id,
+        handlers=TaskHandlerRegistry({"platform.codex-smoke": execute_smoke}),
+    ).run_once()
+    if not processed:
+        await _cancel_unclaimed_smoke(database, scheduled.run.id, scheduled.task.id)
+    async with database.session() as session:
+        run = await session.get(ResearchRun, scheduled.run.id)
+        task = await session.get(ResearchTask, scheduled.task.id)
+        audit = await session.get(AgentCall, uuid5(scheduled.run.id, "platform-codex-smoke:v1"))
+        audit_count = await session.scalar(
+            select(func.count()).select_from(AgentCall).where(AgentCall.run_id == scheduled.run.id)
+        )
+        lease_count = await session.scalar(
+            select(func.count())
+            .select_from(ProviderCallLease)
+            .where(ProviderCallLease.run_id == scheduled.run.id)
+        )
+
+    succeeded = bool(
+        processed
+        and run is not None
+        and run.status == "COMPLETED"
+        and task is not None
+        and task.status == "SUCCEEDED"
+        and audit is not None
+        and audit.status == "COMPLETED"
+        and audit.repair_attempts == 0
+        and audit_count == 1
+        and lease_count == 0
+        and getattr(captured_result, "output_json", None) == {"ok": True}
     )
-    succeeded = result.status is AgentStatus.SUCCESS and result.data == {"ok": True}
-    failure_status: dict[AgentStatus, SmokeStatus] = {
-        AgentStatus.SUCCESS: "INVALID_OUTPUT",
-        AgentStatus.AUTH_REQUIRED: "AUTH_REQUIRED",
-        AgentStatus.INVALID_OUTPUT: "INVALID_OUTPUT",
-        AgentStatus.TIMEOUT: "TIMEOUT",
-        AgentStatus.ERROR: "ERROR",
+    audit_status = audit.status if audit is not None else None
+    failure_status: dict[str | None, SmokeStatus] = {
+        "COMPLETED": "INVALID_OUTPUT",
+        "AUTH_REQUIRED": "AUTH_REQUIRED",
+        "INVALID_OUTPUT": "INVALID_OUTPUT",
+        "TIMEOUT": "TIMEOUT",
+        "FAILED": "ERROR",
+        None: "ERROR",
     }
     return SmokeReport(
         mode="credentialed-codex",
@@ -362,10 +491,45 @@ async def run_codex_live_smoke(
         checks=(
             SmokeCheck(
                 name="codex",
-                status="AVAILABLE" if succeeded else failure_status[result.status],
+                status="AVAILABLE" if succeeded else failure_status[audit_status],
                 outcome="AVAILABLE" if succeeded else "FAILURE",
-                request_count=1,
-                warning_codes=() if succeeded else (f"CODEX_{result.status.value}",),
+                request_count=min(2, audit_count or 0),
+                warning_codes=() if succeeded else (f"CODEX_{audit_status or 'NOT_AUDITED'}",),
+            ),
+        ),
+    )
+
+
+async def _cancel_unclaimed_smoke(database: Database, run_id: UUID, task_id: UUID) -> None:
+    """Leave no active smoke graph when exact task admission did not occur."""
+
+    now = datetime.now(UTC)
+    async with database.session() as session, session.begin():
+        task = await session.scalar(
+            select(ResearchTask).where(ResearchTask.id == task_id).with_for_update()
+        )
+        run = await session.scalar(
+            select(ResearchRun).where(ResearchRun.id == run_id).with_for_update()
+        )
+        if task is not None and task.status == "PENDING":
+            task.status = "CANCELLED"
+            task.completed_at = now
+        if run is not None and run.status in {"QUEUED", "RUNNING"}:
+            run.status = "CANCELLED"
+            run.completed_at = now
+
+
+def _codex_smoke_failure(code: str) -> SmokeReport:
+    return SmokeReport(
+        mode="credentialed-codex",
+        ok=False,
+        checks=(
+            SmokeCheck(
+                name="codex",
+                status="ERROR",
+                outcome="FAILURE",
+                request_count=0,
+                warning_codes=(code,),
             ),
         ),
     )
@@ -384,11 +548,29 @@ def credentialed_codex(
 ) -> None:
     """Make one separately confirmed bounded Codex CLI semantic call."""
 
-    provider = CodexCliProvider(
-        binary=os.environ.get("CODEX_BINARY", "codex"),
-        codex_home=Path(os.environ.get("CODEX_HOME", "/var/lib/gapforge/codex")),
-    )
-    report = asyncio.run(run_codex_live_smoke(provider=provider, confirmed=confirm == "run"))
+    async def operation() -> SmokeReport:
+        if confirm != "run":
+            return await run_codex_live_smoke(confirmed=False)
+        settings = Settings()
+        if settings.agent_provider is not AgentProviderName.CODEX_CLI:
+            raise ValueError("credentialed Codex smoke requires AGENT_PROVIDER=codex_cli")
+        database = Database.from_url(settings.database_url.get_secret_value())
+        worker_id = f"platform-smoke:{os.getpid()}"
+        try:
+            return await run_codex_live_smoke(
+                database=database,
+                reasoner=build_semantic_reasoner(
+                    database=database,
+                    settings=settings,
+                    worker_id=worker_id,
+                ),
+                worker_id=worker_id,
+                confirmed=True,
+            )
+        finally:
+            await database.dispose()
+
+    report = asyncio.run(operation())
     if json_output:
         typer.echo(report.model_dump_json())
     else:

@@ -31,9 +31,9 @@ compose run --rm --no-deps worker \
 compose --profile auth run --rm --no-deps --entrypoint python codex-status \
     /app/scripts/container-volume-check.py auth-readonly
 compose --profile auth run --rm codex-status
-compose run --rm --no-deps worker \
-    gap-smoke credentialed-codex --confirm run --json
 compose up -d --no-build postgres migrate worker
 compose exec -T worker gap health --json
+compose run --rm --no-deps worker \
+    gap-smoke credentialed-codex --confirm run --json
 compose run --rm --no-deps worker gap-smoke hacker-news --json
 compose run --rm --no-deps worker gap-smoke credentialed-sources --json

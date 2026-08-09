@@ -8,10 +8,15 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import func, select
 from typer.testing import CliRunner
 
+from gapforge.integration.semantic import AuditedSemanticReasoner
+from gapforge.providers import contracts as provider_contracts
 from gapforge.providers.codex_cli import CodexCliProvider
 from gapforge.providers.process import AsyncProcessRunner, ProcessResult
+from gapforge.queue.control import RunController
+from gapforge.runtime import RunScheduler, RunScheduleRequest
 from gapforge.smoke import (
     app,
     run_codex_live_smoke,
@@ -19,6 +24,9 @@ from gapforge.smoke import (
     run_hacker_news_smoke,
     run_missing_credential_smoke,
 )
+from gapforge.storage.database import Database
+from gapforge.storage.models import AgentCall, ProviderCallLease, ResearchRun, ResearchTask
+from gapforge.storage.uow import SqlAlchemyUnitOfWork
 
 cli = CliRunner()
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
@@ -81,6 +89,38 @@ class SuccessfulCodexSmokeRunner(AsyncProcessRunner):
             False,
             False,
         )
+
+
+class ScriptedSmokeProvider:
+    def __init__(
+        self,
+        response: provider_contracts.AgentResult | Exception,
+    ) -> None:
+        self.response = response
+        self.requests: list[provider_contracts.AgentRequest] = []
+
+    async def run(
+        self,
+        request: provider_contracts.AgentRequest,
+    ) -> provider_contracts.AgentResult:
+        self.requests.append(request)
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+def _smoke_provider_result(
+    status: provider_contracts.AgentStatus,
+) -> provider_contracts.AgentResult:
+    return provider_contracts.AgentResult(
+        status=status,
+        provider="codex_cli",
+        requested_model="",
+        effort=provider_contracts.ReasoningEffort.LOW,
+        duration_ms=1,
+        error_class="ExpectedSmokeFailure",
+        error_message="sanitized test failure",
+    )
 
 
 @pytest.mark.asyncio
@@ -321,21 +361,11 @@ def test_credentialed_source_cli_fails_closed_before_network_without_environment
 
 
 @pytest.mark.asyncio
-async def test_codex_live_smoke_requires_explicit_confirmation_before_any_subprocess(
-    tmp_path: Path,
-) -> None:
-    runner = UnauthenticatedCodexRunner()
-    provider = CodexCliProvider(
-        binary=sys.executable,
-        codex_home=tmp_path / "codex",
-        runner=runner,
-    )
-
-    report = await run_codex_live_smoke(provider=provider, confirmed=False)
+async def test_codex_live_smoke_requires_explicit_confirmation_before_any_subprocess() -> None:
+    report = await run_codex_live_smoke(confirmed=False)
 
     assert report.schema_version == "1.0"
     assert report.ok is False
-    assert runner.commands == []
     assert report.checks[0].model_dump() == {
         "name": "codex",
         "status": "NOT_RUN",
@@ -346,9 +376,11 @@ async def test_codex_live_smoke_requires_explicit_confirmation_before_any_subpro
     }
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_codex_live_smoke_makes_one_bounded_secret_free_semantic_call(
     tmp_path: Path,
+    migrated_postgres_url: str,
 ) -> None:
     runner = SuccessfulCodexSmokeRunner()
     provider = CodexCliProvider(
@@ -363,8 +395,36 @@ async def test_codex_live_smoke_makes_one_bounded_secret_free_semantic_call(
             "BRAVE_API_KEY": "brave-secret",
         },
     )
+    database = Database.from_url(migrated_postgres_url)
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        provider,
+        lease_owner="platform-smoke-test",
+        provider_name="codex_cli",
+    )
 
-    report = await run_codex_live_smoke(provider=provider, confirmed=True)
+    try:
+        report = await run_codex_live_smoke(
+            database=database,
+            reasoner=reasoner,
+            worker_id="platform-smoke-test",
+            confirmed=True,
+        )
+
+        async with database.session() as session:
+            audits = (
+                await session.scalars(
+                    select(AgentCall).where(
+                        AgentCall.output_schema_name == "platform-codex-smoke-v1"
+                    )
+                )
+            ).all()
+            assert len(audits) == 1
+            audit = audits[0]
+            run = await session.get(ResearchRun, audit.run_id)
+            task = await session.get(ResearchTask, audit.task_id)
+    finally:
+        await database.dispose()
 
     assert report.ok is True
     assert report.checks[0].model_dump() == {
@@ -382,6 +442,11 @@ async def test_codex_live_smoke_makes_one_bounded_secret_free_semantic_call(
     assert "--ignore-user-config" in command
     assert timeout_seconds == 30
     assert max_output_bytes == 4096
+    assert audit.operation == "relevance"
+    assert audit.status == "COMPLETED"
+    assert audit.repair_attempts == 0
+    assert run is not None and run.status == "COMPLETED"
+    assert task is not None and task.status == "SUCCEEDED"
     assert (
         not {
             "DATABASE_URL",
@@ -391,6 +456,154 @@ async def test_codex_live_smoke_makes_one_bounded_secret_free_semantic_call(
         }
         & environment.keys()
     )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "audit_status", "report_status"),
+    (
+        (
+            _smoke_provider_result(provider_contracts.AgentStatus.INVALID_OUTPUT),
+            "INVALID_OUTPUT",
+            "INVALID_OUTPUT",
+        ),
+        (
+            _smoke_provider_result(provider_contracts.AgentStatus.TIMEOUT),
+            "TIMEOUT",
+            "TIMEOUT",
+        ),
+        (
+            _smoke_provider_result(provider_contracts.AgentStatus.AUTH_REQUIRED),
+            "AUTH_REQUIRED",
+            "AUTH_REQUIRED",
+        ),
+        (
+            _smoke_provider_result(provider_contracts.AgentStatus.ERROR),
+            "FAILED",
+            "ERROR",
+        ),
+        (RuntimeError("provider internals must be sanitized"), "FAILED", "ERROR"),
+    ),
+    ids=("invalid", "timeout", "auth", "provider-error", "provider-exception"),
+)
+async def test_codex_live_smoke_failure_is_one_attempt_and_terminal(
+    migrated_postgres_url: str,
+    response: provider_contracts.AgentResult | Exception,
+    audit_status: str,
+    report_status: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    boundary = ScriptedSmokeProvider(response)
+    worker_id = f"platform-smoke-{report_status.lower()}"
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner=worker_id,
+        provider_name="codex_cli",
+    )
+    async with database.session() as session:
+        before_ids = set(await session.scalars(select(AgentCall.id)))
+
+    try:
+        report = await run_codex_live_smoke(
+            database=database,
+            reasoner=reasoner,
+            worker_id=worker_id,
+            confirmed=True,
+        )
+
+        async with database.session() as session:
+            audits = (
+                await session.scalars(select(AgentCall).where(AgentCall.id.not_in(before_ids)))
+            ).all()
+            assert len(audits) == 1
+            audit = audits[0]
+            run = await session.get(ResearchRun, audit.run_id)
+            task = await session.get(ResearchTask, audit.task_id)
+            lease_count = await session.scalar(
+                select(func.count())
+                .select_from(ProviderCallLease)
+                .where(ProviderCallLease.run_id == audit.run_id)
+            )
+    finally:
+        await database.dispose()
+
+    assert report.ok is False
+    assert report.checks[0].status == report_status
+    assert report.checks[0].request_count == 1
+    assert len(boundary.requests) == 1
+    assert audit.status == audit_status
+    assert audit.repair_attempts == 0
+    assert run is not None and run.status not in {"QUEUED", "RUNNING"}
+    assert task is not None and task.status == "FAILED"
+    assert task.max_attempts == 1
+    assert task.attempt_count == 1
+    assert task.lease_owner is None
+    assert lease_count == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_codex_live_smoke_fails_closed_while_unrelated_run_is_active(
+    migrated_postgres_url: str,
+) -> None:
+    database = Database.from_url(migrated_postgres_url)
+    boundary = ScriptedSmokeProvider(RuntimeError("must not run"))
+    reasoner = AuditedSemanticReasoner(
+        database.session_factory,
+        boundary,
+        lease_owner="platform-smoke-busy",
+        provider_name="codex_cli",
+    )
+    async with SqlAlchemyUnitOfWork(database.session_factory) as uow:
+        _, revision = await uow.missions.create_with_revision(
+            title="Unrelated active work",
+            mission_text="Keep the global run admission gate occupied.",
+            original_language="en",
+            output_locale="en",
+        )
+        assert uow.session is not None
+        scheduled = await RunScheduler(uow.session).schedule(
+            request=RunScheduleRequest.model_validate(
+                {
+                    "mission_revision_id": revision.id,
+                    "mode": "HUNT",
+                    "priority": 0,
+                    "budget_limits": {
+                        "max_agent_calls_per_run": 1,
+                        "max_parallel_agent_calls": 1,
+                        "max_run_duration_minutes": 1,
+                    },
+                }
+            )
+        )
+        await RunController(uow.session).start(scheduled.run.id)
+        await uow.commit()
+
+    try:
+        report = await run_codex_live_smoke(
+            database=database,
+            reasoner=reasoner,
+            worker_id="platform-smoke-busy",
+            confirmed=True,
+        )
+
+        assert report.ok is False
+        assert report.checks[0].status == "ERROR"
+        assert report.checks[0].warning_codes == ("PLATFORM_SMOKE_BUSY",)
+        assert report.checks[0].request_count == 0
+        assert boundary.requests == []
+    finally:
+        async with database.session() as session, session.begin():
+            run = await session.get(ResearchRun, scheduled.run.id)
+            task = await session.get(ResearchTask, scheduled.task.id)
+            assert run is not None and task is not None
+            run.status = "CANCELLED"
+            run.completed_at = datetime.now(UTC)
+            task.status = "CANCELLED"
+            task.completed_at = datetime.now(UTC)
+        await database.dispose()
 
 
 def test_codex_live_cli_requires_the_separate_run_confirmation() -> None:

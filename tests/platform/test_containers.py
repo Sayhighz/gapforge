@@ -160,6 +160,33 @@ def test_manual_smoke_credential_file_rejects_placeholder_or_short_database_pass
     assert password not in rejected.stderr
 
 
+@pytest.mark.parametrize(
+    "ambiguous_value",
+    [
+        "$HOST_HMAC_KEY_abcdefghijklmnopqrstuvwxyz",
+        '"quoted-hmac-key-abcdefghijklmnopqrstuvwxyz"',
+        " leading-hmac-key-abcdefghijklmnopqrstuvwxyz",
+        "tabbed\thmac-key-abcdefghijklmnopqrstuvwxyz",
+        "commented-hmac-key-abcdefghijklmnopqrstuvwxyz # ignored",
+        "escaped\\hmac-key-abcdefghijklmnopqrstuvwxyz",
+    ],
+)
+def test_manual_smoke_credential_file_rejects_ambiguous_compose_syntax(
+    tmp_path: Path,
+    ambiguous_value: str,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    external = tmp_path / "protected.env"
+    _write_smoke_env(external, updates={"AUTHOR_HMAC_KEY": ambiguous_value})
+
+    rejected = _validate_smoke_env(external, checkout)
+
+    assert rejected.returncode == 2
+    assert "unambiguous literal values" in rejected.stderr
+    assert ambiguous_value not in rejected.stderr
+
+
 def test_worker_image_is_non_root_pins_codex_and_copies_no_environment() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
@@ -234,6 +261,9 @@ def test_manual_smoke_checks_out_only_reviewed_main_without_persisting_credentia
     assert "gap-smoke credentialed-codex --confirm run --json" in script
     assert script.count("compose build worker") == 1
     assert "compose up -d --no-build postgres migrate worker" in script
+    assert script.index("compose up -d --no-build postgres migrate worker") < script.index(
+        "gap-smoke credentialed-codex --confirm run --json"
+    )
     assert "container-volume-check.py auth-write" in script
     assert "container-volume-check.py auth-readonly" in script
 

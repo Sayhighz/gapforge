@@ -85,10 +85,11 @@ def validate(path_value: str, checkout_value: str) -> int:
 
     values: dict[str, str] = {}
     for raw_line in contents.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+        if not raw_line or raw_line.startswith("#"):
             continue
-        matched = ENV_LINE.fullmatch(line)
+        if raw_line != raw_line.strip():
+            return fail("file values must use unambiguous literal values")
+        matched = ENV_LINE.fullmatch(raw_line)
         if matched is None:
             return fail("file contains a malformed environment assignment")
         key, value = matched.groups()
@@ -98,6 +99,8 @@ def validate(path_value: str, checkout_value: str) -> int:
             return fail("file contains a duplicate key")
         if not value and key not in EMPTY_ALLOWED:
             return fail("file contains an empty required value")
+        if any(character.isspace() or character in "$'\"#\\" for character in value):
+            return fail("file values must use unambiguous literal values")
         values[key] = value
     if values.keys() != ALLOWED_KEYS:
         return fail("file does not contain every required smoke credential")
