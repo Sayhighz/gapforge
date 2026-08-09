@@ -100,6 +100,7 @@ async def test_missing_credentials_fail_gracefully_without_network_or_ai_call(
     async with httpx.AsyncClient(transport=httpx.MockTransport(reject_network)) as client:
         report = await run_missing_credential_smoke(client=client, codex=provider)
 
+    assert report.schema_version == "1.0"
     assert report.ok is True
     assert [
         (check.name, check.status, check.outcome, check.request_count) for check in report.checks
@@ -164,6 +165,7 @@ async def test_hacker_news_live_smoke_is_one_request_and_five_items_max() -> Non
             now=NOW,
         )
 
+    assert report.schema_version == "1.0"
     assert report.ok is True
     assert len(requests) == 1
     assert requests[0].url.host == "hn.algolia.com"
@@ -225,6 +227,7 @@ async def test_credentialed_source_smoke_refuses_any_missing_secret_before_netwo
             now=NOW,
         )
 
+    assert report.schema_version == "1.0"
     assert report.ok is False
     assert requests == []
     assert [check.model_dump() for check in report.checks] == [
@@ -330,6 +333,7 @@ async def test_codex_live_smoke_requires_explicit_confirmation_before_any_subpro
 
     report = await run_codex_live_smoke(provider=provider, confirmed=False)
 
+    assert report.schema_version == "1.0"
     assert report.ok is False
     assert runner.commands == []
     assert report.checks[0].model_dump() == {

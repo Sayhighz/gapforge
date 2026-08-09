@@ -27,8 +27,9 @@ credential before it runs the smoke script.
 
 The runner must set the GitHub environment variable `GAPFORGE_SMOKE_ENV_FILE` to an absolute
 path outside the checkout. That external file must be owned by the runner user, mode `0600`, and
-contain the complete `.env.example` key set. PostgreSQL credentials and `DATABASE_URL` must agree,
-the public development password is rejected, and the HMAC/source credentials must be nonempty.
+contain the complete `.env.example` key set. PostgreSQL credentials and `DATABASE_URL` must agree;
+the public development password, checked-in placeholder, and passwords shorter than 16 characters
+are rejected, and the HMAC/source credentials must be nonempty.
 The validator parses the file as data and Compose receives it through `--env-file`; the shell never
 sources it and the checkout's untracked `.env` is never used. Keep Codex device credentials only in
 the separate `codex_auth` volume, not in this file.

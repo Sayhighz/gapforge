@@ -134,6 +134,32 @@ def test_manual_smoke_credential_file_rejects_development_database_defaults(
     assert "postgresql+asyncpg" not in rejected.stderr
 
 
+@pytest.mark.parametrize(
+    "password",
+    ["replace-with-a-long-random-password", "short"],
+)
+def test_manual_smoke_credential_file_rejects_placeholder_or_short_database_password(
+    tmp_path: Path,
+    password: str,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    external = tmp_path / "protected.env"
+    _write_smoke_env(
+        external,
+        updates={
+            "POSTGRES_PASSWORD": password,
+            "DATABASE_URL": (f"postgresql+asyncpg://smoke-user:{password}@postgres:5432/smoke-db"),
+        },
+    )
+
+    rejected = _validate_smoke_env(external, checkout)
+
+    assert rejected.returncode == 2
+    assert "database password" in rejected.stderr.lower()
+    assert password not in rejected.stderr
+
+
 def test_worker_image_is_non_root_pins_codex_and_copies_no_environment() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
@@ -195,6 +221,8 @@ def test_manual_smoke_checks_out_only_reviewed_main_without_persisting_credentia
     assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1" in workflow
     assert "ref: main" in workflow
     assert "persist-credentials: false" in workflow
+    assert "group: gapforge-credentialed-platform-smoke" in workflow
+    assert "cancel-in-progress: false" in workflow
     assert "GAPFORGE_SMOKE_ENV_FILE: ${{ vars.GAPFORGE_SMOKE_ENV_FILE }}" in workflow
     assert 'scripts/validate-smoke-env "$smoke_env_file" "$checkout_root"' in script
     assert '--env-file "$smoke_env_file"' in script
@@ -223,9 +251,15 @@ def test_manual_smoke_uses_compose_run_compatible_arguments(tmp_path: Path) -> N
         """#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> "$COMPOSE_LOG"
-case "$*" in
-    *run*--no-build*) exit 64 ;;
-esac
+shift 2
+if [ "${1:-}" = "--profile" ]; then
+    shift 2
+fi
+if [ "${1:-}" = "run" ]; then
+    case " $* " in
+        *" --no-build "*) exit 64 ;;
+    esac
+fi
 """,
         encoding="utf-8",
     )

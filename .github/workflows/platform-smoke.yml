@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: gapforge-credentialed-platform-smoke
+  cancel-in-progress: false
+
 jobs:
   smoke:
     if: inputs.confirm == 'run'

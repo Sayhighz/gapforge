@@ -44,6 +44,8 @@ ALLOWED_KEYS = frozenset(
 EMPTY_ALLOWED = frozenset({"CODEX_MODEL"})
 ENV_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 MAX_BYTES = 32_768
+MIN_DATABASE_PASSWORD_LENGTH = 16
+DATABASE_PASSWORD_PLACEHOLDER = "replace-with-a-long-random-password"
 
 
 def fail(message: str) -> int:
@@ -105,6 +107,11 @@ def validate(path_value: str, checkout_value: str) -> int:
         return fail("AUTHOR_HMAC_KEY must contain at least 32 characters")
     if values["POSTGRES_PASSWORD"] == "gapforge":  # noqa: S105 -- reject public dev default
         return fail("development database credentials are forbidden")
+    if (
+        values["POSTGRES_PASSWORD"] == DATABASE_PASSWORD_PLACEHOLDER
+        or len(values["POSTGRES_PASSWORD"]) < MIN_DATABASE_PASSWORD_LENGTH
+    ):
+        return fail("database password is a known placeholder or has fewer than 16 characters")
     try:
         database = urlsplit(values["DATABASE_URL"])
         port = database.port
