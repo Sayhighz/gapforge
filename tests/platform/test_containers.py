@@ -62,6 +62,15 @@ def test_dockerignore_excludes_credentials_and_derived_artifacts() -> None:
     assert ".git" in ignored
 
 
+def test_backup_roundtrip_builds_shared_worker_image_only_once() -> None:
+    script = (ROOT / "scripts/ci-backup-roundtrip").read_text(encoding="utf-8")
+
+    assert "compose build worker" in script
+    assert "compose run --rm migrate" in script
+    assert "compose up -d --no-build worker" in script
+    assert "compose up -d --build" not in script
+
+
 def test_manual_smoke_checks_out_only_reviewed_main_without_persisting_credentials() -> None:
     workflow = (ROOT / ".github/workflows/platform-smoke.yml").read_text(encoding="utf-8")
 

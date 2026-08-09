@@ -960,6 +960,14 @@ async def test_query_plan_bounds_oversized_mission_and_existing_candidates() -> 
     omitted = input_json["input_bounds"]["omitted_counts"]
     assert omitted["mission_characters"] > 0
     assert omitted["existing_candidates"] > 0
+    assert [warning.code for warning in result.warnings] == ["SEMANTIC_INPUT_OMITTED"]
+    assert result.warnings[0].details == {
+        "omitted_counts": {
+            "QUERY_PLAN.existing_candidates": omitted["existing_candidates"],
+            "QUERY_PLAN.mission_characters": omitted["mission_characters"],
+        },
+        "total_omitted": sum(omitted.values()),
+    }
     checkpoint_bounds = store.completed["QUERY_PLAN"]["_input_bounds"]
     assert checkpoint_bounds == {"omitted_counts": omitted}
 

@@ -24,7 +24,12 @@ trap cleanup EXIT INT TERM
 export AGENT_PROVIDER=fake
 export AUTHOR_HMAC_KEY=ci-test-only-author-hmac-key-32-bytes
 
-compose up -d --build postgres migrate worker
+# Build the shared application image once. Building migrate and worker together
+# makes Compose export the same large image twice and can exhaust small CI runners.
+compose build worker
+compose up -d postgres
+compose run --rm migrate
+compose up -d --no-build worker
 compose exec -T worker gap mission create \
     "Verify credential-free backup and restore" \
     --title "CI backup sentinel" \

@@ -288,6 +288,7 @@ class EvidencePipeline:
         results = tuple(CollectResult.model_validate(value) for value in result_values)
         warning_codes = _collection_warning_codes(results)
         item_count = _integer_field(collect_payload, "item_count")
+        _append_omission_warning(warning_codes, execution)
         if item_count == 0:
             return TaskHandlerResult(
                 payload={
@@ -297,7 +298,10 @@ class EvidencePipeline:
                     "completed_stage": "COLLECT",
                 },
                 useful_artifact=False,
-                warnings=_run_warnings(warning_codes),
+                warnings=_run_warnings(
+                    warning_codes,
+                    omissions=execution.omissions,
+                ),
             )
 
         evidence_ids = _string_tuple_field(collect_payload, "evidence_ids")
