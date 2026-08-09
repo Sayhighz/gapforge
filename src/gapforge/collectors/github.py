@@ -126,7 +126,9 @@ class GitHubCollector:
                 request_count=budget.used,
                 warnings=(
                     SourceWarning(
-                        code="GITHUB_UNAVAILABLE", message=str(exc), retryable=True
+                        code="GITHUB_UNAVAILABLE",
+                        message=str(exc),
+                        retryable=exc.retryable,
                     ),
                 ),
             )

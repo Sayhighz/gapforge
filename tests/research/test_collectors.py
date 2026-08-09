@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from gapforge.collectors.base import (
+    CollectorResponseError,
     RequestBudget,
     bounded_get_json,
     cap_thread_items,
@@ -231,6 +232,34 @@ async def test_retries_are_bounded_by_request_budget() -> None:
                 client, "https://example.com", budget=RequestBudget(2), sleeper=no_sleep
             )
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_http_and_declared_size_fail_without_unbounded_read() -> (
+    None
+):
+    calls = 0
+
+    def unauthorized(req: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, request=req)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unauthorized)) as client:
+        result = await GitHubCollector(client, token="expired").collect(
+            request(Source.GITHUB, max_requests=3)
+        )
+    assert calls == 1
+    assert result.warnings[0].retryable is False
+
+    def oversized(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-length": "2000001"}, request=req)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(oversized)) as client:
+        with pytest.raises(CollectorResponseError, match="byte limit"):
+            await bounded_get_json(
+                client, "https://example.com", budget=RequestBudget(1)
+            )
 
 
 @pytest.mark.asyncio

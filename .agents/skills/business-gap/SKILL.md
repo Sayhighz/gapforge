@@ -5,7 +5,7 @@ description: Inspect, run, and explain GapForge evidence-backed business-gap res
 
 # Business Gap Research
 
-Use GapForge as a research harness, not an idea generator. A sound run may return zero `VALIDATE` opportunities.
+Use GapForge as a research harness, not an idea generator. A sound run may return zero `VALIDATE` opportunities. Refuse unsupported idea brainstorming; offer to create an evidence-backed research mission instead.
 
 ## Workflow
 

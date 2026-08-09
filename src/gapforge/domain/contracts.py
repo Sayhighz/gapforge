@@ -208,6 +208,11 @@ class ResearchTask(Contract):
             )
         return self
 
+    @field_validator("checkpoint")
+    @classmethod
+    def bound_checkpoint(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_metadata(value)
+
 
 class MissionRevision(Contract):
     id: UUID
@@ -750,6 +755,21 @@ class AgentRequest(Contract):
     def bound_agent_input(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _bounded_metadata(value)
 
+    @model_validator(mode="after")
+    def effort_matches_task(self) -> AgentRequest:
+        expected = {
+            "EXTRACT": AgentEffort.LOW,
+            "RELEVANCE": AgentEffort.LOW,
+            "CLUSTER": AgentEffort.MEDIUM,
+            "HYPOTHESIS": AgentEffort.MEDIUM,
+            "GAP": AgentEffort.MEDIUM,
+            "CRITIC": AgentEffort.MEDIUM,
+            "DEEP_RESEARCH": AgentEffort.HIGH,
+        }
+        if self.effort is not expected[self.task]:
+            raise ValueError("agent effort does not match the bounded task policy")
+        return self
+
 
 class AgentResult(Contract):
     call_id: Identifier
@@ -779,6 +799,12 @@ class AgentCall(Contract):
     request: AgentRequest
     result: AgentResult
     created_at: datetime
+
+    @model_validator(mode="after")
+    def call_ids_match(self) -> AgentCall:
+        if self.id != self.request.call_id or self.id != self.result.call_id:
+            raise ValueError("agent call, request, and result IDs must match")
+        return self
 
 
 def _bounded_metadata(value: dict[str, Any]) -> dict[str, Any]:

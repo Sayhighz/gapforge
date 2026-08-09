@@ -11,6 +11,7 @@ from gapforge.collectors.base import (
     CollectorResponseError,
     RequestBudget,
     bounded_get_json,
+    bounded_request_json,
     cap_thread_items,
     in_window,
     utc_from_timestamp,
@@ -112,36 +113,34 @@ class RedditCollector:
                 request_count=budget.used,
                 warnings=(
                     SourceWarning(
-                        code="REDDIT_UNAVAILABLE", message=str(exc), retryable=True
+                        code="REDDIT_UNAVAILABLE",
+                        message=str(exc),
+                        retryable=exc.retryable,
                     ),
                 ),
             )
 
     async def _access_token(self, budget: RequestBudget) -> str:
-        budget.consume()
         assert self._client_id is not None and self._client_secret is not None
         basic = base64.b64encode(
             f"{self._client_id}:{self._client_secret}".encode()
         ).decode()
-        try:
-            response = await self._client.post(
-                self.token_endpoint,
-                data={"grant_type": "client_credentials"},
-                headers={
-                    "Authorization": f"Basic {basic}",
-                    "User-Agent": self._user_agent,
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("access_token"), str
-            ):
-                raise CollectorResponseError("Reddit token response is invalid")
-            return str(payload["access_token"])
-        except (httpx.HTTPError, ValueError) as exc:
-            raise CollectorResponseError("Reddit OAuth authentication failed") from exc
+        payload = await bounded_request_json(
+            self._client,
+            "POST",
+            self.token_endpoint,
+            budget=budget,
+            data={"grant_type": "client_credentials"},
+            headers={
+                "Authorization": f"Basic {basic}",
+                "User-Agent": self._user_agent,
+            },
+        )
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("access_token"), str
+        ):
+            raise CollectorResponseError("Reddit token response is invalid")
+        return str(payload["access_token"])
 
     @staticmethod
     def _normalize(child: object) -> CollectedItem | None:

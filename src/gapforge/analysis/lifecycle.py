@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from gapforge.domain.contracts import LifecycleState, TrendLabel
+from gapforge.domain.contracts import LifecycleEvent, LifecycleState, TrendLabel
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,3 +154,22 @@ def transition_lifecycle(
             f"invalid lifecycle transition {current.value}->{target.value}"
         )
     return target
+
+
+def append_lifecycle_event(
+    history: tuple[LifecycleEvent, ...],
+    event: LifecycleEvent,
+) -> tuple[LifecycleEvent, ...]:
+    if any(existing.id == event.id for existing in history):
+        raise ValueError("lifecycle events are append-only and IDs cannot be reused")
+    if history:
+        prior = history[-1]
+        if prior.assessment_id != event.assessment_id:
+            raise ValueError("lifecycle history cannot mix assessments")
+        if event.created_at < prior.created_at:
+            raise ValueError("lifecycle events must be chronological")
+        if event.from_state is not prior.to_state:
+            raise ValueError("lifecycle event does not continue prior state")
+    elif event.from_state is not None:
+        raise ValueError("first lifecycle event must start without a prior state")
+    return (*history, event)

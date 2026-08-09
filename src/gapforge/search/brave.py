@@ -130,7 +130,9 @@ class BraveSearchProvider:
                 request_count=budget.used,
                 warnings=(
                     SourceWarning(
-                        code="BRAVE_UNAVAILABLE", message=str(exc), retryable=True
+                        code="BRAVE_UNAVAILABLE",
+                        message=str(exc),
+                        retryable=exc.retryable,
                     ),
                 ),
             )

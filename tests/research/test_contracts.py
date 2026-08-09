@@ -128,6 +128,16 @@ def test_provider_contract_round_trip_and_bounded_payload() -> None:
         AgentRequest.model_validate(
             {**request.model_dump(), "input_json": {"payload": "x" * 20_001}}
         )
+    with pytest.raises(ValidationError, match="effort"):
+        AgentRequest(
+            call_id="call-2",
+            task="CRITIC",
+            effort=AgentEffort.LOW,
+            input_json={},
+            permitted_evidence_ids=(),
+            output_schema_name="critic-v1",
+            timeout_seconds=30,
+        )
 
 
 def test_validate_assessment_requires_evidence_card_and_score() -> None:

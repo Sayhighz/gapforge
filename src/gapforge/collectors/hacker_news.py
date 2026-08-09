@@ -80,7 +80,7 @@ class HackerNewsCollector:
                 request_count=budget.used,
                 warnings=(
                     SourceWarning(
-                        code="HN_UNAVAILABLE", message=str(exc), retryable=True
+                        code="HN_UNAVAILABLE", message=str(exc), retryable=exc.retryable
                     ),
                 ),
             )

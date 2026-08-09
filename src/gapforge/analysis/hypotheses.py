@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from gapforge.domain.contracts import (
     AlternativeKind,
     Competitor,
     GapHypothesis,
+    MissionOpportunityAssessment,
     ProblemHypothesis,
+    ProductHypothesis,
+    Verdict,
 )
 
 NON_SOFTWARE = {
@@ -60,3 +65,24 @@ def validate_gap_hypothesis(
         raise ValueError("gap references unpermitted user evidence")
     if not set(hypothesis.competitor_evidence_ids) <= permitted_competitor_evidence:
         raise ValueError("gap references unpermitted competitor evidence")
+
+
+def create_product_hypothesis(
+    *,
+    hypothesis_id: str,
+    assessment: MissionOpportunityAssessment,
+    explicit_request_id: str,
+    proposition: str,
+    created_at: datetime,
+) -> ProductHypothesis:
+    if assessment.verdict is not Verdict.VALIDATE:
+        raise ValueError("Product Hypothesis requires a VALIDATE assessment")
+    if not explicit_request_id.strip():
+        raise ValueError("Product Hypothesis requires an explicit request")
+    return ProductHypothesis(
+        id=hypothesis_id,
+        assessment_id=assessment.id,
+        explicit_request_id=explicit_request_id,
+        proposition=proposition,
+        created_at=created_at,
+    )

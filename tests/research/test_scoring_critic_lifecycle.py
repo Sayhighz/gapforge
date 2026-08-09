@@ -10,6 +10,7 @@ from gapforge.analysis.critic import (
     validate_critic_result,
 )
 from gapforge.analysis.hypotheses import (
+    create_product_hypothesis,
     validate_alternative_coverage,
     validate_gap_hypothesis,
     validate_problem_hypothesis,
@@ -17,6 +18,7 @@ from gapforge.analysis.hypotheses import (
 from gapforge.analysis.lifecycle import (
     ReopenEvidence,
     TrendObservation,
+    append_lifecycle_event,
     can_reopen_rejected,
     classify_trend,
     transition_lifecycle,
@@ -33,7 +35,9 @@ from gapforge.domain.contracts import (
     EvidenceCard,
     GapHypothesis,
     GapType,
+    LifecycleEvent,
     LifecycleState,
+    MissionOpportunityAssessment,
     ProblemHypothesis,
     QueryIntent,
     QueryIntentKind,
@@ -44,6 +48,7 @@ from gapforge.domain.contracts import (
 from gapforge.scoring.engine import (
     ScoringInputs,
     append_score_snapshot,
+    score_delta,
     score_opportunity,
     validation_decision,
 )
@@ -134,6 +139,41 @@ def test_geometric_mean_penalties_explanation_and_append_only_history() -> None:
     history = append_score_snapshot((), snapshot)
     with pytest.raises(ValueError, match="append-only"):
         append_score_snapshot(history, snapshot)
+
+
+def test_score_delta_and_lifecycle_history_are_append_only() -> None:
+    previous = score(60).model_copy(
+        update={"id": "s-old", "created_at": NOW - timedelta(days=1)}
+    )
+    current = score(80).model_copy(update={"id": "s-new", "created_at": NOW})
+    delta = score_delta(previous, current)
+    assert delta.final_score == 20
+    assert delta.evidence_strength == 20
+    discovered = LifecycleEvent(
+        id="event-1",
+        assessment_id="assessment-1",
+        from_state=None,
+        to_state=LifecycleState.DISCOVERED,
+        reason="first evidence",
+        created_at=NOW - timedelta(days=1),
+    )
+    researching = LifecycleEvent(
+        id="event-2",
+        assessment_id="assessment-1",
+        from_state=LifecycleState.DISCOVERED,
+        to_state=LifecycleState.RESEARCHING,
+        reason="threshold met",
+        created_at=NOW,
+    )
+    history = append_lifecycle_event(
+        append_lifecycle_event((), discovered), researching
+    )
+    assert [event.to_state for event in history] == [
+        LifecycleState.DISCOVERED,
+        LifecycleState.RESEARCHING,
+    ]
+    with pytest.raises(ValueError, match="IDs cannot be reused"):
+        append_lifecycle_event(history, researching)
 
 
 @pytest.mark.parametrize(
@@ -268,6 +308,25 @@ def test_hypotheses_are_falsifiable_allowlisted_and_cover_nonsoftware_alternativ
             gap(),
             permitted_user_evidence=frozenset({"e-1"}),
             permitted_competitor_evidence=frozenset(),
+        )
+
+
+def test_product_hypothesis_requires_explicit_request_after_validate() -> None:
+    assessment = MissionOpportunityAssessment(
+        id="assessment-1",
+        mission_revision_id=uuid4(),
+        opportunity_id="o-1",
+        lifecycle_state=LifecycleState.RESEARCH_MORE,
+        verdict=Verdict.RESEARCH_MORE,
+        assessed_at=NOW,
+    )
+    with pytest.raises(ValueError, match="VALIDATE"):
+        create_product_hypothesis(
+            hypothesis_id="product-1",
+            assessment=assessment,
+            explicit_request_id="request-1",
+            proposition="Automate reconciliation",
+            created_at=NOW,
         )
 
 

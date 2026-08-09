@@ -143,6 +143,58 @@ class ValidationDecision:
         return all(gate.passed for gate in self.gates)
 
 
+@dataclass(frozen=True, slots=True)
+class ScoreDelta:
+    opportunity_id: str
+    previous_snapshot_id: str
+    current_snapshot_id: str
+    evidence_strength: float
+    opportunity_fit: float
+    final_score: float
+    component_changes: tuple[tuple[str, float], ...]
+
+
+def score_delta(
+    previous: OpportunityScoreSnapshot,
+    current: OpportunityScoreSnapshot,
+) -> ScoreDelta:
+    if previous.opportunity_id != current.opportunity_id:
+        raise ValueError("score snapshots belong to different opportunities")
+    if current.created_at < previous.created_at:
+        raise ValueError("score delta must be chronological")
+    previous_components = {
+        **previous.evidence_strength.values,
+        **previous.opportunity_fit.values,
+    }
+    current_components = {
+        **current.evidence_strength.values,
+        **current.opportunity_fit.values,
+    }
+    if previous_components.keys() != current_components.keys():
+        raise ValueError("score snapshots use incompatible component sets")
+    changes = tuple(
+        (name, round(current_components[name] - previous_components[name], 6))
+        for name in sorted(current_components)
+    )
+    return ScoreDelta(
+        opportunity_id=current.opportunity_id,
+        previous_snapshot_id=previous.id,
+        current_snapshot_id=current.id,
+        evidence_strength=round(
+            weighted_axis(current.evidence_strength)
+            - weighted_axis(previous.evidence_strength),
+            6,
+        ),
+        opportunity_fit=round(
+            weighted_axis(current.opportunity_fit)
+            - weighted_axis(previous.opportunity_fit),
+            6,
+        ),
+        final_score=round(current.final_score - previous.final_score, 6),
+        component_changes=changes,
+    )
+
+
 def validation_decision(
     *,
     card: EvidenceCard | None,

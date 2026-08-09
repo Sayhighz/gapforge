@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import random
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, TypeVar
+from typing import Protocol
 
 import httpx
 
@@ -36,7 +38,9 @@ class CollectorBudgetExceeded(CollectorError):
 
 
 class CollectorResponseError(CollectorError):
-    pass
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 async def collect_isolated(
@@ -77,8 +81,8 @@ class RequestBudget:
         self.used += 1
 
 
-T = TypeVar("T")
 Sleeper = Callable[[float], Awaitable[None]]
+Jitter = Callable[[float, float], float]
 
 
 async def bounded_get_json(
@@ -90,17 +94,52 @@ async def bounded_get_json(
     headers: dict[str, str] | None = None,
     attempts: int = 3,
     sleeper: Sleeper = asyncio.sleep,
+    jitter: Jitter = random.uniform,
 ) -> object:
-    """Fetch bounded JSON with deterministic retry classes and no secret-bearing errors."""
+    return await bounded_request_json(
+        client,
+        "GET",
+        url,
+        budget=budget,
+        params=params,
+        headers=headers,
+        attempts=attempts,
+        sleeper=sleeper,
+        jitter=jitter,
+    )
+
+
+async def bounded_request_json(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    budget: RequestBudget,
+    params: dict[str, str | int] | None = None,
+    data: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    attempts: int = 3,
+    sleeper: Sleeper = asyncio.sleep,
+    jitter: Jitter = random.uniform,
+) -> object:
+    """Fetch bounded JSON with safe retries and no secret-bearing errors."""
     if not 1 <= attempts <= 3:
         raise ValueError("attempts must be between 1 and 3")
     last_error: Exception | None = None
+    last_retryable = False
     for attempt in range(attempts):
         budget.consume()
+        response: httpx.Response | None = None
         try:
-            response = await client.get(
-                url, params=params, headers=headers, timeout=DEFAULT_TIMEOUT
+            request = client.build_request(
+                method,
+                url,
+                params=params,
+                data=data,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
             )
+            response = await client.send(request, stream=True, follow_redirects=False)
             if response.status_code in {429, 500, 502, 503, 504}:
                 raise httpx.HTTPStatusError(
                     "transient source response",
@@ -108,9 +147,22 @@ async def bounded_get_json(
                     response=response,
                 )
             response.raise_for_status()
-            if len(response.content) > MAX_RESPONSE_BYTES:
-                raise CollectorResponseError("source response exceeded byte limit")
-            return response.json()
+            declared = response.headers.get("content-length")
+            if declared:
+                try:
+                    declared_size = int(declared)
+                except ValueError as exc:
+                    raise CollectorResponseError(
+                        "source response has invalid length"
+                    ) from exc
+                if declared_size > MAX_RESPONSE_BYTES:
+                    raise CollectorResponseError("source response exceeded byte limit")
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise CollectorResponseError("source response exceeded byte limit")
+            return json.loads(body)
         except (
             httpx.TimeoutException,
             httpx.NetworkError,
@@ -126,17 +178,22 @@ async def bounded_get_json(
                 503,
                 504,
             }
+            last_retryable = retryable
             if (
                 not retryable
                 or attempt + 1 >= attempts
                 or budget.used >= budget.maximum
             ):
                 break
-            await sleeper(0.05 * (2**attempt))
-        except (ValueError, UnicodeDecodeError) as exc:
+            await sleeper(0.05 * (2**attempt) + jitter(0.0, 0.02))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise CollectorResponseError("source returned invalid JSON") from exc
+        finally:
+            if response is not None:
+                await response.aclose()
     raise CollectorResponseError(
-        f"source request failed: {type(last_error).__name__}"
+        f"source request failed: {type(last_error).__name__}",
+        retryable=last_retryable,
     ) from last_error
 
 
